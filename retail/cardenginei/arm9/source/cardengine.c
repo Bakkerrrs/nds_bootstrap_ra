@@ -1614,8 +1614,8 @@ void myIrqHandlerVcount(void) {
 	}
 
 	#if RA_READER_ENABLED
-	ra_reader_tick();
 	ra_overlay_tick();
+	ra_reader_tick();
 	#endif
 
 	/* #ifndef TWLSDK

@@ -31,8 +31,15 @@
 /* Bytes of game RAM captured per frame. */
 #define RA_SNAPSHOT_WINDOW 0x20
 
-/* Start of the DS main RAM as the game sees it. */
-#define RA_DEFAULT_WATCH_ADDRESS 0x02000000
+/*
+    Diagnostic: the overlay draws nothing, and the solid-bar test says the layer is
+    not reaching the screen rather than the glyphs being wrong. So point the window
+    at the sub engine's display registers instead of game RAM. data[] then shows
+    DISPCNT, the four BGxCNT and the scroll registers exactly as they stand after
+    the overlay has written them, which separates "the writes do not stick" from
+    "the writes stick but something else is wrong".
+*/
+#define RA_DEFAULT_WATCH_ADDRESS 0x04001000
 
 /*
     Top of main RAM. A 3DS in DSi mode exposes 32MB at 0x0C000000; a DSi has 16MB.
