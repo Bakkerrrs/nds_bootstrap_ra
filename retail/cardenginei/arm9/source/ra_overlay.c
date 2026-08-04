@@ -1,18 +1,22 @@
 /*
     RetroAchievements support for nds-bootstrap -- on-screen text overlay (ARM9).
 
-    Composites text over the running game on the sub engine's BG0, which the display
-    measurements found spare.
+    Composites text over the running game on a spare sub-engine background layer.
 
     The lesson from hardware: a game's VRAM layout is not fixed. This game moved its
     BG2 character base onto the block the overlay had chosen at boot, so holding that
     block meant overwriting the game's tiles and wrecking its graphics. Nothing here
     may assume a spot stays free.
 
-    So the overlay negotiates rather than insists. It picks a block only when about to
-    show, from the live registers; it re-checks every frame while visible and gives the
-    block back the moment the game wants it; and it restores what it borrowed. A
-    notification that corrupts the game is worse than no notification.
+    The same applies to the layer. This game enables its own sub BG0 at times, with a
+    character base of its own, so treating BG0 as the overlay's by right displaced a
+    layer the game was using. The layer is chosen at show time too, from whichever is
+    currently switched off.
+
+    So the overlay negotiates rather than insists. It picks a layer and a block only
+    when about to show, from the live registers; it re-checks every frame while visible
+    and gives them back the moment the game wants them; and it restores what it
+    borrowed. A notification that corrupts the game is worse than no notification.
 
     This file is part of nds-bootstrap and is licensed under the GPL-3.0,
     the same terms as the rest of the project.
@@ -25,8 +29,9 @@
 #define SUB_DISPCNT  (*(vu32*)0x04001000)
 #define SUB_BG0CNT   (*(vu16*)0x04001008)
 #define SUB_BGCNT(i) (*(vu16*)(0x04001008 + (i) * 2))
-#define SUB_BG0HOFS  (*(vu16*)0x04001010)
-#define SUB_BG0VOFS  (*(vu16*)0x04001012)
+/* Scroll is per layer, four bytes apart -- not always BG0's. */
+#define SUB_BGHOFS(i) (*(vu16*)(0x04001010 + (i) * 4))
+#define SUB_BGVOFS(i) (*(vu16*)(0x04001012 + (i) * 4))
 
 /* Standard sub-engine BG palette: 16 banks of 16 in 4bpp mode. */
 #define SUB_BG_PALETTE ((vu16*)0x05000400)
@@ -79,9 +84,12 @@ static u32  stateMagic;
 static u32  framesLeft;   /* non-zero while visible */
 static u32  demoCounter;
 static int  block;        /* character base block currently borrowed */
-static u16  savedBg0Cnt;
+static int  layer;        /* background layer currently borrowed */
+static u16  savedBgCnt;
+static u16  savedHofs;
+static u16  savedVofs;
 static u16  savedPalette[16];
-static bool savedDispcntBg0;
+static bool savedDispcntBg;
 
 /* Read into the snapshot, so the negotiation is observable rather than guessed at. */
 u32 raOverlayShows;
@@ -93,17 +101,20 @@ u32 raOverlayEvicted;  /* the game reclaimed the block mid-notification */
     from the live registers every time, because it changes as the game switches
     scenes -- which is the whole reason a block chosen at boot is not safe to keep.
 */
-static void surveyBlocks(bool* used) {
+static void surveyBlocks(bool* used, int skipLayer) {
 	int i, k;
 
 	for (i = 0; i < CHAR_BLOCKS; i++) {
 		used[i] = false;
 	}
 
-	for (i = 1; i < 4; i++) {  /* BG0 is the layer being borrowed */
+	for (i = 0; i < 4; i++) {
 		const u16 cnt = SUB_BGCNT(i);
 		int charBase, screenBase, mapBlocks;
 
+		if (i == skipLayer) {
+			continue;  /* the layer being borrowed */
+		}
 		if (!(SUB_DISPCNT & (1u << (8 + i)))) {
 			continue;  /* layer off, so its VRAM is not in use */
 		}
@@ -132,7 +143,21 @@ static void surveyBlocks(bool* used) {
 /* Tiles at the start of the borrowed block, map 2K in: one block covers both. */
 static vu32* tilesOf(int b)   { return (vu32*)(SUB_BG_VRAM + b * 0x4000); }
 static vu16* mapOf(int b)     { return (vu16*)(SUB_BG_VRAM + b * 0x4000 + 0x800); }
-static u16   bg0CntFor(int b) { return (u16)((b << 2) | (((b * 8) + 1) << 8)); }
+static u16   bgCntFor(int b)  { return (u16)((b << 2) | (((b * 8) + 1) << 8)); }
+
+/*
+    A layer the game currently has switched off. Taking one it is using would displace
+    its graphics, which is exactly the mistake that corrupted them before.
+*/
+static int chooseLayer(void) {
+	int i;
+	for (i = 0; i < 4; i++) {
+		if (!(SUB_DISPCNT & (1u << (8 + i)))) {
+			return i;
+		}
+	}
+	return -1;
+}
 
 static void draw(int b) {
 	vu32* tiles = tilesOf(b);
@@ -173,7 +198,13 @@ static void show(void) {
 	bool used[CHAR_BLOCKS];
 	int b;
 
-	surveyBlocks(used);
+	const int l = chooseLayer();
+	if (l < 0) {
+		raOverlayDenied++;
+		return;  /* every layer in use: stay quiet rather than displace one */
+	}
+
+	surveyBlocks(used, l);
 	for (b = 0; b < CHAR_BLOCKS; b++) {
 		if (!used[b]) {
 			break;
@@ -181,19 +212,22 @@ static void show(void) {
 	}
 	if (b == CHAR_BLOCKS) {
 		raOverlayDenied++;
-		return;  /* nothing spare: stay quiet rather than corrupt the game */
+		return;  /* no spare VRAM: stay quiet rather than corrupt the game */
 	}
 
+	layer = l;
 	block = b;
-	savedBg0Cnt = SUB_BG0CNT;
-	savedDispcntBg0 = (SUB_DISPCNT & (1u << 8)) != 0;
+	savedBgCnt = SUB_BGCNT(l);
+	savedHofs  = SUB_BGHOFS(l);
+	savedVofs  = SUB_BGVOFS(l);
+	savedDispcntBg = (SUB_DISPCNT & (1u << (8 + l))) != 0;
 
 	draw(b);
 
-	SUB_BG0CNT  = bg0CntFor(b);
-	SUB_BG0HOFS = 0;
-	SUB_BG0VOFS = 0;
-	SUB_DISPCNT |= (1u << 8);
+	SUB_BGCNT(l)  = bgCntFor(b);
+	SUB_BGHOFS(l) = 0;
+	SUB_BGVOFS(l) = 0;
+	SUB_DISPCNT |= (1u << (8 + l));
 
 	framesLeft = OVERLAY_SHOW_FRAMES;
 	raOverlayShows++;
@@ -204,9 +238,11 @@ static void hide(void) {
 
 	framesLeft = 0;
 
-	SUB_BG0CNT = savedBg0Cnt;
-	if (!savedDispcntBg0) {
-		SUB_DISPCNT &= ~(1u << 8);
+	SUB_BGCNT(layer)  = savedBgCnt;
+	SUB_BGHOFS(layer) = savedHofs;
+	SUB_BGVOFS(layer) = savedVofs;
+	if (!savedDispcntBg) {
+		SUB_DISPCNT &= ~(1u << (8 + layer));
 	}
 	for (g = 0; g < 16; g++) {
 		SUB_BG_PALETTE[OVERLAY_PAL_BANK * 16 + g] = savedPalette[g];
@@ -231,7 +267,7 @@ void ra_overlay_tick(void) {
 		    what wrecked its graphics before: it moved a character base onto this
 		    block and the overlay kept rewriting the tiles underneath.
 		*/
-		surveyBlocks(used);
+		surveyBlocks(used, layer);
 		if (used[block]) {
 			raOverlayEvicted++;
 			hide();
@@ -244,10 +280,10 @@ void ra_overlay_tick(void) {
 		}
 
 		/* Hold the layer: the game rewrites these registers itself. */
-		SUB_BG0CNT  = bg0CntFor(block);
-		SUB_BG0HOFS = 0;
-		SUB_BG0VOFS = 0;
-		SUB_DISPCNT |= (1u << 8);
+		SUB_BGCNT(layer)  = bgCntFor(block);
+		SUB_BGHOFS(layer) = 0;
+		SUB_BGVOFS(layer) = 0;
+		SUB_DISPCNT |= (1u << (8 + layer));
 		return;
 	}
 
