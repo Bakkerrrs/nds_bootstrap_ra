@@ -130,12 +130,26 @@ typedef struct raSnapshot {
 	u32 vramCr0;         /* +0x58  bank control bytes A..D */
 	u32 vramCr1;         /* +0x5C  banks E..I, top byte unused */
 
-	u32 cardReads;       /* +0x60 */
-	u32 irqEnables;      /* +0x64 */
-	u32 srcAddress;      /* +0x68  address data[] was copied from */
-	u32 length;          /* +0x6C  valid bytes in data[] */
+	/*
+	    The BG control registers, packed two per word. A text overlay needs the sub
+	    engine's free BG0 plus somewhere to put its tiles and map, and the only
+	    mappable spare VRAM (bank H) would overlap bank C, which is already the sub
+	    BG. So the tiles have to go in a hole in bank C -- and these registers say
+	    which character and screen base blocks the game has taken, which is what
+	    makes a hole findable instead of guessed.
+	*/
+	u32 bgCntMain01;     /* +0x60  BG0CNT | BG1CNT << 16 */
+	u32 bgCntMain23;     /* +0x64 */
+	u32 bgCntSub01;      /* +0x68 */
+	u32 bgCntSub23;      /* +0x6C */
+	u32 vramCr2;         /* +0x70  bank I, low byte */
 
-	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x70 */
+	u32 cardReads;       /* +0x74 */
+	u32 irqEnables;      /* +0x78 */
+	u32 srcAddress;      /* +0x7C  address data[] was copied from */
+	u32 length;          /* +0x80  valid bytes in data[] */
+
+	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x84 */
 } raSnapshot;
 
 #endif /* RA_H */

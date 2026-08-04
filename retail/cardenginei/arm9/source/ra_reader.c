@@ -64,7 +64,12 @@ static void sampleMemoryMap(void) {
 	snapshot.dispCntMain = *(vu32*)0x04000000;
 	snapshot.dispCntSub  = *(vu32*)0x04001000;
 	snapshot.vramCr0     = *(vu32*)0x04000240;  /* banks A..D */
-	snapshot.vramCr1     = *(vu32*)0x04000244;  /* banks E..I */
+	snapshot.vramCr1     = *(vu32*)0x04000244;  /* banks E..H */
+	snapshot.vramCr2     = *(vu8*)0x04000248;   /* bank I */
+	snapshot.bgCntMain01 = *(vu32*)0x04000008;
+	snapshot.bgCntMain23 = *(vu32*)0x0400000C;
+	snapshot.bgCntSub01  = *(vu32*)0x04001008;
+	snapshot.bgCntSub23  = *(vu32*)0x0400100C;
 }
 
 /*
