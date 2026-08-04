@@ -199,3 +199,73 @@ window does not do — it is a phase 1 design requirement, not a retrofit.
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: on-console UX
+
+## Phase 0.5 — on-screen notification
+
+An unlock nobody can see is worth little, so feedback moved ahead of the rest of
+the reader work. It also replaced reading hex out of the RAM viewer as the way to
+observe anything.
+
+**The flash works everywhere.** `ra_toast_flash()` drives the master brightness
+registers, which needs nothing from the game — no VRAM bank, no background layer,
+no palette entry, no OAM slot. Confirmed on hardware without disturbing the game.
+The previous register value is saved and restored, since games use master
+brightness for fades.
+
+**Text is possible but conditional.** Measured on *Space Invaders Extreme*:
+
+| | |
+| --- | --- |
+| Main engine | BG0 (3D) + OBJ enabled; BG1–3 free |
+| Sub engine | BG0 free; BG1–3 + OBJ enabled |
+| VRAM banks | A,B texture · C sub BG · D sub OBJ · E,F,G texture palette · **H disabled** · I sub OBJ ext palette |
+| Sub BG maps in use | `0x06200000`–`0x06204FFF` |
+| Sub BG tiles in use | char base 3, `0x0620C000`+ |
+| **Free in bank C** | **`0x06205000`–`0x0620BFFF`, ~28K** |
+
+So there is room: sub BG0 is free, its priority is already 0 so it would draw on
+top, char base block 2 is untouched and there are spare screen base blocks. But
+the main engine has *no* bank mapped to BG at all, so its three free layers have
+nowhere to put tiles, and bank H cannot help because it would overlap bank C.
+
+None of this generalises. Every game divides VRAM and layers differently, so the
+overlay has to decide at runtime from these same registers — which is why the
+measuring code is the code that will decide. Expect "text where the game leaves
+room, flash where it does not"; guaranteeing text everywhere would mean pausing
+the game, which is worse than a flash.
+
+### Where the overlay's code lives
+
+Not in the cardengine: a font plus drawing routines will not fit in 840 bytes.
+Not in the in-game menu either — `loadInGameMenu()` backs the game's RAM up to a
+page file and loads the menu *over* it, which is why the menu pauses the game, so
+its font and `print()` are unreachable while a game runs.
+
+The precedent that works is the colour LUT. It is a **separate ARM9 binary**,
+loaded by the bootloader to its own address and called from the cardengine by
+function pointer:
+
+```c
+volatile void (*code)(bool) = (volatile void*)CARDENGINEI_ARM9_CLUT_LOCATION;
+(*code)(processExtPalettes);
+```
+
+A `cardenginei_arm9_ra` binary following that pattern is where the overlay
+belongs — and it is also the answer to the phase 2 blocker. `rc_client` did not
+fit in the cardengine's 12K, which sent this work looking for spare RAM; the
+answer was never to find a block of RAM but to follow this pattern. One mechanism
+covers both.
+
+### The RAM above the ROM cache (closed, unresolved)
+
+Chased at length and worth recording so it is not chased again. On a 3DS the ROM
+cache ends at `0x0DFCC000`, leaving 208K to the 32MB top. That memory is real and
+distinct — a DMA write there read back intact and left the candidate mirror 16MB
+lower untouched — but a **CPU store to it takes a Data Abort**, and none of the
+MPU state explains why: region 3 spans `0x08000000` +128MB, covering both the
+cache where stores work and the fault site, with data permission `0x1`
+(privileged read/write). Cause undetermined.
+
+It no longer matters. The separate-binary approach puts code and state in the
+`0x02xxxxxx` space instead, which is required anyway: region 3's *instruction*
+permission is `0x0`, so code could never have executed from `0x0C`/`0x0D`.
