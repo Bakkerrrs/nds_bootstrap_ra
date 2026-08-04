@@ -32,14 +32,17 @@
 #define RA_SNAPSHOT_WINDOW 0x20
 
 /*
-    Diagnostic: the overlay draws nothing, and the solid-bar test says the layer is
-    not reaching the screen rather than the glyphs being wrong. So point the window
-    at the sub engine's display registers instead of game RAM. data[] then shows
-    DISPCNT, the four BGxCNT and the scroll registers exactly as they stand after
-    the overlay has written them, which separates "the writes do not stick" from
-    "the writes stick but something else is wrong".
+    Diagnostic. The registers read back exactly as written -- DISPCNT_SUB has bit 8
+    set and BG0CNT is 0x0A08 -- so the game is not reverting them and the layer is
+    configured. Nothing appears anyway, and a bad palette would show black letters
+    rather than nothing at all, so the suspect is the map or the tiles.
+
+    Point the window at the map entries the overlay writes for its message. Each
+    should read 0xF001, 0xF002, ... (tile index with palette bank 15), so in a
+    byte-wise dump: 01 F0 02 F0 03 F0. Anything else means the writes are not
+    landing where BG0 reads from.
 */
-#define RA_DEFAULT_WATCH_ADDRESS 0x04001000
+#define RA_DEFAULT_WATCH_ADDRESS 0x06205290
 
 /*
     Top of main RAM. A 3DS in DSi mode exposes 32MB at 0x0C000000; a DSi has 16MB.
