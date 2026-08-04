@@ -104,18 +104,18 @@ typedef struct raSnapshot {
 	u32 mpuRegion[8];    /* +0x20 */
 
 	/*
-	    Mirror test. A DMA round-trip through 0x0DFCC000 succeeded, which was read
-	    as proof that the RAM up there is real -- but if main RAM actually ends at
-	    16MB then that address is an alias of aliasAddr, 16MB lower, and the
-	    round-trip only proved that writing and reading the same existing byte
-	    works. So write the pattern at the target and watch the candidate alias:
-	    if it changes to match, the two are the same memory and there is nothing
-	    new to claim.
+	    What may be done with those regions. The addresses above the ROM cache turn
+	    out to be real, distinct memory -- a DMA write there left the candidate
+	    mirror 16MB lower untouched -- and region 3 covers both them and the cache.
+	    So the store that faulted was not about coverage. The cardengine only ever
+	    *reads* the cache with the CPU, since fills go through NDMA, which fits a
+	    region that permits loads and not stores. These registers settle it: four
+	    bits per region for data, four for instructions.
 	*/
-	u32 aliasAddr;       /* +0x40  target minus 16MB */
-	u32 aliasBefore;     /* +0x44  first word at aliasAddr before the write */
-	u32 aliasAfter;      /* +0x48  and after it -- equal to the pattern means alias */
-	u32 targetReadBack;  /* +0x4C  first word read back from the target */
+	u32 mpuDataPerm;     /* +0x40 */
+	u32 mpuInstrPerm;    /* +0x44 */
+	u32 mpuCacheable;    /* +0x48 */
+	u32 mpuBufferable;   /* +0x4C */
 
 	u32 cardReads;       /* +0x50 */
 	u32 irqEnables;      /* +0x54 */

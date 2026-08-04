@@ -37,3 +37,25 @@ BEGIN_ASM_FUNC ra_mpu_read_regions
 	mrc	p15, 0, r1, c6, c7, 0
 	str	r1, [r0, #28]
 	bx	lr
+
+@---------------------------------------------------------------------------------
+BEGIN_ASM_FUNC ra_mpu_read_perms
+@ void ra_mpu_read_perms(u32 out[4]);
+@ [0] extended data access permission   (4 bits per region)
+@ [1] extended instruction access permission
+@ [2] data cacheable bits               (1 bit per region)
+@ [3] write buffer control
+@
+@ The regions say which addresses are covered; these say what may be done with
+@ them. A region that permits reads but not writes explains a store faulting where
+@ loads succeed.
+@---------------------------------------------------------------------------------
+	mrc	p15, 0, r1, c5, c0, 2
+	str	r1, [r0, #0]
+	mrc	p15, 0, r1, c5, c0, 3
+	str	r1, [r0, #4]
+	mrc	p15, 0, r1, c2, c0, 0
+	str	r1, [r0, #8]
+	mrc	p15, 0, r1, c3, c0, 0
+	str	r1, [r0, #12]
+	bx	lr
