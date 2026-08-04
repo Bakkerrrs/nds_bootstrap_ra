@@ -20,6 +20,7 @@ without rewriting the reader:
 | Module | Responsibility | Status |
 | --- | --- | --- |
 | `ra_reader` | Read the game's RAM. Knows nothing about RetroAchievements. | phase 0 done |
+| `ra_overlay` | Show a notification over the running game. Knows nothing about RetroAchievements either. | proven, needs a real font |
 | `ra_client` | Wrap `rcheevos`' `rc_client`; decide what to watch, evaluate, fire unlocks. | not started |
 | `ra_net` | HTTP(S) transport to the RA servers. `rcheevos` ships no networking. | not started |
 
@@ -60,23 +61,20 @@ by `hookIPC_SYNC()` in `retail/cardenginei/arm9/source/misc.c`. Upstream only
 installs it for the colour-LUT feature; this fork also installs it when the reader
 is enabled, and `myIrqEnable()` forces `IRQ_VCOUNT` on to guarantee it fires.
 
-`ra_reader_tick()` copies `RA_SNAPSHOT_WINDOW` (256) bytes from
-`RA_DEFAULT_WATCH_ADDRESS` (`0x02000000`) into a snapshot buffer once per frame.
+`ra_reader_tick()` copies `RA_SNAPSHOT_WINDOW` bytes from `RA_DEFAULT_WATCH_ADDRESS`
+into a snapshot buffer once per frame. Both are diagnostic knobs at the moment: the
+window has been pointed at game RAM, at the sub engine's display registers and at
+the overlay's own VRAM in turn, which is how most of what is written here was
+established. Phase 1 replaces the single window with a real watchlist.
 
 The snapshot lives in the cardengine's own `.bss`, which is inside the region
 reserved for the cardengine, so the game can never touch it. `.bss` is **not**
 zeroed — an injected binary has no crt0 to do it — so the header is validated by
 magic on every tick and nothing assumes a known initial state.
 
-```c
-typedef struct raSnapshot {
-	u8  magic[4];    /* 'R','A','0','S' */
-	u32 frame;       /* incremented once per captured frame */
-	u32 srcAddress;
-	u32 length;
-	u8  data[RA_SNAPSHOT_WINDOW];
-} raSnapshot;
-```
+The snapshot doubles as the debug channel for everything in this document: it is
+read with the in-game menu's RAM viewer, so its exact layout changes as diagnostics
+come and go. See `raSnapshot` in `retail/common/include/ra.h` for the current one.
 
 ### Observing it on hardware
 
@@ -94,9 +92,6 @@ viewer, navigate to that address, and you should see:
 - the ASCII bytes `52 41 30 53` (`RA0S`),
 - a frame counter climbing once per frame,
 - then a live mirror of `0x02000000`.
-
-The counters before `data[]` are the diagnostic: they mark each link the reader
-depends on, so a buffer that never fills in still says where things stopped.
 
 Confirmed working on a 3DS running *Space Invaders Extreme* (`cardenginei_arm9`),
 with the whole chain intact:
@@ -121,6 +116,8 @@ memory that actually changes needs the parameterised window, which is phase 1.
 | `retail/common/include/ra.h` | Shared definitions, snapshot layout, master switch |
 | `retail/common/include/ra_reader.h` | Reader API |
 | `retail/cardenginei/arm9/source/ra_reader.c` | Reader implementation |
+| `retail/common/include/ra_overlay.h` | Notification API |
+| `retail/cardenginei/arm9/source/ra_overlay.c` | Notification implementation |
 | `tools/ra_snapshot_addr.sh` | Prints the snapshot address from the link maps |
 
 `RA_READER_ENABLED` in `ra.h` is the kill switch. Set it to `0` and the cardengine
@@ -191,70 +188,99 @@ DS-Homebrew / RetroAchievements Discords before any hardware is bought. #3 needs
 the reader to resolve pointer chains freshly each frame, which the current fixed
 window does not do — it is a phase 1 design requirement, not a retrofit.
 
-## Status
-
-- [x] Baseline: unmodified nds-bootstrap builds
-- [x] Phase 0: per-frame game RAM snapshot — **confirmed on hardware**
-- [ ] Phase 1: parameterised watchlist + pointer chains
-- [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
-- [ ] Phase 3: real network, softcore unlocks
-- [ ] Phase 4: on-console UX
-
 ## Phase 0.5 — on-screen notification
 
-An unlock nobody can see is worth little, so feedback moved ahead of the rest of
-the reader work. It also replaced reading hex out of the RAM viewer as the way to
-observe anything.
+Brought forward ahead of the rest of the reader work: an unlock nobody can see is
+worth little, and the alternative to a visible channel was reading hex out of the
+in-game menu's RAM viewer for every test.
 
-**The flash works everywhere.** `ra_toast_flash()` drives the master brightness
-registers, which needs nothing from the game — no VRAM bank, no background layer,
-no palette entry, no OAM slot. Confirmed on hardware without disturbing the game.
-The previous register value is saved and restored, since games use master
-brightness for fades.
+**Confirmed on hardware.** Text draws over a running DS game on a 3DS, without
+pausing it, and the game keeps running normally underneath. That was the part
+genuinely in doubt.
 
-**Text is possible but conditional.** Measured on *Space Invaders Extreme*:
+### How it works
 
-| | |
-| --- | --- |
-| Main engine | BG0 (3D) + OBJ enabled; BG1–3 free |
-| Sub engine | BG0 free; BG1–3 + OBJ enabled |
-| VRAM banks | A,B texture · C sub BG · D sub OBJ · E,F,G texture palette · **H disabled** · I sub OBJ ext palette |
-| Sub BG maps in use | `0x06200000`–`0x06204FFF` |
-| Sub BG tiles in use | char base 3, `0x0620C000`+ |
-| **Free in bank C** | **`0x06205000`–`0x0620BFFF`, ~28K** |
+The overlay borrows a background layer and a slice of VRAM from the sub engine for
+the few seconds a notification is up, then gives them back:
 
-So there is room: sub BG0 is free, its priority is already 0 so it would draw on
-top, char base block 2 is untouched and there are spare screen base blocks. But
-the main engine has *no* bank mapped to BG at all, so its three free layers have
-nowhere to put tiles, and bank H cannot help because it would overlap bank C.
+1. At show time — not at boot — read the live registers and pick a background layer
+   the game currently has switched off.
+2. Survey which 16K blocks of sub BG VRAM the enabled layers use, for both character
+   bases and maps, and pick a free one. Tiles go at its start, the map 2K in, so a
+   single block covers both.
+3. Draw, set the borrowed layer to priority 0 so it sits above the game's, and
+   enable it.
+4. Every frame, re-survey. If the game starts using the block, give it back
+   immediately.
+5. On hide, restore the layer's control register, its scroll registers, the DISPCNT
+   bit and the palette bank.
 
-None of this generalises. Every game divides VRAM and layers differently, so the
-overlay has to decide at runtime from these same registers — which is why the
-measuring code is the code that will decide. Expect "text where the game leaves
-room, flash where it does not"; guaranteeing text everywhere would mean pausing
-the game, which is worse than a flash.
+If no layer is free, or no block is free, it stays quiet. **A notification that
+corrupts the game is worse than no notification.**
+
+Counters — `shows`, `denied`, `evicted` — go into the snapshot, so how often the
+overlay gets what it asks for is measured rather than inferred from glitches. On
+*Space Invaders Extreme*: 4 shows, 0 denied, 1 evicted.
+
+### Why it negotiates
+
+Every version that assumed a resource was the overlay's by right corrupted the
+game's graphics, twice for the same underlying reason:
+
+- The block chosen at boot stopped being free. The game moved its BG2 character base
+  onto it mid-play, and a repair loop that rewrote the tiles each frame was
+  destroying the game's own tiles underneath.
+- BG0 was treated as the overlay's layer. This game enables its own sub BG0 at
+  times, with a character base of its own, so taking it displaced a layer in use.
+
+A game's layer and VRAM allocation **changes while it runs**. Anything the overlay
+wants has to be asked for at the moment it is needed and handed back on demand.
+
+### What this means for the real notification
+
+It is **opportunistic by nature**. On a game that keeps all four sub layers busy
+there is nowhere to draw, and no amount of engineering changes that short of
+pausing the game — which is worse than not showing text. Unlocks will need queuing
+until a slot frees up rather than being dropped.
+
+The current version is a feasibility proof, not the finished notification: one fixed
+message, glyphs stored in message order so there is no font and no lookup table.
+That is what let it fit in the cardengine at all, and it is why the real one belongs
+in the separate ARM9 binary described below.
+
+### Three hardware lessons, each of which cost a flash cycle
+
+- **DS VRAM ignores 8-bit writes.** The tiles were built a byte at a time and simply
+  never got written, leaving every pixel at index 0 — transparent. A fully correct,
+  fully configured layer drew nothing. Registers, map and palette all worked because
+  they happened to use halfword writes.
+- **The cardengine's `.bss` is never zeroed.** The bootloader copies only the loaded
+  image and an injected binary has no crt0, so a `static bool` guard starts as
+  whatever was in RAM. Guard state with a magic value.
+- **Display resource ownership is dynamic**, as above.
 
 ### Where the overlay's code lives
 
-Not in the cardengine: a font plus drawing routines will not fit in 840 bytes.
-Not in the in-game menu either — `loadInGameMenu()` backs the game's RAM up to a
-page file and loads the menu *over* it, which is why the menu pauses the game, so
-its font and `print()` are unreachable while a game runs.
+Not in the cardengine: a font plus layout will not fit in ~840 bytes, and fitting
+even this proof meant stripping the measurement scaffolding out.
 
-The precedent that works is the colour LUT. It is a **separate ARM9 binary**,
-loaded by the bootloader to its own address and called from the cardengine by
-function pointer:
+Not in the in-game menu either — `loadInGameMenu()` backs the game's RAM up to a page
+file and loads the menu *over* it, which is why the menu pauses the game, so its font
+and `print()` are unreachable while a game runs.
+
+The precedent that works is the colour LUT: a **separate ARM9 binary**, loaded by the
+bootloader to its own address and called from the cardengine by function pointer.
 
 ```c
 volatile void (*code)(bool) = (volatile void*)CARDENGINEI_ARM9_CLUT_LOCATION;
 (*code)(processExtPalettes);
 ```
 
-A `cardenginei_arm9_ra` binary following that pattern is where the overlay
-belongs — and it is also the answer to the phase 2 blocker. `rc_client` did not
-fit in the cardengine's 12K, which sent this work looking for spare RAM; the
-answer was never to find a block of RAM but to follow this pattern. One mechanism
-covers both.
+A `cardenginei_arm9_ra` binary following that pattern is where the overlay belongs —
+and it is also the answer to the phase 2 blocker. `rc_client` did not fit in the
+cardengine's 12K, which sent this work hunting for spare RAM; the answer was never to
+find a block of RAM but to stop putting code in the cardengine. One mechanism covers
+both.
 
 ### The RAM above the ROM cache (closed, unresolved)
 
@@ -269,3 +295,15 @@ cache where stores work and the fault site, with data permission `0x1`
 It no longer matters. The separate-binary approach puts code and state in the
 `0x02xxxxxx` space instead, which is required anyway: region 3's *instruction*
 permission is `0x0`, so code could never have executed from `0x0C`/`0x0D`.
+
+## Status
+
+- [x] Baseline: unmodified nds-bootstrap builds
+- [x] Phase 0: per-frame game RAM snapshot — **confirmed on hardware**
+- [x] Phase 0.5: text notification over a running game — **confirmed on hardware**
+- [ ] Next: `cardenginei_arm9_ra`, a separate ARM9 binary for RA code, following the
+      colour LUT's pattern. Unblocks both a real font for the overlay and phase 2.
+- [ ] Phase 1: parameterised watchlist + pointer chains
+- [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
+- [ ] Phase 3: real network, softcore unlocks
+- [ ] Phase 4: rich presence, achievement list, login status
