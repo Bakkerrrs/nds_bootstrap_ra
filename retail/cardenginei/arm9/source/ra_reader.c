@@ -27,7 +27,9 @@ extern cardengineArm9* volatile ce9;
     Aligned to 16 because the in-game menu's RAM viewer can only jump to
     addresses that are a multiple of 0x10.
 */
-static raSnapshot snapshot __attribute__((aligned(16)));
+/* Global so the link map names it; tools/ra_snapshot_addr.sh reads it from there. */
+raSnapshot raSnapshotBuffer __attribute__((aligned(16)));
+#define snapshot raSnapshotBuffer
 
 static u32 watchAddress = RA_DEFAULT_WATCH_ADDRESS;
 static u32 watchLength  = RA_SNAPSHOT_WINDOW;
@@ -75,6 +77,9 @@ static void probeReservedRegion(void) {
 
 	snapshot.probeBase = 0;
 
+	if (!RA_PROBE_ENABLED) {
+		return;
+	}
 	if (!ce9 || ce9->consoleModel == 0) {
 		return;  /* only the 3DS has memory above 0x0D000000 */
 	}

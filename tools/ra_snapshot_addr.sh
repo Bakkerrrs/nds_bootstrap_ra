@@ -16,8 +16,9 @@ cd "$(dirname "$0")/.."
 
 found=0
 for map in $(find retail hb -name '*.map' 2>/dev/null | sort); do
-	# ra_reader.o contributes exactly one object to .bss: the snapshot.
-	addr=$(awk '/^ \.bss +0x[0-9a-f]+ +0x[0-9a-f]+ ra_reader\.o$/ { print $2 }' "$map")
+	# Read the symbol itself: ra_reader.o also holds other statics in .bss, so the
+	# start of its .bss contribution is not necessarily the snapshot.
+	addr=$(awk '$2 == "raSnapshotBuffer" { print $1 }' "$map" | head -n1)
 	[ -n "$addr" ] || continue
 	size=$(awk '/^ \.bss +0x[0-9a-f]+ +0x[0-9a-f]+ ra_reader\.o$/ { print $3 }' "$map")
 	printf '%-34s snapshot=%s size=%s\n' "$(basename "$map" .map)" "$addr" "$size"

@@ -46,6 +46,17 @@
 /* Stay clear of the top of RAM, where the TWLSDK cheat engine lives. */
 #define RA_PROBE_CEILING 0x0DFF0000
 
+/*
+    The probe writes to memory to prove it is usable, so it stays off unless it
+    is being deliberately run. Probing just past the ROM cache (0x0DFCC000 on a
+    3DS) faulted on the very first store: the cardengine reaches the cache itself
+    with the CPU, but the mapping stops at the cache's end, so the 208K above it
+    is not ours to take. The next candidate is memory carved out of the cache
+    instead, which is known-good because the cardengine already reads and writes
+    it on every card read.
+*/
+#define RA_PROBE_ENABLED 0
+
 /* Bytes written by the reserved-region probe. */
 #define RA_PROBE_BYTES 64
 
