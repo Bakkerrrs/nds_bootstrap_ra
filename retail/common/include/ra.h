@@ -43,10 +43,15 @@
     against a dark bottom screen looks like nothing at all rather than like an
     obvious bug.
 
-    Point the window at palette bank 15 of the sub BG palette. All sixteen entries
-    are now written white, so every halfword here should read FF 7F.
+    The palette read back white too. Every verifiable link was correct because every
+    one of them used halfword writes -- and the one remaining link, the tile data,
+    was written a byte at a time. DS VRAM ignores 8-bit writes, so the tiles were
+    never written and every pixel stayed at index 0, which is transparent.
+
+    Point the window at the first glyph tile so the fix is verifiable rather than
+    assumed. 'R' is 0xFC in its top row, which as 4bpp words reads 11 11 11 00.
 */
-#define RA_DEFAULT_WATCH_ADDRESS 0x050005E0
+#define RA_DEFAULT_WATCH_ADDRESS 0x06208020
 
 /*
     Top of main RAM. A 3DS in DSi mode exposes 32MB at 0x0C000000; a DSi has 16MB.

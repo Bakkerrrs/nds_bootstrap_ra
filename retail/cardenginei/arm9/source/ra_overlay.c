@@ -30,7 +30,13 @@
     inside that gap.
 */
 #define OVERLAY_MAP   ((vu16*)0x06205000)  /* screen base block 10 */
-#define OVERLAY_TILES ((vu8*)0x06208000)   /* character base block 2 */
+/*
+    Written as words, never bytes: DS VRAM ignores 8-bit writes. That is why the map
+    and the palette landed -- both are halfword writes -- while the tiles, built a
+    byte at a time, silently never got written at all, leaving every pixel at index 0
+    and the whole layer transparent.
+*/
+#define OVERLAY_TILES ((vu32*)0x06208000)  /* character base block 2 */
 
 /*
     Priority 0 so it draws above the game's BG1-3, character base block 2, 16
@@ -102,15 +108,17 @@ static void prepare(void) {
 
 	/* Tile 0 is left blank, so it clears the rest of the layer. */
 	for (g = 0; g < GLYPH_COUNT; g++) {
-		vu8* tile = OVERLAY_TILES + (g + 1) * 32;  /* 4bpp: 32 bytes per tile */
+		vu32* tile = OVERLAY_TILES + (g + 1) * 8;  /* 4bpp: 8 words per tile */
 		for (y = 0; y < 8; y++) {
 			const u8 bits = glyphs[g][y];
-			for (x = 0; x < 8; x += 2) {
-				/* Two pixels per byte, low nibble leftmost. */
-				const u8 left  = (bits & (0x80 >> x)) ? 1 : 0;
-				const u8 right = (bits & (0x80 >> (x + 1))) ? 1 : 0;
-				tile[y * 4 + (x >> 1)] = left | (right << 4);
+			u32 row = 0;
+			for (x = 0; x < 8; x++) {
+				/* Pixel x lives in bits 4x+3..4x, so the leftmost is the lowest. */
+				if (bits & (0x80 >> x)) {
+					row |= 1u << (x * 4);
+				}
 			}
+			tile[y] = row;
 		}
 	}
 
@@ -120,9 +128,9 @@ static void prepare(void) {
 	    is not reaching the screen.
 	*/
 	{
-		vu8* bar = OVERLAY_TILES + (GLYPH_COUNT + 1) * 32;
-		for (y = 0; y < 32; y++) {
-			bar[y] = 0x11;  /* both nibbles colour 1 */
+		vu32* bar = OVERLAY_TILES + (GLYPH_COUNT + 1) * 8;
+		for (y = 0; y < 8; y++) {
+			bar[y] = 0x11111111;  /* every pixel colour 1 */
 		}
 	}
 
