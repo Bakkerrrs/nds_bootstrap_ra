@@ -95,7 +95,24 @@ viewer, navigate to that address, and you should see:
 - a frame counter climbing once per frame,
 - then a live mirror of `0x02000000`.
 
-Success for phase 0 is that mirror changing as you play.
+The counters before `data[]` are the diagnostic: they mark each link the reader
+depends on, so a buffer that never fills in still says where things stopped.
+
+Confirmed working on a 3DS running *Space Invaders Extreme* (`cardenginei_arm9`),
+with the whole chain intact:
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `ticks` | 354 | the VCOUNT handler is firing every frame |
+| `cardReads` / `irqEnables` / `hookCalls` | 89 / 128 / 1 | cardengine has control, the patched `irqEnable` ran, the install ran once |
+| `irqTable` | `0x027E0000` | the game's IRQ table was found |
+| `vcountRef` | `0x027FC348` | inside the cardengine (base `0x027FC000`) |
+| `origVcount` | `0x02006BD8` | inside the game's ARM9 binary — the game had its own VCOUNT handler, so chaining is safe |
+
+Note that `data[]` looks static: `0x02000000` is where the game's ARM9 **code**
+loads, so the mirror is full of instructions that never change (`E7FFDEFF`, the
+ARM trap encoding). Liveness is proved by `ticks`, not by the contents. Watching
+memory that actually changes needs the parameterised window, which is phase 1.
 
 ### Files
 
@@ -177,7 +194,7 @@ window does not do — it is a phase 1 design requirement, not a retrofit.
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
-- [x] Phase 0: per-frame game RAM snapshot (**needs hardware confirmation**)
+- [x] Phase 0: per-frame game RAM snapshot — **confirmed on hardware**
 - [ ] Phase 1: parameterised watchlist + pointer chains
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
 - [ ] Phase 3: real network, softcore unlocks
