@@ -42,9 +42,21 @@
 */
 #define OVERLAY_BG0CNT ((0 << 0) | (2 << 2) | (10 << 8))
 
-/* Palette bank 15, colour 1. */
+/*
+    Palette bank 15. Every colour in the bank is set, not just the one the glyphs
+    use: writing a single entry made "nothing visible" and "the entry is black"
+    impossible to tell apart, since the game's own bottom screen is dark in places
+    and black on black looks like nothing at all.
+*/
 #define OVERLAY_PAL_BANK  15
 #define OVERLAY_PAL_INDEX (OVERLAY_PAL_BANK * 16 + 1)
+
+static void writePalette(void) {
+	int i;
+	for (i = 1; i < 16; i++) {
+		SUB_BG_PALETTE[OVERLAY_PAL_BANK * 16 + i] = 0x7FFF;  /* white */
+	}
+}
 
 #define OVERLAY_ROW 10
 #define OVERLAY_COL 10
@@ -86,7 +98,7 @@ static u32 preparedMagic;
 static void prepare(void) {
 	int g, y, x;
 
-	SUB_BG_PALETTE[OVERLAY_PAL_INDEX] = 0x7FFF;  /* white */
+	writePalette();
 
 	/* Tile 0 is left blank, so it clears the rest of the layer. */
 	for (g = 0; g < GLYPH_COUNT; g++) {
@@ -135,7 +147,7 @@ void ra_overlay_tick(void) {
 	}
 
 	/* Re-claimed every frame: the game rewrites these registers itself. */
-	SUB_BG_PALETTE[OVERLAY_PAL_INDEX] = 0x7FFF;
+	writePalette();
 	{
 		/* Cheap to redraw, and survives the game touching this VRAM. */
 		int g;

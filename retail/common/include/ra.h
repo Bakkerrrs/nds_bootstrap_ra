@@ -37,12 +37,16 @@
     configured. Nothing appears anyway, and a bad palette would show black letters
     rather than nothing at all, so the suspect is the map or the tiles.
 
-    Point the window at the map entries the overlay writes for its message. Each
-    should read 0xF001, 0xF002, ... (tile index with palette bank 15), so in a
-    byte-wise dump: 01 F0 02 F0 03 F0. Anything else means the writes are not
-    landing where BG0 reads from.
+    The map entries read back exactly as written too, so VRAM writes to bank C land
+    and BG0 is reading a correct map. That leaves the palette -- and the earlier
+    reason for dismissing it was wrong: a black entry would draw black glyphs, which
+    against a dark bottom screen looks like nothing at all rather than like an
+    obvious bug.
+
+    Point the window at palette bank 15 of the sub BG palette. All sixteen entries
+    are now written white, so every halfword here should read FF 7F.
 */
-#define RA_DEFAULT_WATCH_ADDRESS 0x06205290
+#define RA_DEFAULT_WATCH_ADDRESS 0x050005E0
 
 /*
     Top of main RAM. A 3DS in DSi mode exposes 32MB at 0x0C000000; a DSi has 16MB.
