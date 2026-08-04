@@ -71,7 +71,17 @@ static const u8 glyphs[][8] = {
 
 #define GLYPH_COUNT ((int)(sizeof(glyphs) / sizeof(glyphs[0])))
 
-static bool prepared;
+/*
+    Not a bool. The cardengine's .bss is never zeroed -- the bootloader copies only
+    the loaded image and an injected binary has no crt0 -- so a plain flag starts as
+    whatever was in RAM, and any non-zero garbage means prepare() never runs. The
+    registers would still be set every frame, leaving BG0 enabled and showing tile 0
+    everywhere, which in 16-colour mode is transparent: invisible. A magic value is
+    the same guard the snapshot uses, for the same reason.
+*/
+#define PREPARED_MAGIC 0x5241564C  /* "RAVL" */
+
+static u32 preparedMagic;
 
 static void prepare(void) {
 	int g, y, x;
@@ -92,23 +102,48 @@ static void prepare(void) {
 		}
 	}
 
+	/*
+	    A solid tile above the text, to tell two failures apart: a bar with no
+	    letters means the glyph expansion is wrong, nothing at all means the layer
+	    is not reaching the screen.
+	*/
+	{
+		vu8* bar = OVERLAY_TILES + (GLYPH_COUNT + 1) * 32;
+		for (y = 0; y < 32; y++) {
+			bar[y] = 0x11;  /* both nibbles colour 1 */
+		}
+	}
+
 	for (y = 0; y < 32 * 32; y++) {
 		OVERLAY_MAP[y] = 0;
+	}
+	for (g = 0; g < GLYPH_COUNT; g++) {
+		OVERLAY_MAP[(OVERLAY_ROW - 2) * 32 + OVERLAY_COL + g] =
+			(GLYPH_COUNT + 1) | (OVERLAY_PAL_BANK << 12);
 	}
 	for (g = 0; g < GLYPH_COUNT; g++) {
 		OVERLAY_MAP[OVERLAY_ROW * 32 + OVERLAY_COL + g] =
 			(g + 1) | (OVERLAY_PAL_BANK << 12);
 	}
 
-	prepared = true;
+	preparedMagic = PREPARED_MAGIC;
 }
 
 void ra_overlay_tick(void) {
-	if (!prepared) {
+	if (preparedMagic != PREPARED_MAGIC) {
 		prepare();
 	}
 
 	/* Re-claimed every frame: the game rewrites these registers itself. */
+	SUB_BG_PALETTE[OVERLAY_PAL_INDEX] = 0x7FFF;
+	{
+		/* Cheap to redraw, and survives the game touching this VRAM. */
+		int g;
+		for (g = 0; g < GLYPH_COUNT; g++) {
+			OVERLAY_MAP[OVERLAY_ROW * 32 + OVERLAY_COL + g] =
+				(g + 1) | (OVERLAY_PAL_BANK << 12);
+		}
+	}
 	SUB_BG0CNT  = OVERLAY_BG0CNT;
 	SUB_BG0HOFS = 0;
 	SUB_BG0VOFS = 0;
