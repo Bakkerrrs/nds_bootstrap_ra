@@ -51,6 +51,7 @@ static void claim(void) {
 	snapshot.ticks      = 0;
 	snapshot.srcAddress = 0;
 	snapshot.length     = 0;
+	snapshot.repairs    = 0;
 
 }
 
@@ -72,6 +73,10 @@ void ra_reader_tick(void) {
 
 	claim();
 	snapshot.ticks++;
+	{
+		extern u32 raOverlayRepairs;
+		snapshot.repairs = raOverlayRepairs;
+	}
 	snapshot.srcAddress = watchAddress;
 	snapshot.length     = length;
 

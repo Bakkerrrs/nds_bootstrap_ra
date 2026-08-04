@@ -29,7 +29,7 @@
 #define RA_MIRROR_SPAN 0x01000000
 
 /* Bytes of game RAM captured per frame. */
-#define RA_SNAPSHOT_WINDOW 0x20
+#define RA_SNAPSHOT_WINDOW 0x10
 
 /*
     Diagnostic. The registers read back exactly as written -- DISPCNT_SUB has bit 8
@@ -48,10 +48,11 @@
     was written a byte at a time. DS VRAM ignores 8-bit writes, so the tiles were
     never written and every pixel stayed at index 0, which is transparent.
 
-    Point the window at the first glyph tile so the fix is verifiable rather than
-    assumed. 'R' is 0xFC in its top row, which as 4bpp words reads 11 11 11 00.
+    With the overlay drawing, point the window back at the sub engine's registers:
+    if the text vanishes for a reason other than the tiles, this is where a changed
+    char base or a disabled layer would show.
 */
-#define RA_DEFAULT_WATCH_ADDRESS 0x06208020
+#define RA_DEFAULT_WATCH_ADDRESS 0x04001000
 
 /*
     Top of main RAM. A 3DS in DSi mode exposes 32MB at 0x0C000000; a DSi has 16MB.
@@ -98,7 +99,14 @@ typedef struct raSnapshot {
 	u32 ticks;           /* +0x04  frames captured -- the reader is alive */
 	u32 srcAddress;      /* +0x08  address data[] was copied from */
 	u32 length;          /* +0x0C  valid bytes in data[] */
-	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x10 */
+	/*
+	    Times the overlay found its tiles clobbered and rewrote them. The text showed
+	    up and then vanished, and the tiles were the one thing written once rather than
+	    every frame -- so this says whether the game is reusing that VRAM, and how
+	    often, rather than leaving it to be guessed.
+	*/
+	u32 repairs;         /* +0x10 */
+	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x14 */
 } raSnapshot;
 
 #endif /* RA_H */

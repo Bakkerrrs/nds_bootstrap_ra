@@ -101,6 +101,12 @@ static const u8 glyphs[][8] = {
 
 static u32 preparedMagic;
 
+/* Read by the reader into the snapshot, so the repair rate is observable. */
+u32 raOverlayRepairs;
+
+/* Glyph 0 row 0: 'R' is 0xFC, which as a 4bpp word is 0x00111111. */
+#define TILE_SENTINEL 0x00111111
+
 static void prepare(void) {
 	int g, y, x;
 
@@ -150,7 +156,15 @@ static void prepare(void) {
 }
 
 void ra_overlay_tick(void) {
+	/*
+	    Check the tiles are still ours, not just that we once wrote them. The game may
+	    reuse this VRAM, and a clobbered tile reads as index 0 -- transparent -- so the
+	    overlay would silently vanish rather than look wrong.
+	*/
 	if (preparedMagic != PREPARED_MAGIC) {
+		prepare();
+	} else if (OVERLAY_TILES[8] != TILE_SENTINEL) {
+		raOverlayRepairs++;
 		prepare();
 	}
 
