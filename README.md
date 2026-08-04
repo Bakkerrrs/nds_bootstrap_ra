@@ -1,113 +1,121 @@
 <p align="center">
-   <img src="https://github.com/DS-Homebrew/nds-bootstrap/blob/master/logo.png"><br>
-   <a href="https://gbatemp.net/threads/nds-bootstrap-loader-run-commercial-nds-backups-from-an-sd-card.454323/">
-      <img src="https://img.shields.io/badge/GBAtemp-Thread-blue.svg" alt="GBAtemp thread">
-   </a>
-   <a href="https://discord.gg/fCzqcWteC4">
-      <img src="https://img.shields.io/badge/Discord%20Server-%23nds--bootstrap-green.svg" alt="Discord server: #nds-bootstrap">
-   </a>
-   <a href="https://github.com/DS-Homebrew/nds-bootstrap/actions/workflows/build.yml">
-      <img src="https://github.com/DS-Homebrew/nds-bootstrap/actions/workflows/build.yml/badge.svg" alt="Build status on GitHub Actions">
-   </a>
-   <a title="Crowdin" target="_blank" href="https://crowdin.com/project/nds-bootstrap">
-      <img src="https://badges.crowdin.net/nds-bootstrap/localized.svg" alt="Localization status on Crowdin">
-   </a>
+   <img src="logo.png">
 </p>
 
-nds-bootstrap is an open-source application that allows Nintendo DS/DSi ROMs and homebrew to be natively utilised rather than using an emulator. nds-bootstrap works on Nintendo DSi/3DS SD cards through CFW and on Nintendo DS through flashcards.
+# nds-bootstrap-ra
 
-# ROM Compatibility
+**A fork of [nds-bootstrap](https://github.com/DS-Homebrew/nds-bootstrap) that adds
+RetroAchievements support on real DS hardware.**
 
-nds-bootstrap supports most DS/DSi ROMs, with a few exceptions. You can enhance your gaming experience with cheats and faster load times than general cartridges (for games that support those features). Game saving is supported too and will be saved in the `.sav` extention, and `.pub` or `.prv` for DSiWare. If you find a bug, please report it in the [issues tab](https://github.com/ahezard/nds-bootstrap/issues). ROM compatibility is recorded in the [compatibility list](https://docs.google.com/spreadsheets/d/1LRTkXOUXraTMjg1eedz_f7b5jiuyMv2x6e_jY_nyHSc/edit#gid=0).
+This is *not* the upstream project. It tracks `DS-Homebrew/nds-bootstrap` and adds
+one thing on top: achievements that unlock against the RetroAchievements servers
+while you play on the console, with no emulator involved. Development and testing
+happen on a Nintendo 3DS running DS games natively in DS mode.
 
-Anti-Piracy patches can be loaded via IPS files, but they are not included inside the software itself.
+If you want plain nds-bootstrap, use
+[the upstream project](https://github.com/DS-Homebrew/nds-bootstrap) instead —
+it is maintained, this fork is experimental.
 
-nds-bootstrap also supports many homebrew applications, including games like DScraft.
+## What the fork adds
 
-B4DS mode (a result of running nds-bootstrap on DS-mode flashcards with locked SCFG or DS Phat/Lite) supports most (if not all) DS ROMs of which are supported on DSi/3DS. Some DSiWare ROMs are also supported (see [this list for which ones are supported](https://github.com/DS-Homebrew/TWiLightMenu/blob/master/universal/include/compatibleDSiWareMap.h)).
+nds-bootstrap is not an emulator: it loads a DS ROM and runs it natively, with a
+**cardengine** injected into the game's own address space. That injected code is
+what makes RetroAchievements possible here — reading the game's RAM is just a
+pointer dereference.
 
-# Compiling
+The work is split into three deliberately separate modules:
 
-If your goal is to get a build of the latest commit, you will need to install devkitARM with the necessary Nintendo DS development libraries. Also, if you push your commits to a GitHub fork, you can have GitHub Actions run on every commit that way.
+| Module | Responsibility | Status |
+| --- | --- | --- |
+| `ra_reader` | Read the game's RAM every frame. Knows nothing about RetroAchievements. | working |
+| `ra_client` | Wrap `rcheevos`' `rc_client`; evaluate conditions, fire unlocks. | not started |
+| `ra_net` | HTTP(S) transport to the RA servers. | not started |
 
-1. Install devkitPro's `pacman` package manager as described on the [devkitPro wiki](https://devkitpro.org/wiki/Getting_Started), then run the following command to install the needed libraries:
+Current state, how to observe the reader on hardware, and the open design
+questions are all in **[docs/retroachievements.md](docs/retroachievements.md)**.
+
+`RA_READER_ENABLED` in `retail/common/include/ra.h` is a kill switch: set it to
+`0` and the cardengine behaves exactly like upstream.
+
+## Base functionality
+
+Everything upstream does still works, since this fork only adds to it. In short:
+DS/DSi ROMs and homebrew run natively from an SD card on DSi/3DS through CFW, or
+through flashcards on a DS. Saving is supported (`.sav`, or `.pub`/`.prv` for
+DSiWare), as are cheats and faster load times than a real cartridge on games that
+support them. Anti-piracy patches can be supplied as IPS files but are not
+included here.
+
+B4DS mode — nds-bootstrap running on DS-mode flashcards with locked SCFG, or on a
+DS Phat/Lite — supports most DS ROMs that work on DSi/3DS. The RetroAchievements
+work currently targets the DSi-capable `cardenginei` path only.
+
+For upstream ROM compatibility questions, consult the upstream project; this fork
+does not maintain a separate compatibility list, and any ROM issue you hit should
+be reproduced against upstream before reporting it here.
+
+## Compiling
+
+You need devkitARM with the Nintendo DS libraries. **The toolchain version
+matters:** this builds against **libnds 1.8.0** (devkitARM r65, as pinned by
+`devkitpro/devkitarm:20241104`). libnds 2.x removed `nds/fifocommon.h`,
+`nds/fifomessages.h`, `nds/arm7/clock.h` and `sec_t`, all of which are used here,
+so a current toolchain will not build this.
+
+1. Install devkitPro's `pacman` as described on the
+   [devkitPro wiki](https://devkitpro.org/wiki/Getting_Started), then install the
+   DS libraries:
    ```
    sudo dkp-pacman -S nds-dev
    ```
-   (Note: Command will vary by OS, `sudo` may not be needed and it may be just `pacman` instead)
-2. Clone this repository using git (`git clone https://github.com/DS-Homebrew/nds-bootstrap.git`) and navigate to the cloned repo
-3. Compile `lzss.c` to a directory in your PATH using a C compiler such as GCC (`gcc lzss.c -o /usr/local/bin/lzss`)
-   - On Windows it must instead be `lzss.exe` in the root of the repository
-4. Run `make package-nightly` to compile nds-bootstrap
-   - The output files will be in the `bin` folder
+   (the command varies by OS; `sudo` may not be needed, and it may be plain
+   `pacman`)
+2. Clone this repository and enter it:
+   ```
+   git clone https://github.com/Bakkerrrs/nds_bootstrap_ra.git
+   cd nds_bootstrap_ra
+   ```
+3. Build the `lzss` **host** tool into your PATH — without it every `.lz77` target
+   fails with `Error 127`:
+   ```
+   gcc lzss.c -o /usr/local/bin/lzss
+   ```
+   On Windows it must instead be `lzss.exe` in the repository root.
+4. Build:
+   ```
+   make
+   ```
+   Output lands in `retail/bin/` and `hb/bin/`. Use `make package-nightly` to
+   collect both into `bin/`.
 
-If you need help compiling, please ask for help in our [Discord server](https://discord.gg/fCzqcWteC4) or a [GitHub Discussion](https://github.com/DS-Homebrew/nds-bootstrap/discussions).
+**Build serially.** `make -j` races: sub-makes link before their dependencies
+exist, giving errors like `cannot find arm9mpu_reset.o` or `cannot find my_fat.o`.
 
-# Frontends
+## Frontends
 
-A frontend isn't required as nds-bootstrap uses an ini file to load its parameters. However, it is very much recommended.
+A frontend is not required — nds-bootstrap reads its parameters from an ini file —
+but it is strongly recommended.
 
-## [TWiLight Menu++](https://github.com/DS-Homebrew/TWiLightMenu)
+[TWiLight Menu++](https://github.com/DS-Homebrew/TWiLightMenu) configures
+nds-bootstrap automatically, with per-game settings.
+[Forwarders](https://wiki.ds-homebrew.com/ds-index/forwarders) let you launch
+games straight from the DSi or 3DS HOME Menu; hold <kbd>Y</kbd> while loading one
+to edit its per-game settings.
 
-TWiLight Menu++ is a frontend for nds-bootstrap, developed by [Rocket Robz](https://github.com/RocketRobz) & co. It has 6 customizable launchers to choose from with the ability to launch emulators and other homebrew.
+Both were built for upstream nds-bootstrap. They work with this fork because the
+ini format is unchanged, but nothing here is coordinated with them.
 
-It will automatically configure nds-bootstrap for you, with customizable per game settings.
+## Licence and attribution
 
-## [Forwarders](https://wiki.ds-homebrew.com/ds-index/forwarders)
+GPL-3.0, inherited from nds-bootstrap — see [LICENSE](LICENSE). All upstream
+copyright notices in the source files are kept intact, as the licence requires.
 
-Allows you to run games directly from the DSi Menu or 3DS HOME Menu. Some compatibility features from TWiLight Menu++ are missing in forwarders so if you have issues you may need to edit the per-game settings by holding <kbd>Y</kbd> while loading the forwarder.
+This fork is built on [nds-bootstrap](https://github.com/DS-Homebrew/nds-bootstrap)
+by the DS-Homebrew project and its contributors; see the upstream repository for
+its authorship and credits. It also uses devkitARM and libnds from
+[devkitPro](https://devkitpro.org), and intends to use
+[rcheevos](https://github.com/RetroAchievements/rcheevos) (also GPL) for
+achievement evaluation.
 
-### [YANBF](https://gbatemp.net/threads/606138/) (Yet Another nds-bootstrap Forwarder)
-
-An alternative forwarder generator for 3DS users. YANBF forwarders are 3DS-mode applications so they count towards the normal 300 title limit insted of the smaller 40 title limit on DSi-mode applications, however they cannot have animated icons and take slightly longer to load.
-
-# Credits
-## Developers
-- [Rocket Robz](https://github.com/RocketRobz): Lead developer, DSi mode and DSiWare support, B4DS mode, general maintenance and updates
-- [shutterbug2000](https://github.com/shutterbug2000): SDK5 support, help with DSi mode support, and some other implemented stuff
-- [ahezard](https://github.com/ahezard): Starting the project, former lead developer
-- [Pk11](https://github.com/Epicpkmn11): In-game menu, screenshot taking, manual loading, and translation management
-- [Gericom](https://github.com/Gericom):
-   - Improving B4DS compatibility
-   - Parts of libtwl code used
-   - Pokémon Wii connection patch from Pico Loader
-   - SD -> flashcard R/W patch for DSiWare
-   - Frame/Refresh rate adjustment code from [FastVideoDSPlayer](https://github.com/Gericom/FastVideoDSPlayer)
-
-## Other
-- [devkitPro](https://devkitpro.org): devkitARM and libnds
-- [Arisotura](https://github.com/Arisotura): BIOS reader from [dsibiosdumper](https://github.com/Arisotura/dsibiosdumper) used in the in-game menu
-- [Mow](https://github.com/taxicat1): Proper fix for *Puppy Palace* crash on boot
-- retrogamefan, Rudolph, and [Mow](https://github.com/taxicat1): Included AP-patches
-   - [enler](https://github.com/enler): Fixing AP-patch for Pokemon Black 2 (Japan) for DS⁽ⁱ⁾ mode compatibility
-   - [Rocket Robz](https://github.com/RocketRobz): Fixing some DS⁽ⁱ⁾-Enhanced game AP-patches for DS⁽ⁱ⁾ mode compatibility
-- Tharika Madurapperuma: [malloc code](https://tharikasblogs.blogspot.com/p/how-to-write-your-own-malloc-and-free.html) used to allocate Slot-2 RAM in *Dragon Quest Wars*
-- [VeaNika](https://github.com/VeaNika): DS Phat (NTR-001) color LUT from [GBARunner3](https://github.com/Gericom/GBARunner3)
-
-## Translators
-- Catalan: [Juan Adolfo Ortiz De Dompablo](https://crowdin.com/profile/kloido)
-- Chinese Simplified: [James-Makoto](https://crowdin.com/profile/VCMOD55), [R-YaTian](https://github.com/R-YaTian)
-- Chinese Traditional: [James-Makoto](https://crowdin.com/profile/VCMOD55), [R-YaTian](https://github.com/R-YaTian)
-- Danish: [Sebastian øllgaard](https://crowdin.com/profile/seba187d), [Nadia Pedersen](https://crowdin.com/profile/nadiaholmquist)
-- Dutch: [guusbuk](https://crowdin.com/profile/guusbuk), [TM-47](https://crowdin.com/profile/-tm-)
-- French: [Dhalian](https://crowdin.com/profile/DHALiaN3630), [Fleefie~](https://crowdin.com/profile/fleefie), [LinuxCat](https://github.com/LinUwUxCat), [SombrAbsol](https://crowdin.com/profile/sombrabsol), [TM-47](https://crowdin.com/profile/-tm-)
-- German: [TheDude](https://crowdin.com/profile/the6771), [TM-47](https://crowdin.com/profile/-tm-)
-- Greek: [TM-47](https://crowdin.com/profile/-tm-)
-- Hebrew: [Barawer](https://crowdin.com/profile/barawer), [Yaniv Levin](https://crowdin.com/profile/y4niv)
-- Hungarian: [TM-47](https://crowdin.com/profile/-tm-), [Viktor Varga](http://github.com/vargaviktor)
-- Indonesian: [heydootdoot](https://crowdin.com/profile/heydootdoot), [ZianoGG](https://crowdin.com/profile/zianogg)
-- Italian: [TM-47](https://crowdin.com/profile/-tm-)
-- Japanese: [Pk11](https://github.com/Epicpkmn11)
-- Korean: [I'm Not Cry](https://crowdin.com/profile/cryental), [Myebyeol_NOTE](https://crowdin.com/profile/groovy-mint)
-- Norwegian: [Nullified Block](https://crowdin.com/profile/elasderas123), [TM-47](https://crowdin.com/profile/-tm-)
-- Polish: [Avginike](https://crowdin.com/profile/avginike), [gierkowiec tv](https://crowdin.com/profile/krystianbederz), [SdgJapteratoc](https://crowdin.com/profile/sdgjapteratoc), [TM-47](https://crowdin.com/profile/-tm-)
-- Portuguese (Portugal): [Tavisc0](https://crowdin.com/profile/tavisc0)
-- Portuguese (Brazil): [Tavisc0](https://crowdin.com/profile/tavisc0), [TM-47](https://crowdin.com/profile/-tm-)
-- Romanian: [Tescu](https://crowdin.com/profile/tescu48)
-- Russian: [Ckau](https://crowdin.com/profile/Ckau), [mixyt](https://crowdin.com/profile/mixyt), [Rolfie](https://crowdin.com/profile/rolfiee)
-- Ryukyuan: [kuragehime](https://crowdin.com/profile/kuragehimekurara1)
-- Spanish: [beta215](https://crowdin.com/profile/beta215), [Juan Adolfo Ortiz De Dompablo](https://crowdin.com/profile/kloido), [Nintendo R](https://crowdin.com/profile/nintendor), [nuxa17](https://twitter.com/TimeLordJean), [Radriant](https://ja.crowdin.com/profile/radriant), [SofyUchiha](https://crowdin.com/profile/sofyuchiha), [TM-47](https://crowdin.com/profile/-tm-)
-- Swedish: [TM-47](https://crowdin.com/profile/-tm-)
-- Turkish: [Egehan.TWL](https://crowdin.com/profile/egehan.twl), [rewold20](https://crowdin.com/profile/rewold20), [TM-47](https://crowdin.com/profile/-tm-)
-- Ukrainian: [MichaelBest01](https://crowdin.com/profile/michaelbest01), [TM-47](https://crowdin.com/profile/-tm-), [вухаста гітара](https://crowdin.com/profile/earedguitr)
-- Valencian: [Juan Adolfo Ortiz De Dompablo](https://crowdin.com/profile/kloido), [tsolo](https://crowdin.com/profile/tsolo)
+Not affiliated with or endorsed by RetroAchievements, DS-Homebrew, or Nintendo.
+Intended for use with games you own.

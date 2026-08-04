@@ -1,4 +1,4 @@
-name: Build nds-bootstrap
+name: Build nds-bootstrap-ra
 
 on:
   push:
