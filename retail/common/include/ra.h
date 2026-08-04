@@ -40,42 +40,6 @@
 #define RA_RAM_TOP_3DS 0x0E000000
 #define RA_RAM_TOP_DSI 0x0D000000
 
-/* Never probe below this: it is the boundary of the 3DS-only upper 16MB. */
-#define RA_PROBE_FLOOR 0x0D000000
-
-/* Stay clear of the top of RAM, where the TWLSDK cheat engine lives. */
-#define RA_PROBE_CEILING 0x0DFF0000
-
-/*
-    A CPU store just past the ROM cache (0x0DFCC000 on a 3DS) took a Data Abort on
-    the very first try, which leaves two very different explanations: either there
-    is no RAM up there, or there is and the MPU will not let the CPU reach it. The
-    two lead to opposite plans -- give up on the region, or widen an MPU region --
-    so guessing is not good enough.
-
-    DMA settles it. It does not go through the MPU and it cannot fault: a transfer
-    to memory that is not there simply goes nowhere. So round-trip a pattern
-    through the address with NDMA and see whether it comes back. A matching
-    round-trip means the RAM exists and only the MPU is in the way.
-
-    Runs once rather than per frame, to stay out of the way of the card reads that
-    share the NDMA hardware.
-*/
-#define RA_PROBE_ENABLED 1
-
-/* Channels 0 and 1 are used for card reads; 3 is free. */
-#define RA_PROBE_NDMA_CHANNEL 3
-
-/*
-    Bytes round-tripped by the probe. Four words is plenty to tell a real
-    round-trip from a dead one, and the buffers live in the cardengine's .bss --
-    where the tightest variant (arm9_twlsdk_dldi) has almost nothing to spare.
-*/
-#define RA_PROBE_BYTES 16
-
-/* Reads as "RAHP" in a hex dump. */
-#define RA_PROBE_MAGIC 0x50484152
-
 /*
     Reads as the ASCII bytes "RA0S" in a byte-wise hex dump, which is how the
     in-game menu's RAM viewer displays memory. Lets you confirm at a glance that
@@ -119,18 +83,20 @@ typedef struct raSnapshot {
 	u32 romLocation;     /* +0x18 */
 	u32 freeBytes;       /* +0x1C  from cacheEnd to the top of RAM */
 
-	/* Reserved-region probe. Ran once; these are flags, not counters. */
-	u32 probeBase;       /* +0x20  address probed, 0 if the probe did not run */
-	u32 probeDmaOk;      /* +0x24  1 = the pattern round-tripped through probeBase */
-	u32 probeControlOk;  /* +0x28  1 = the same round-trip works on known-good RAM */
-	u32 probeReadBack;   /* +0x2C  first word that came back from probeBase */
+	/*
+	    The eight ARM946 protection regions, read straight from CP15. Base is bits
+	    31..12, size bits 5..1, enable bit 0 -- a word with bit 0 clear is a region
+	    the game is not using, and therefore one the RA area can claim without
+	    disturbing it.
+	*/
+	u32 mpuRegion[8];    /* +0x20 */
 
-	u32 cardReads;       /* +0x30 */
-	u32 irqEnables;      /* +0x34 */
-	u32 srcAddress;      /* +0x38  address data[] was copied from */
-	u32 length;          /* +0x3C  valid bytes in data[] */
+	u32 cardReads;       /* +0x40 */
+	u32 irqEnables;      /* +0x44 */
+	u32 srcAddress;      /* +0x48  address data[] was copied from */
+	u32 length;          /* +0x4C  valid bytes in data[] */
 
-	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x40 */
+	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x50 */
 } raSnapshot;
 
 #endif /* RA_H */
