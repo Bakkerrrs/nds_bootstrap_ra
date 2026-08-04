@@ -47,18 +47,31 @@
 #define RA_PROBE_CEILING 0x0DFF0000
 
 /*
-    The probe writes to memory to prove it is usable, so it stays off unless it
-    is being deliberately run. Probing just past the ROM cache (0x0DFCC000 on a
-    3DS) faulted on the very first store: the cardengine reaches the cache itself
-    with the CPU, but the mapping stops at the cache's end, so the 208K above it
-    is not ours to take. The next candidate is memory carved out of the cache
-    instead, which is known-good because the cardengine already reads and writes
-    it on every card read.
-*/
-#define RA_PROBE_ENABLED 0
+    A CPU store just past the ROM cache (0x0DFCC000 on a 3DS) took a Data Abort on
+    the very first try, which leaves two very different explanations: either there
+    is no RAM up there, or there is and the MPU will not let the CPU reach it. The
+    two lead to opposite plans -- give up on the region, or widen an MPU region --
+    so guessing is not good enough.
 
-/* Bytes written by the reserved-region probe. */
-#define RA_PROBE_BYTES 64
+    DMA settles it. It does not go through the MPU and it cannot fault: a transfer
+    to memory that is not there simply goes nowhere. So round-trip a pattern
+    through the address with NDMA and see whether it comes back. A matching
+    round-trip means the RAM exists and only the MPU is in the way.
+
+    Runs once rather than per frame, to stay out of the way of the card reads that
+    share the NDMA hardware.
+*/
+#define RA_PROBE_ENABLED 1
+
+/* Channels 0 and 1 are used for card reads; 3 is free. */
+#define RA_PROBE_NDMA_CHANNEL 3
+
+/*
+    Bytes round-tripped by the probe. Four words is plenty to tell a real
+    round-trip from a dead one, and the buffers live in the cardengine's .bss --
+    where the tightest variant (arm9_twlsdk_dldi) has almost nothing to spare.
+*/
+#define RA_PROBE_BYTES 16
 
 /* Reads as "RAHP" in a hex dump. */
 #define RA_PROBE_MAGIC 0x50484152
@@ -106,11 +119,11 @@ typedef struct raSnapshot {
 	u32 romLocation;     /* +0x18 */
 	u32 freeBytes;       /* +0x1C  from cacheEnd to the top of RAM */
 
-	/* Reserved-region probe. */
-	u32 probeBase;       /* +0x20  address being probed, 0 if the probe is off */
-	u32 probeOk;         /* +0x24  writes that read back correctly */
-	u32 probeFail;       /* +0x28  writes that did not read back */
-	u32 probeStale;      /* +0x2C  values that did not survive to the next frame */
+	/* Reserved-region probe. Ran once; these are flags, not counters. */
+	u32 probeBase;       /* +0x20  address probed, 0 if the probe did not run */
+	u32 probeDmaOk;      /* +0x24  1 = the pattern round-tripped through probeBase */
+	u32 probeControlOk;  /* +0x28  1 = the same round-trip works on known-good RAM */
+	u32 probeReadBack;   /* +0x2C  first word that came back from probeBase */
 
 	u32 cardReads;       /* +0x30 */
 	u32 irqEnables;      /* +0x34 */

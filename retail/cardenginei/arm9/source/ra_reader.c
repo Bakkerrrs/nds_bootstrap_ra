@@ -11,6 +11,7 @@
 */
 
 #include <nds/arm9/cache.h>
+#include "ndma.h"
 #include "ra_reader.h"
 #include "cardengine_header_arm9.h"
 
@@ -34,8 +35,12 @@ raSnapshot raSnapshotBuffer __attribute__((aligned(16)));
 static u32 watchAddress = RA_DEFAULT_WATCH_ADDRESS;
 static u32 watchLength  = RA_SNAPSHOT_WINDOW;
 
-static u32  probeLastTick;
-static bool probeArmed;
+#define RA_PROBE_WORDS (RA_PROBE_BYTES / 4)
+
+static u32  probeSrc[RA_PROBE_WORDS];
+static u32  probeDst[RA_PROBE_WORDS];
+static u32  probeCtl[RA_PROBE_WORDS];
+static bool probeDone;
 
 /*
     Record what the cardengine can see of the memory map. Read every time rather
@@ -59,29 +64,30 @@ static void sampleMemoryMap(void) {
 }
 
 /*
-    Write a pattern just above the ROM cache and check it both reads back and
-    survives to the next frame. Confirms two things the reserved region depends
-    on: that the MPU lets the cardengine touch memory past the cache, and that
-    nothing else is already using it.
+    Decide whether the memory just past the ROM cache is real.
 
-    Every bound here is checked against the *measured* cache end rather than the
-    constants, because the constants vary with console model, DSi mode, SDK
-    version and cheats -- and being wrong means writing over the game's cached
-    ROM. The probe stays inside the 3DS-only upper 16MB, which is not mirrored
-    into the address window the game sees.
+    A CPU store there took a Data Abort, which could mean the RAM is absent or
+    merely unreachable through the MPU -- opposite conclusions. DMA tells them
+    apart: it bypasses the MPU and cannot fault, so a transfer to memory that is
+    not there just goes nowhere and the read-back comes back wrong.
+
+    The control round-trip through known-good .bss runs first. Without it a
+    failure at the target would be ambiguous all over again, since it could just
+    mean the transfer itself never worked.
+
+    Runs once. The NDMA hardware is shared with card reads, so there is no reason
+    to keep poking it every frame.
 */
 static void probeReservedRegion(void) {
-	vu32* p;
 	u32 base;
 	u32 i;
+	bool ok;
 
-	snapshot.probeBase = 0;
-
-	if (!RA_PROBE_ENABLED) {
+	if (!RA_PROBE_ENABLED || probeDone) {
 		return;
 	}
 	if (!ce9 || ce9->consoleModel == 0) {
-		return;  /* only the 3DS has memory above 0x0D000000 */
+		return;  /* only the 3DS is claimed to have memory above 0x0D000000 */
 	}
 	if (ce9->cacheSlots == 0) {
 		return;  /* no cache means cacheEnd is meaningless; could be ROM-in-RAM */
@@ -92,34 +98,47 @@ static void probeReservedRegion(void) {
 		return;
 	}
 
-	p = (vu32*)base;
+	probeDone = true;
 	snapshot.probeBase = base;
 
+	for (i = 0; i < RA_PROBE_WORDS; i++) {
+		probeSrc[i] = RA_PROBE_MAGIC + i;
+		probeDst[i] = 0;
+		probeCtl[i] = 0;
+	}
 	/*
-	    Did last frame's write survive? The range was flushed after writing, so
-	    the cache line is clean and this only invalidates -- it cannot mask a
-	    clobber by writing our own stale copy back out.
+	    Clean the pattern out to RAM for the DMA to find, and clean the landing
+	    buffers too -- a dirty line written back later would overwrite what the
+	    DMA delivers.
 	*/
-	DC_FlushRange((void*)base, RA_PROBE_BYTES);
-	if (probeArmed && (p[0] != RA_PROBE_MAGIC || p[1] != probeLastTick)) {
-		snapshot.probeStale++;
-	}
+	DC_FlushRange(probeSrc, RA_PROBE_BYTES);
+	DC_FlushRange(probeDst, RA_PROBE_BYTES);
+	DC_FlushRange(probeCtl, RA_PROBE_BYTES);
 
-	p[0] = RA_PROBE_MAGIC;
-	p[1] = snapshot.ticks;
-	for (i = 2; i < (RA_PROBE_BYTES / 4); i++) {
-		p[i] = snapshot.ticks + i;
-	}
-	DC_FlushRange((void*)base, RA_PROBE_BYTES);
+	ndmaCopyWords(RA_PROBE_NDMA_CHANNEL, probeSrc, probeCtl, RA_PROBE_BYTES);
+	ndmaCopyWords(RA_PROBE_NDMA_CHANNEL, probeSrc, (void*)base, RA_PROBE_BYTES);
+	ndmaCopyWords(RA_PROBE_NDMA_CHANNEL, (void*)base, probeDst, RA_PROBE_BYTES);
 
-	if (p[0] == RA_PROBE_MAGIC && p[1] == snapshot.ticks) {
-		snapshot.probeOk++;
-	} else {
-		snapshot.probeFail++;
-	}
+	/* Now clean, so these only invalidate and the CPU sees what the DMA wrote. */
+	DC_FlushRange(probeCtl, RA_PROBE_BYTES);
+	DC_FlushRange(probeDst, RA_PROBE_BYTES);
 
-	probeLastTick = snapshot.ticks;
-	probeArmed = true;
+	ok = true;
+	for (i = 0; i < RA_PROBE_WORDS; i++) {
+		if (probeCtl[i] != RA_PROBE_MAGIC + i) {
+			ok = false;
+		}
+	}
+	snapshot.probeControlOk = ok ? 1 : 0;
+
+	snapshot.probeReadBack = probeDst[0];
+	ok = true;
+	for (i = 0; i < RA_PROBE_WORDS; i++) {
+		if (probeDst[i] != RA_PROBE_MAGIC + i) {
+			ok = false;
+		}
+	}
+	snapshot.probeDmaOk = ok ? 1 : 0;
 }
 
 /*
@@ -143,13 +162,14 @@ static void claim(void) {
 	snapshot.ticks      = 0;
 	snapshot.cardReads  = 0;
 	snapshot.irqEnables = 0;
-	snapshot.probeOk    = 0;
-	snapshot.probeFail  = 0;
-	snapshot.probeStale = 0;
+	snapshot.probeBase      = 0;
+	snapshot.probeDmaOk     = 0;
+	snapshot.probeControlOk = 0;
+	snapshot.probeReadBack  = 0;
 	snapshot.srcAddress = 0;
 	snapshot.length     = 0;
 
-	probeArmed = false;
+	probeDone = false;
 }
 
 void ra_reader_set_window(u32 address, u32 length) {
