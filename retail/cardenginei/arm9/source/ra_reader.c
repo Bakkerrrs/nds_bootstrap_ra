@@ -10,17 +10,9 @@
     the same terms as the rest of the project.
 */
 
-#include <nds/arm9/cache.h>
 #include "ra_reader.h"
-#include "cardengine_header_arm9.h"
 
 #if RA_READER_ENABLED
-
-extern cardengineArm9* volatile ce9;
-
-/* In ra_mpu.s -- MRC has no Thumb encoding. */
-extern void ra_mpu_read_regions(u32* out);
-extern void ra_mpu_read_perms(u32* out);
 
 /*
     Lives in the cardengine's .bss, which is inside the region reserved for the
@@ -37,40 +29,6 @@ raSnapshot raSnapshotBuffer __attribute__((aligned(16)));
 
 static u32 watchAddress = RA_DEFAULT_WATCH_ADDRESS;
 static u32 watchLength  = RA_SNAPSHOT_WINDOW;
-
-/*
-    Record what the cardengine can see of the memory map. Read every time rather
-    than once, because the bootloader fills these in over the course of setup and
-    an early caller would otherwise cache zeroes.
-*/
-static void sampleMemoryMap(void) {
-	u32 ramTop;
-
-	if (!ce9) {
-		return;
-	}
-	snapshot.consoleModel   = ce9->consoleModel;
-	snapshot.valueBits      = ce9->valueBits;
-	snapshot.cacheAddress   = ce9->cacheAddress;
-	snapshot.cacheEnd       = ce9->cacheAddress + ((u32)ce9->cacheSlots * (u32)ce9->cacheBlockSize);
-	snapshot.romLocation    = ce9->romLocation;
-
-	ramTop = (ce9->consoleModel > 0) ? RA_RAM_TOP_3DS : RA_RAM_TOP_DSI;
-	snapshot.freeBytes = (snapshot.cacheEnd < ramTop) ? (ramTop - snapshot.cacheEnd) : 0;
-
-	ra_mpu_read_regions(snapshot.mpuRegion);
-	ra_mpu_read_perms(&snapshot.mpuDataPerm);
-
-	snapshot.dispCntMain = *(vu32*)0x04000000;
-	snapshot.dispCntSub  = *(vu32*)0x04001000;
-	snapshot.vramCr0     = *(vu32*)0x04000240;  /* banks A..D */
-	snapshot.vramCr1     = *(vu32*)0x04000244;  /* banks E..H */
-	snapshot.vramCr2     = *(vu8*)0x04000248;   /* bank I */
-	snapshot.bgCntMain01 = *(vu32*)0x04000008;
-	snapshot.bgCntMain23 = *(vu32*)0x0400000C;
-	snapshot.bgCntSub01  = *(vu32*)0x04001008;
-	snapshot.bgCntSub23  = *(vu32*)0x0400100C;
-}
 
 /*
     Initialise the buffer the first time anything touches it. Every entry point
@@ -91,8 +49,6 @@ static void claim(void) {
 	snapshot.magic[3] = RA_SNAPSHOT_MAGIC3;
 
 	snapshot.ticks      = 0;
-	snapshot.cardReads  = 0;
-	snapshot.irqEnables = 0;
 	snapshot.srcAddress = 0;
 	snapshot.length     = 0;
 
@@ -110,31 +66,12 @@ const raSnapshot* ra_reader_snapshot(void) {
 	return &snapshot;
 }
 
-void ra_reader_note_card_read(void) {
-	claim();
-	snapshot.cardReads++;
-}
-
-void ra_reader_note_irq_enable(void) {
-	claim();
-	snapshot.irqEnables++;
-}
-
-void ra_reader_note_hook(u32 irqTable, u32 vcountRef, u32 origVcount) {
-	/* The hook chain is confirmed working on hardware; nothing left to record. */
-	(void)irqTable;
-	(void)vcountRef;
-	(void)origVcount;
-	claim();
-}
-
 void ra_reader_tick(void) {
 	u32 length = watchLength;
 	u32 i;
 
 	claim();
 	snapshot.ticks++;
-	sampleMemoryMap();
 	snapshot.srcAddress = watchAddress;
 	snapshot.length     = length;
 

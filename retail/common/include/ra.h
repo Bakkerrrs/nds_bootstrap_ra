@@ -25,20 +25,11 @@
 */
 #define RA_READER_ENABLED 1
 
-/* Reads as "RAHP" in a hex dump. */
-#define RA_PROBE_MAGIC 0x50484152
-
-/* Channels 0 and 1 carry card reads; 3 is free. */
-#define RA_PROBE_NDMA_CHANNEL 3
-
-/* Words moved by the mirror test. */
-#define RA_PROBE_WORDS 4
-
 /* If main RAM ends at 16MB, an address this much lower is the same memory. */
 #define RA_MIRROR_SPAN 0x01000000
 
 /* Bytes of game RAM captured per frame. */
-#define RA_SNAPSHOT_WINDOW 0x100
+#define RA_SNAPSHOT_WINDOW 0x20
 
 /* Start of the DS main RAM as the game sees it. */
 #define RA_DEFAULT_WATCH_ADDRESS 0x02000000
@@ -86,70 +77,9 @@
 typedef struct raSnapshot {
 	u8  magic[4];        /* +0x00  'R','A','0','S' */
 	u32 ticks;           /* +0x04  frames captured -- the reader is alive */
-
-	/* Measured memory map. */
-	u32 consoleModel;    /* +0x08  0 = DSi (16MB), >0 = 3DS (32MB) */
-	u32 valueBits;       /* +0x0C  ce9 feature flags */
-	u32 cacheAddress;    /* +0x10  start of the ROM cache */
-	u32 cacheEnd;        /* +0x14  end of the ROM cache */
-	u32 romLocation;     /* +0x18 */
-	u32 freeBytes;       /* +0x1C  from cacheEnd to the top of RAM */
-
-	/*
-	    The eight ARM946 protection regions, read straight from CP15. Base is bits
-	    31..12, size bits 5..1, enable bit 0 -- a word with bit 0 clear is a region
-	    the game is not using, and therefore one the RA area can claim without
-	    disturbing it.
-	*/
-	u32 mpuRegion[8];    /* +0x20 */
-
-	/*
-	    What may be done with those regions. The addresses above the ROM cache turn
-	    out to be real, distinct memory -- a DMA write there left the candidate
-	    mirror 16MB lower untouched -- and region 3 covers both them and the cache.
-	    So the store that faulted was not about coverage. The cardengine only ever
-	    *reads* the cache with the CPU, since fills go through NDMA, which fits a
-	    region that permits loads and not stores. These registers settle it: four
-	    bits per region for data, four for instructions.
-	*/
-	u32 mpuDataPerm;     /* +0x40 */
-	u32 mpuInstrPerm;    /* +0x44 */
-	u32 mpuCacheable;    /* +0x48 */
-	u32 mpuBufferable;   /* +0x4C */
-
-	/*
-	    Display state, for working out whether a text overlay is possible. Drawing
-	    over a running game means taking a background layer, a VRAM bank and some
-	    palette out from under it, and how much is spare is entirely
-	    game-dependent -- so measure it on real games rather than guess. DISPCNT
-	    bits 8..11 are the BG enables; each VRAM bank control byte has bit 0 set
-	    when the bank is mapped to an engine.
-	*/
-	u32 dispCntMain;     /* +0x50 */
-	u32 dispCntSub;      /* +0x54 */
-	u32 vramCr0;         /* +0x58  bank control bytes A..D */
-	u32 vramCr1;         /* +0x5C  banks E..I, top byte unused */
-
-	/*
-	    The BG control registers, packed two per word. A text overlay needs the sub
-	    engine's free BG0 plus somewhere to put its tiles and map, and the only
-	    mappable spare VRAM (bank H) would overlap bank C, which is already the sub
-	    BG. So the tiles have to go in a hole in bank C -- and these registers say
-	    which character and screen base blocks the game has taken, which is what
-	    makes a hole findable instead of guessed.
-	*/
-	u32 bgCntMain01;     /* +0x60  BG0CNT | BG1CNT << 16 */
-	u32 bgCntMain23;     /* +0x64 */
-	u32 bgCntSub01;      /* +0x68 */
-	u32 bgCntSub23;      /* +0x6C */
-	u32 vramCr2;         /* +0x70  bank I, low byte */
-
-	u32 cardReads;       /* +0x74 */
-	u32 irqEnables;      /* +0x78 */
-	u32 srcAddress;      /* +0x7C  address data[] was copied from */
-	u32 length;          /* +0x80  valid bytes in data[] */
-
-	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x84 */
+	u32 srcAddress;      /* +0x08  address data[] was copied from */
+	u32 length;          /* +0x0C  valid bytes in data[] */
+	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x10 */
 } raSnapshot;
 
 #endif /* RA_H */

@@ -37,7 +37,7 @@
 #include "cardengine.h"
 #include "locations.h"
 #include "ra_reader.h"
-#include "ra_toast.h"
+#include "ra_overlay.h"
 #include "cardengine_header_arm9.h"
 #include "unpatched_funcs.h"
 
@@ -775,12 +775,6 @@ static inline void applyColorLut(bool processExtPalettes) {
 
 void cardRead(u32* cacheStruct, u8* dst0, u32 src0, u32 len0) {
 	//nocashMessage("\narm9 cardRead\n");
-	#if RA_READER_ENABLED
-	// Earliest proof that the cardengine is running at all, independent of any
-	// interrupt hook. Without this the snapshot stays blank whether the reader
-	// is broken or the cardengine never got control.
-	ra_reader_note_card_read();
-	#endif
 	#ifdef TWLSDK
 	u32 src = src0;
 	u8* dst = dst0;
@@ -1621,7 +1615,7 @@ void myIrqHandlerVcount(void) {
 
 	#if RA_READER_ENABLED
 	ra_reader_tick();
-	ra_toast_tick();
+	ra_overlay_tick();
 	#endif
 
 	/* #ifndef TWLSDK
@@ -1774,10 +1768,6 @@ u32 myIrqEnable(u32 irq) {
 		region0FixNeeded = unpatchedFuncs->mpuInitRegionOldData == 0x4000033;
 	}
 	#endif */
-
-	#if RA_READER_ENABLED
-	ra_reader_note_irq_enable();
-	#endif
 
 	hookIPC_SYNC();
 

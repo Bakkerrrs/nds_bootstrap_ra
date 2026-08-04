@@ -32,16 +32,6 @@ void ra_reader_set_window(u32 address, u32 length);
 /* The snapshot buffer. Never NULL. */
 const raSnapshot* ra_reader_snapshot(void);
 
-/*
-    Diagnostic breadcrumbs. Each marks that one link in the chain the reader
-    depends on was reached, so a snapshot that never fills in still says where
-    things stopped. Any of them will initialise the buffer, so whichever runs
-    first makes it readable.
-*/
-void ra_reader_note_card_read(void);
-void ra_reader_note_irq_enable(void);
-void ra_reader_note_hook(u32 irqTable, u32 vcountRef, u32 origVcount);
-
 #endif /* RA_READER_ENABLED */
 
 #endif /* RA_READER_H */

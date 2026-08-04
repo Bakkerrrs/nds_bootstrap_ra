@@ -112,13 +112,6 @@ bool IPC_SYNC_hooked = false;
 void hookIPC_SYNC(void) {
 	#ifndef GSDD
     if (!IPC_SYNC_hooked) {
-		#if RA_READER_ENABLED
-		ra_reader_note_hook(
-			(u32)ce9->irqTable,
-			(u32)ce9->patches->vcountHandlerRef,
-			ce9->irqTable ? *(ce9->irqTable + 2) : 0);
-		#endif
-
 		// The RA reader needs the same per-frame VCOUNT hook the colour LUT uses.
 		// colorLutBlockVCount marks games that misbehave when a VCOUNT interrupt
 		// is forced on, so it vetoes the hook for the reader too.
