@@ -105,8 +105,16 @@ typedef struct raSnapshot {
 	    every frame -- so this says whether the game is reusing that VRAM, and how
 	    often, rather than leaving it to be guessed.
 	*/
-	u32 repairs;         /* +0x10 */
-	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x14 */
+	/*
+	    How the overlay's negotiation for VRAM is going. The game moves its character
+	    bases between scenes, so the overlay borrows a block per notification and hands
+	    it straight back when the game wants it -- these say how often that happens
+	    rather than leaving it to be inferred from glitches.
+	*/
+	u32 shows;           /* +0x10  notifications actually displayed */
+	u32 denied;          /* +0x14  wanted to show, nothing was free */
+	u32 evicted;         /* +0x18  game reclaimed the block mid-notification */
+	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x1C */
 } raSnapshot;
 
 #endif /* RA_H */
