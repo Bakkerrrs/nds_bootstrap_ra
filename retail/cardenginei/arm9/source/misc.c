@@ -28,6 +28,7 @@
 #include "tonccpy.h"
 #include "nds_header.h"
 #include "cardengine.h"
+#include "ra.h"
 #include "locations.h"
 #include "cardengine_header_arm9.h"
 
@@ -111,7 +112,10 @@ bool IPC_SYNC_hooked = false;
 void hookIPC_SYNC(void) {
 	#ifndef GSDD
     if (!IPC_SYNC_hooked) {
-		if ((ce9->valueBits & useColorLut) && !(ce9->valueBits & colorLutBlockVCount)) {
+		// The RA reader needs the same per-frame VCOUNT hook the colour LUT uses.
+		// colorLutBlockVCount marks games that misbehave when a VCOUNT interrupt
+		// is forced on, so it vetoes the hook for the reader too.
+		if ((RA_READER_ENABLED || (ce9->valueBits & useColorLut)) && !(ce9->valueBits & colorLutBlockVCount)) {
 			u32* vcountHandler = ce9->irqTable + 2;
 			ce9->intr_vcount_orig_return = *vcountHandler;
 			*vcountHandler = (u32)ce9->patches->vcountHandlerRef;

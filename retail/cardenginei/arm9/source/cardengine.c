@@ -36,6 +36,7 @@
 #include "nds_header.h"
 #include "cardengine.h"
 #include "locations.h"
+#include "ra_reader.h"
 #include "cardengine_header_arm9.h"
 #include "unpatched_funcs.h"
 
@@ -1605,7 +1606,15 @@ void myIrqHandlerVcount(void) {
 	nocashMessage("myIrqHandlerVcount");
 	#endif
 
-	applyColorLut(false);
+	// The handler is now also installed for the RA reader, in which case the
+	// colour LUT code this jumps into was never loaded.
+	if (ce9->valueBits & useColorLut) {
+		applyColorLut(false);
+	}
+
+	#if RA_READER_ENABLED
+	ra_reader_tick();
+	#endif
 
 	/* #ifndef TWLSDK
 	if (sharedAddr[4] == 0x554E454D) {
@@ -1764,7 +1773,9 @@ u32 myIrqEnable(u32 irq) {
 	irq |= IRQ_IPC_SYNC;
 	REG_IPC_SYNC |= IPC_SYNC_IRQ_ENABLE;
 
-	if ((ce9->valueBits & useColorLut) && !(ce9->valueBits & colorLutBlockVCount)) {
+	// Matches the condition in hookIPC_SYNC(): the RA reader is driven by the
+	// same VCOUNT interrupt as the colour LUT.
+	if ((RA_READER_ENABLED || (ce9->valueBits & useColorLut)) && !(ce9->valueBits & colorLutBlockVCount)) {
 		irq_before = IRQ_VCOUNT;
 		irq |= IRQ_VCOUNT;
 		SetYtrigger(0);
