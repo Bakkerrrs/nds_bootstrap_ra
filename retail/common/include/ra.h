@@ -32,6 +32,27 @@
 #define RA_DEFAULT_WATCH_ADDRESS 0x02000000
 
 /*
+    Top of main RAM. A 3DS in DSi mode exposes 32MB at 0x0C000000; a DSi has 16MB.
+    Only the first 16MB is mirrored into the 0x02xxxxxx window the game sees, so
+    anything above 0x0D000000 is memory the game cannot reach even by accident --
+    which is exactly what the RA state wants.
+*/
+#define RA_RAM_TOP_3DS 0x0E000000
+#define RA_RAM_TOP_DSI 0x0D000000
+
+/* Never probe below this: it is the boundary of the 3DS-only upper 16MB. */
+#define RA_PROBE_FLOOR 0x0D000000
+
+/* Stay clear of the top of RAM, where the TWLSDK cheat engine lives. */
+#define RA_PROBE_CEILING 0x0DFF0000
+
+/* Bytes written by the reserved-region probe. */
+#define RA_PROBE_BYTES 64
+
+/* Reads as "RAHP" in a hex dump. */
+#define RA_PROBE_MAGIC 0x50484152
+
+/*
     Reads as the ASCII bytes "RA0S" in a byte-wise hex dump, which is how the
     in-game menu's RAM viewer displays memory. Lets you confirm at a glance that
     you are looking at the snapshot and not at unrelated memory.
@@ -66,22 +87,22 @@ typedef struct raSnapshot {
 	u8  magic[4];        /* +0x00  'R','A','0','S' */
 	u32 ticks;           /* +0x04  frames captured -- the reader is alive */
 
-	/* Where free memory might be. */
-	u32 consoleModel;    /* +0x08  0 = DSi, >0 = 3DS (32MB instead of 16MB) */
+	/* Measured memory map. */
+	u32 consoleModel;    /* +0x08  0 = DSi (16MB), >0 = 3DS (32MB) */
 	u32 valueBits;       /* +0x0C  ce9 feature flags */
 	u32 cacheAddress;    /* +0x10  start of the ROM cache */
-	u32 cacheEnd;        /* +0x14  computed end of the ROM cache */
-	u32 cacheSlots;      /* +0x18 */
-	u32 cacheBlockSize;  /* +0x1C */
-	u32 romLocation;     /* +0x20  where the ROM lives when held in RAM */
+	u32 cacheEnd;        /* +0x14  end of the ROM cache */
+	u32 romLocation;     /* +0x18 */
+	u32 freeBytes;       /* +0x1C  from cacheEnd to the top of RAM */
 
-	/* Hook chain, kept for regression checking. */
-	u32 irqTable;        /* +0x24 */
-	u32 cardReads;       /* +0x28 */
-	u32 irqEnables;      /* +0x2C */
-	u32 hookCalls;       /* +0x30 */
-	u32 origVcount;      /* +0x34 */
+	/* Reserved-region probe. */
+	u32 probeBase;       /* +0x20  address being probed, 0 if the probe is off */
+	u32 probeOk;         /* +0x24  writes that read back correctly */
+	u32 probeFail;       /* +0x28  writes that did not read back */
+	u32 probeStale;      /* +0x2C  values that did not survive to the next frame */
 
+	u32 cardReads;       /* +0x30 */
+	u32 irqEnables;      /* +0x34 */
 	u32 srcAddress;      /* +0x38  address data[] was copied from */
 	u32 length;          /* +0x3C  valid bytes in data[] */
 
