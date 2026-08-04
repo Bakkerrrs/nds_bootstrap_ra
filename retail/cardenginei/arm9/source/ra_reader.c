@@ -1,17 +1,21 @@
 /*
     RetroAchievements support for nds-bootstrap -- game RAM reader (ARM9).
 
-    Phase 0: copy a fixed window of the game's RAM into a snapshot buffer once
-    per frame so it can be observed with the in-game menu's RAM viewer. No
-    RetroAchievements logic and no networking yet.
+    Copies a window of the game's RAM into a snapshot buffer once per frame, and
+    reports the console's real memory map so a home can be chosen for the state
+    that will not fit in the cardengine. No RetroAchievements logic and no
+    networking yet.
 
     This file is part of nds-bootstrap and is licensed under the GPL-3.0,
     the same terms as the rest of the project.
 */
 
 #include "ra_reader.h"
+#include "cardengine_header_arm9.h"
 
 #if RA_READER_ENABLED
+
+extern cardengineArm9* volatile ce9;
 
 /*
     Lives in the cardengine's .bss, which is inside the region reserved for the
@@ -26,6 +30,25 @@ static raSnapshot snapshot __attribute__((aligned(16)));
 
 static u32 watchAddress = RA_DEFAULT_WATCH_ADDRESS;
 static u32 watchLength  = RA_SNAPSHOT_WINDOW;
+
+/*
+    Record what the cardengine can see of the memory map. Read every time rather
+    than once, because the bootloader fills these in over the course of setup and
+    an early caller would otherwise cache zeroes.
+*/
+static void sampleMemoryMap(void) {
+	if (!ce9) {
+		return;
+	}
+	snapshot.consoleModel   = ce9->consoleModel;
+	snapshot.valueBits      = ce9->valueBits;
+	snapshot.cacheAddress   = ce9->cacheAddress;
+	snapshot.cacheSlots     = ce9->cacheSlots;
+	snapshot.cacheBlockSize = ce9->cacheBlockSize;
+	snapshot.cacheEnd       = ce9->cacheAddress + ((u32)ce9->cacheSlots * (u32)ce9->cacheBlockSize);
+	snapshot.romLocation    = ce9->romLocation;
+	snapshot.irqTable       = (u32)ce9->irqTable;
+}
 
 /*
     Initialise the buffer the first time anything touches it. Every entry point
@@ -49,8 +72,6 @@ static void claim(void) {
 	snapshot.cardReads  = 0;
 	snapshot.irqEnables = 0;
 	snapshot.hookCalls  = 0;
-	snapshot.irqTable   = 0;
-	snapshot.vcountRef  = 0;
 	snapshot.origVcount = 0;
 	snapshot.srcAddress = 0;
 	snapshot.length     = 0;
@@ -79,10 +100,10 @@ void ra_reader_note_irq_enable(void) {
 }
 
 void ra_reader_note_hook(u32 irqTable, u32 vcountRef, u32 origVcount) {
+	(void)irqTable;   /* sampled straight from ce9 instead */
+	(void)vcountRef;  /* the hook is proven; no longer worth a field */
 	claim();
 	snapshot.hookCalls++;
-	snapshot.irqTable   = irqTable;
-	snapshot.vcountRef  = vcountRef;
 	snapshot.origVcount = origVcount;
 }
 
@@ -92,6 +113,7 @@ void ra_reader_tick(void) {
 
 	claim();
 	snapshot.ticks++;
+	sampleMemoryMap();
 	snapshot.srcAddress = watchAddress;
 	snapshot.length     = length;
 
