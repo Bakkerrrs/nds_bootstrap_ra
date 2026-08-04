@@ -37,6 +37,7 @@
 #include "cardengine.h"
 #include "locations.h"
 #include "ra_reader.h"
+#include "ra_toast.h"
 #include "cardengine_header_arm9.h"
 #include "unpatched_funcs.h"
 
@@ -1620,6 +1621,7 @@ void myIrqHandlerVcount(void) {
 
 	#if RA_READER_ENABLED
 	ra_reader_tick();
+	ra_toast_tick();
 	#endif
 
 	/* #ifndef TWLSDK

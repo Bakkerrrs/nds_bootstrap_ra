@@ -117,12 +117,25 @@ typedef struct raSnapshot {
 	u32 mpuCacheable;    /* +0x48 */
 	u32 mpuBufferable;   /* +0x4C */
 
-	u32 cardReads;       /* +0x50 */
-	u32 irqEnables;      /* +0x54 */
-	u32 srcAddress;      /* +0x58  address data[] was copied from */
-	u32 length;          /* +0x5C  valid bytes in data[] */
+	/*
+	    Display state, for working out whether a text overlay is possible. Drawing
+	    over a running game means taking a background layer, a VRAM bank and some
+	    palette out from under it, and how much is spare is entirely
+	    game-dependent -- so measure it on real games rather than guess. DISPCNT
+	    bits 8..11 are the BG enables; each VRAM bank control byte has bit 0 set
+	    when the bank is mapped to an engine.
+	*/
+	u32 dispCntMain;     /* +0x50 */
+	u32 dispCntSub;      /* +0x54 */
+	u32 vramCr0;         /* +0x58  bank control bytes A..D */
+	u32 vramCr1;         /* +0x5C  banks E..I, top byte unused */
 
-	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x60 */
+	u32 cardReads;       /* +0x60 */
+	u32 irqEnables;      /* +0x64 */
+	u32 srcAddress;      /* +0x68  address data[] was copied from */
+	u32 length;          /* +0x6C  valid bytes in data[] */
+
+	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x70 */
 } raSnapshot;
 
 #endif /* RA_H */

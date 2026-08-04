@@ -60,6 +60,11 @@ static void sampleMemoryMap(void) {
 
 	ra_mpu_read_regions(snapshot.mpuRegion);
 	ra_mpu_read_perms(&snapshot.mpuDataPerm);
+
+	snapshot.dispCntMain = *(vu32*)0x04000000;
+	snapshot.dispCntSub  = *(vu32*)0x04001000;
+	snapshot.vramCr0     = *(vu32*)0x04000240;  /* banks A..D */
+	snapshot.vramCr1     = *(vu32*)0x04000244;  /* banks E..I */
 }
 
 /*
