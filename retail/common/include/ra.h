@@ -42,17 +42,33 @@
 #define RA_SNAPSHOT_MAGIC3 'S'
 
 /*
-    The snapshot lives in the cardengine's own .bss, so it is memory the game
-    never touches. The header is rewritten on every tick because .bss is not
-    zeroed for an injected binary -- there is no crt0 to do it -- so nothing here
-    may assume a known initial state.
+    The snapshot lives in the cardengine's own .bss. That matters for two
+    reasons: the game can never touch it, and it is never initialised -- the
+    bootloader copies only the loaded image, which ends exactly where .bss
+    begins, and an injected binary has no crt0 to zero the rest. So nothing here
+    may assume a known initial state; the magic is what makes the buffer
+    trustworthy.
+
+    Everything up to data[] is diagnostic. The counters exist because the reader
+    depends on a chain of things going right -- the cardengine running at all,
+    the game calling the patched irqEnable, the IRQ table being found, and the
+    VCOUNT interrupt actually firing -- and when the snapshot stays empty they
+    are what says which link broke. 16-byte aligned so the in-game menu's RAM
+    viewer, which only jumps in 0x10 steps, can land exactly on it.
 */
 typedef struct raSnapshot {
-	u8  magic[4];    /* 'R','A','0','S' */
-	u32 frame;       /* incremented once per captured frame */
-	u32 srcAddress;  /* address data[] was copied from */
-	u32 length;      /* valid bytes in data[] */
-	u8  data[RA_SNAPSHOT_WINDOW];
+	u8  magic[4];      /* +0x00  'R','A','0','S' */
+	u32 ticks;         /* +0x04  ra_reader_tick() calls, i.e. frames captured */
+	u32 cardReads;     /* +0x08  cardRead() calls -- proves the cardengine runs */
+	u32 irqEnables;    /* +0x0C  myIrqEnable() calls */
+	u32 hookCalls;     /* +0x10  hookIPC_SYNC() calls that reached the install */
+	u32 irqTable;      /* +0x14  ce9->irqTable; zero means the table was not found */
+	u32 vcountRef;     /* +0x18  ce9->patches->vcountHandlerRef */
+	u32 origVcount;    /* +0x1C  the game's original VCOUNT handler, if any */
+	u32 srcAddress;    /* +0x20  address data[] was copied from */
+	u32 length;        /* +0x24  valid bytes in data[] */
+	u32 reserved[2];   /* +0x28  pad data[] onto a 16-byte boundary */
+	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x30 */
 } raSnapshot;
 
 #endif /* RA_H */

@@ -15,20 +15,45 @@
 
 /*
     Lives in the cardengine's .bss, which is inside the region reserved for the
-    cardengine, so the game can never scribble on it. .bss is not zeroed for an
-    injected binary, so treat every field as garbage until the magic says
-    otherwise.
+    cardengine, so the game can never scribble on it. The bootloader copies only
+    the loaded image, which ends where .bss begins, and there is no crt0 to zero
+    what follows -- so every field is garbage until claim() says otherwise.
+
+    Aligned to 16 because the in-game menu's RAM viewer can only jump to
+    addresses that are a multiple of 0x10.
 */
-static raSnapshot snapshot;
+static raSnapshot snapshot __attribute__((aligned(16)));
 
 static u32 watchAddress = RA_DEFAULT_WATCH_ADDRESS;
 static u32 watchLength  = RA_SNAPSHOT_WINDOW;
 
-static bool headerValid(void) {
-	return snapshot.magic[0] == RA_SNAPSHOT_MAGIC0
-	    && snapshot.magic[1] == RA_SNAPSHOT_MAGIC1
-	    && snapshot.magic[2] == RA_SNAPSHOT_MAGIC2
-	    && snapshot.magic[3] == RA_SNAPSHOT_MAGIC3;
+/*
+    Initialise the buffer the first time anything touches it. Every entry point
+    calls this, so the snapshot becomes readable as soon as any part of the
+    cardengine runs -- not only once the per-frame hook is working.
+*/
+static void claim(void) {
+	if (snapshot.magic[0] == RA_SNAPSHOT_MAGIC0
+	 && snapshot.magic[1] == RA_SNAPSHOT_MAGIC1
+	 && snapshot.magic[2] == RA_SNAPSHOT_MAGIC2
+	 && snapshot.magic[3] == RA_SNAPSHOT_MAGIC3) {
+		return;
+	}
+
+	snapshot.magic[0] = RA_SNAPSHOT_MAGIC0;
+	snapshot.magic[1] = RA_SNAPSHOT_MAGIC1;
+	snapshot.magic[2] = RA_SNAPSHOT_MAGIC2;
+	snapshot.magic[3] = RA_SNAPSHOT_MAGIC3;
+
+	snapshot.ticks      = 0;
+	snapshot.cardReads  = 0;
+	snapshot.irqEnables = 0;
+	snapshot.hookCalls  = 0;
+	snapshot.irqTable   = 0;
+	snapshot.vcountRef  = 0;
+	snapshot.origVcount = 0;
+	snapshot.srcAddress = 0;
+	snapshot.length     = 0;
 }
 
 void ra_reader_set_window(u32 address, u32 length) {
@@ -43,21 +68,30 @@ const raSnapshot* ra_reader_snapshot(void) {
 	return &snapshot;
 }
 
+void ra_reader_note_card_read(void) {
+	claim();
+	snapshot.cardReads++;
+}
+
+void ra_reader_note_irq_enable(void) {
+	claim();
+	snapshot.irqEnables++;
+}
+
+void ra_reader_note_hook(u32 irqTable, u32 vcountRef, u32 origVcount) {
+	claim();
+	snapshot.hookCalls++;
+	snapshot.irqTable   = irqTable;
+	snapshot.vcountRef  = vcountRef;
+	snapshot.origVcount = origVcount;
+}
+
 void ra_reader_tick(void) {
 	u32 length = watchLength;
 	u32 i;
 
-	if (!headerValid()) {
-		/* First tick since the cardengine was loaded: claim the buffer. */
-		snapshot.magic[0] = RA_SNAPSHOT_MAGIC0;
-		snapshot.magic[1] = RA_SNAPSHOT_MAGIC1;
-		snapshot.magic[2] = RA_SNAPSHOT_MAGIC2;
-		snapshot.magic[3] = RA_SNAPSHOT_MAGIC3;
-		snapshot.frame = 0;
-	} else {
-		snapshot.frame++;
-	}
-
+	claim();
+	snapshot.ticks++;
 	snapshot.srcAddress = watchAddress;
 	snapshot.length     = length;
 

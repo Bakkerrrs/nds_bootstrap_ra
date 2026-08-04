@@ -28,7 +28,7 @@
 #include "tonccpy.h"
 #include "nds_header.h"
 #include "cardengine.h"
-#include "ra.h"
+#include "ra_reader.h"
 #include "locations.h"
 #include "cardengine_header_arm9.h"
 
@@ -112,10 +112,22 @@ bool IPC_SYNC_hooked = false;
 void hookIPC_SYNC(void) {
 	#ifndef GSDD
     if (!IPC_SYNC_hooked) {
+		#if RA_READER_ENABLED
+		ra_reader_note_hook(
+			(u32)ce9->irqTable,
+			(u32)ce9->patches->vcountHandlerRef,
+			ce9->irqTable ? *(ce9->irqTable + 2) : 0);
+		#endif
+
 		// The RA reader needs the same per-frame VCOUNT hook the colour LUT uses.
 		// colorLutBlockVCount marks games that misbehave when a VCOUNT interrupt
 		// is forced on, so it vetoes the hook for the reader too.
-		if ((RA_READER_ENABLED || (ce9->valueBits & useColorLut)) && !(ce9->valueBits & colorLutBlockVCount)) {
+		//
+		// Only chain if there is a table to patch and a handler to install: with
+		// a null irqTable this would write over the exception vectors, and with a
+		// null handler the forced VCOUNT interrupt would jump to address zero.
+		if ((RA_READER_ENABLED || (ce9->valueBits & useColorLut)) && !(ce9->valueBits & colorLutBlockVCount)
+		 && ce9->irqTable && ce9->patches->vcountHandlerRef) {
 			u32* vcountHandler = ce9->irqTable + 2;
 			ce9->intr_vcount_orig_return = *vcountHandler;
 			*vcountHandler = (u32)ce9->patches->vcountHandlerRef;
