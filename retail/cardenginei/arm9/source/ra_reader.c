@@ -11,6 +11,7 @@
 */
 
 #include <nds/arm9/cache.h>
+#include "ndma.h"
 #include "ra_reader.h"
 #include "cardengine_header_arm9.h"
 
@@ -33,6 +34,9 @@ extern void ra_mpu_read_regions(u32* out);
 /* Global so the link map names it; tools/ra_snapshot_addr.sh reads it from there. */
 raSnapshot raSnapshotBuffer __attribute__((aligned(16)));
 #define snapshot raSnapshotBuffer
+
+static u32  dmaBuf[RA_PROBE_WORDS];
+static bool mirrorTestDone;
 
 static u32 watchAddress = RA_DEFAULT_WATCH_ADDRESS;
 static u32 watchLength  = RA_SNAPSHOT_WINDOW;
@@ -58,6 +62,57 @@ static void sampleMemoryMap(void) {
 	snapshot.freeBytes = (snapshot.cacheEnd < ramTop) ? (ramTop - snapshot.cacheEnd) : 0;
 
 	ra_mpu_read_regions(snapshot.mpuRegion);
+}
+
+/* One DMA word-read into dmaBuf, with the cache maintenance it needs. */
+static u32 dmaPeek(u32 addr) {
+	DC_FlushRange(dmaBuf, sizeof(dmaBuf));  /* clean, so nothing overwrites the result */
+	ndmaCopyWords(RA_PROBE_NDMA_CHANNEL, (void*)addr, dmaBuf, sizeof(dmaBuf));
+	DC_FlushRange(dmaBuf, sizeof(dmaBuf));  /* already clean, so this invalidates */
+	return dmaBuf[0];
+}
+
+/*
+    Is the memory above the ROM cache real, or just an alias of memory we already
+    have?
+
+    A DMA round-trip through it succeeded, which looked like proof the RAM is
+    there. It is not: if main RAM ends at 16MB then that address mirrors one 16MB
+    lower, and the round-trip only showed that writing and reading the same
+    existing byte works. The MPU dump rules out the other explanation for the
+    earlier Data Abort -- region 3 already spans 0x08000000 +128MB, covering both
+    the cache, where stores work, and the faulting address -- so mirroring is what
+    is left to check.
+
+    Write the pattern at the target and watch the candidate alias. If it changes to
+    match, the two are the same memory.
+
+    Runs once, on the NDMA channel the card reads do not use.
+*/
+static void mirrorTest(void) {
+	u32 target;
+	u32 i;
+
+	if (mirrorTestDone || !ce9 || ce9->consoleModel == 0 || ce9->cacheSlots == 0) {
+		return;
+	}
+	target = (snapshot.cacheEnd + 0xFFF) & ~0xFFF;
+	if (target < RA_MIRROR_SPAN + 0x02000000) {
+		return;
+	}
+	mirrorTestDone = true;
+
+	snapshot.aliasAddr   = target - RA_MIRROR_SPAN;
+	snapshot.aliasBefore = dmaPeek(snapshot.aliasAddr);
+
+	for (i = 0; i < RA_PROBE_WORDS; i++) {
+		dmaBuf[i] = RA_PROBE_MAGIC + i;
+	}
+	DC_FlushRange(dmaBuf, sizeof(dmaBuf));
+	ndmaCopyWords(RA_PROBE_NDMA_CHANNEL, dmaBuf, (void*)target, sizeof(dmaBuf));
+
+	snapshot.targetReadBack = dmaPeek(target);
+	snapshot.aliasAfter     = dmaPeek(snapshot.aliasAddr);
 }
 
 /*
@@ -123,6 +178,7 @@ void ra_reader_tick(void) {
 	claim();
 	snapshot.ticks++;
 	sampleMemoryMap();
+	mirrorTest();
 	snapshot.srcAddress = watchAddress;
 	snapshot.length     = length;
 

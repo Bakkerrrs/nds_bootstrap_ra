@@ -25,6 +25,18 @@
 */
 #define RA_READER_ENABLED 1
 
+/* Reads as "RAHP" in a hex dump. */
+#define RA_PROBE_MAGIC 0x50484152
+
+/* Channels 0 and 1 carry card reads; 3 is free. */
+#define RA_PROBE_NDMA_CHANNEL 3
+
+/* Words moved by the mirror test. */
+#define RA_PROBE_WORDS 4
+
+/* If main RAM ends at 16MB, an address this much lower is the same memory. */
+#define RA_MIRROR_SPAN 0x01000000
+
 /* Bytes of game RAM captured per frame. */
 #define RA_SNAPSHOT_WINDOW 0x100
 
@@ -91,12 +103,26 @@ typedef struct raSnapshot {
 	*/
 	u32 mpuRegion[8];    /* +0x20 */
 
-	u32 cardReads;       /* +0x40 */
-	u32 irqEnables;      /* +0x44 */
-	u32 srcAddress;      /* +0x48  address data[] was copied from */
-	u32 length;          /* +0x4C  valid bytes in data[] */
+	/*
+	    Mirror test. A DMA round-trip through 0x0DFCC000 succeeded, which was read
+	    as proof that the RAM up there is real -- but if main RAM actually ends at
+	    16MB then that address is an alias of aliasAddr, 16MB lower, and the
+	    round-trip only proved that writing and reading the same existing byte
+	    works. So write the pattern at the target and watch the candidate alias:
+	    if it changes to match, the two are the same memory and there is nothing
+	    new to claim.
+	*/
+	u32 aliasAddr;       /* +0x40  target minus 16MB */
+	u32 aliasBefore;     /* +0x44  first word at aliasAddr before the write */
+	u32 aliasAfter;      /* +0x48  and after it -- equal to the pattern means alias */
+	u32 targetReadBack;  /* +0x4C  first word read back from the target */
 
-	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x50 */
+	u32 cardReads;       /* +0x50 */
+	u32 irqEnables;      /* +0x54 */
+	u32 srcAddress;      /* +0x58  address data[] was copied from */
+	u32 length;          /* +0x5C  valid bytes in data[] */
+
+	u8  data[RA_SNAPSHOT_WINDOW];  /* +0x60 */
 } raSnapshot;
 
 #endif /* RA_H */
