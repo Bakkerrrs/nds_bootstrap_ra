@@ -397,16 +397,48 @@ phase 0.5, and it is still the next structural piece of work.
 
 Build, run `tools/ra_snapshot_addr.sh` — it now lists three variants, not eight, and
 for a plain retail DS game on a DSi or 3DS the one you want is `cardenginei_arm9` —
-then point the in-game menu's RAM viewer at that address and check:
+then point the in-game menu's RAM viewer at that address.
 
-- `RA1S` at `+0x00`, and `ticks` at `+0x04` climbing once per frame.
-- `watchCount` = 3 and `resolved` = 3 at `+0x14`.
-- Watch 1 at `+0x30` and watch 2 at `+0x48`: `address` equal to the snapshot address
-  plus 4, and `value` equal to `ticks`. **This is the phase 1 result** — chains
-  resolving through one and two indirections against live memory.
-- Watch 0 at `+0x18`: `value` tracking `DISPCNT`, changing when a notification is up.
-- `linesMax` at `+0x17`: the per-frame cost, in scanlines, and the answer to open
-  question #2.
+The header is the first two rows:
+
+| Offset | Field | Expected |
+| --- | --- | --- |
+| `+0x00` | `magic` | `52 41 31 53` — `RA1S` |
+| `+0x04` | `ticks` | climbing once per frame |
+| `+0x08` / `+0x0C` / `+0x10` | `shows` / `denied` / `evicted` | the overlay's negotiation |
+| `+0x14` | `watchCount` | `03` |
+| `+0x15` | `resolved` | `03` — all three defaults resolving |
+| `+0x16` / `+0x17` | `linesLast` / `linesMax` | the per-frame cost in scanlines |
+
+Then one 0x18-byte block per watch, at `+0x18`, `+0x30`, `+0x48`, `+0x60`. Within a
+block:
+
+| Offset in block | Field |
+| --- | --- |
+| `+0x00` | `base` |
+| `+0x04` / `+0x08` | `offsets[0]` / `offsets[1]` |
+| `+0x0C` | `address` — resolved this frame, `0` if it did not |
+| `+0x10` | `value` |
+| `+0x14` / `+0x15` / `+0x16` | `depth` / `size` / `status` |
+
+So, with the snapshot at `S`:
+
+- **Watch 0** (`S+0x18`), the direct read: `base` and `address` both `0x04001000`,
+  `depth` `00`, `size` `02`, `status` `02`. `value` tracks `DISPCNT` and changes when a
+  notification is up.
+- **Watch 1** (`S+0x30`), one indirection: `offsets[0]` `04`, `depth` `01`, `status`
+  `02`, `address` = **`S+4`**, `value` = `ticks`.
+- **Watch 2** (`S+0x48`), two indirections: `offsets[0]` `00`, `offsets[1]` `04`,
+  `depth` `02`, `status` `02`, `address` = **`S+4`**, `value` = `ticks`.
+
+Watches 1 and 2 reading `ticks` through one and through two indirections is **the phase
+1 result**. `value` may lag `ticks` by one if the viewer refreshes while the game runs;
+what matters is that it tracks, not that it matches exactly.
+
+A `status` other than `02` says where a chain broke — `03` bad base, `04` bad pointer
+mid-chain, `05` bad target, `06` misaligned. All three defaults resolve against memory
+the reader owns, so anything else here is a bug in the walker rather than a game doing
+something unexpected.
 
 ## Phase 0.5 — on-screen notification
 
