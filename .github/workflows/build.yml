@@ -30,12 +30,23 @@ jobs:
           sudo gcc lzss.c -o /usr/local/bin/lzss
       - name: Setup environment
         run: git config --global safe.directory '*'
+      # The reader's chain walker is pure address logic, so it can be checked here
+      # rather than by flashing a card. Runs before the build so a logic regression
+      # fails in seconds instead of after every cardengine variant has linked.
+      - name: Test the RA reader
+        run: ./tools/ra_reader_test.sh
       - name: Build nightly
         if: ${{ !startsWith(github.ref, 'refs/tags') }}
         run: make package-nightly
       - name: Build release
         if: ${{ startsWith(github.ref, 'refs/tags') }}
         run: make package-release
+      # How much room is left in each cardengine window that carries the reader.
+      # The linker scripts already fail the build if it runs out; this is so the
+      # margin is visible while it is still a margin, on the pinned toolchain rather
+      # than whatever a developer happens to have installed.
+      - name: Report cardengine space budget
+        run: ./tools/ra_snapshot_addr.sh
       - name: Pack 7z nightly
         if: ${{ !startsWith(github.ref, 'refs/tags') }}
         run: |

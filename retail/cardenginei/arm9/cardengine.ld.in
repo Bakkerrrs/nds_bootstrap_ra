@@ -163,6 +163,21 @@ SECTIONS
 	__end__ = . ;
 	PROVIDE (end = _end);
 
+	/*
+	    The cardengine is linked into a fixed window and the stacks are placed by
+	    subtracting from the top of it, so they sit *above* .bss with nothing between
+	    them. That makes an over-large .bss silent: the region does not overflow until
+	    .bss passes the very top, and long before that the usr, svc and irq stacks are
+	    running through .data and .bss on the first call. The symptom on hardware is a
+	    game that crashes or misbehaves for no visible reason.
+
+	    So assert it instead. If this fires, the cardengine is out of room: reduce
+	    RA_WATCH_MAX in retail/common/include/ra.h, or move the code that needs the
+	    space out of the cardengine and into a separate ARM9 binary -- see
+	    docs/retroachievements.md.
+	*/
+	ASSERT(__bss_end <= __sp_usr, "cardengine .bss overruns the stacks: out of room in the cardengine window")
+
 	/* Stabs debugging sections.  */
 	.stab 0 : { *(.stab) }
 	.stabstr 0 : { *(.stabstr) }

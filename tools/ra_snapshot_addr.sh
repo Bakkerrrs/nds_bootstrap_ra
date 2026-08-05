@@ -1,6 +1,6 @@
 #!/bin/sh
 # Print the address of the RA snapshot buffer in each cardengine variant that
-# contains the reader.
+# contains the reader, and how much room is left in that variant's window.
 #
 # The buffer lives in the cardengine's .bss, so its address moves whenever the
 # code around it changes. Re-run this after every build and use the address for
@@ -8,8 +8,14 @@
 # 3DS that is cardenginei_arm9.
 #
 # Then open the in-game menu's RAM viewer, navigate to that address, and look for
-# the ASCII bytes "RA0S" (52 41 30 53) followed by a frame counter that climbs
+# the ASCII bytes "RA1S" (52 41 31 53) followed by a frame counter that climbs
 # once per frame.
+#
+# The "free" column is __sp_usr - __bss_end: the gap between the end of .bss and the
+# bottom of the stacks, which is all the room the cardengine has left. It is what
+# limits RA_WATCH_MAX in retail/common/include/ra.h. The linker scripts assert that
+# it cannot go negative, so this reports a margin rather than a warning -- were it
+# negative, the build would already have failed.
 
 set -e
 cd "$(dirname "$0")/.."
@@ -21,7 +27,16 @@ for map in $(find retail hb -name '*.map' 2>/dev/null | sort); do
 	addr=$(awk '$2 == "raSnapshotBuffer" { print $1 }' "$map" | head -n1)
 	[ -n "$addr" ] || continue
 	size=$(awk '/^ \.bss +0x[0-9a-f]+ +0x[0-9a-f]+ ra_reader\.o$/ { print $3 }' "$map")
-	printf '%-34s snapshot=%s size=%s\n' "$(basename "$map" .map)" "$addr" "$size"
+	bssEnd=$(awk '$2 == "__bss_end" { print $1 }' "$map" | head -n1)
+	spUsr=$(awk '$2 == "__sp_usr" { print $1 }' "$map" | head -n1)
+	free='?'
+	if [ -n "$bssEnd" ] && [ -n "$spUsr" ]; then
+		# Shell arithmetic, not awk: the addresses come out of the map as 0x...., and
+		# POSIX awk reads a leading 0x as plain 0, which silently reports free=0.
+		free=$(( spUsr - bssEnd ))
+	fi
+	printf '%-34s snapshot=%s size=%s free=%s\n' \
+		"$(basename "$map" .map)" "$addr" "$size" "$free"
 	found=$((found + 1))
 done
 

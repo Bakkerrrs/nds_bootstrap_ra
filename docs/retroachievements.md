@@ -19,7 +19,7 @@ without rewriting the reader:
 
 | Module | Responsibility | Status |
 | --- | --- | --- |
-| `ra_reader` | Read the game's RAM. Knows nothing about RetroAchievements. | phase 0 done |
+| `ra_reader` | Read the game's RAM. Knows nothing about RetroAchievements. | phase 1 done, hardware unconfirmed |
 | `ra_overlay` | Show a notification over the running game. Knows nothing about RetroAchievements either. | proven, needs a real font |
 | `ra_client` | Wrap `rcheevos`' `rc_client`; decide what to watch, evaluate, fire unlocks. | not started |
 | `ra_net` | HTTP(S) transport to the RA servers. `rcheevos` ships no networking. | not started |
@@ -61,11 +61,11 @@ by `hookIPC_SYNC()` in `retail/cardenginei/arm9/source/misc.c`. Upstream only
 installs it for the colour-LUT feature; this fork also installs it when the reader
 is enabled, and `myIrqEnable()` forces `IRQ_VCOUNT` on to guarantee it fires.
 
-`ra_reader_tick()` copies `RA_SNAPSHOT_WINDOW` bytes from `RA_DEFAULT_WATCH_ADDRESS`
-into a snapshot buffer once per frame. Both are diagnostic knobs at the moment: the
-window has been pointed at game RAM, at the sub engine's display registers and at
-the overlay's own VRAM in turn, which is how most of what is written here was
-established. Phase 1 replaces the single window with a real watchlist.
+In phase 0 `ra_reader_tick()` copied one fixed window of bytes into the snapshot
+buffer once per frame. That window was pointed at game RAM, at the sub engine's
+display registers and at the overlay's own VRAM in turn, which is how most of what is
+written here was established. Phase 1 replaced it with a watchlist; the hook and the
+snapshot buffer are unchanged.
 
 The snapshot lives in the cardengine's own `.bss`, which is inside the region
 reserved for the cardengine, so the game can never touch it. `.bss` is **not**
@@ -89,9 +89,10 @@ Use the address for the variant your game actually loads — a plain retail DS g
 on a DSi or 3DS uses `cardenginei_arm9`. Then open the in-game menu, go to the RAM
 viewer, navigate to that address, and you should see:
 
-- the ASCII bytes `52 41 30 53` (`RA0S`),
+- the ASCII bytes `52 41 31 53` (`RA1S`) -- the digit is the layout version, so a
+  stale address from an older build announces itself as `RA0S`,
 - a frame counter climbing once per frame,
-- then a live mirror of `0x02000000`.
+- then the watch results described under phase 1 below.
 
 Confirmed working on a 3DS running *Space Invaders Extreme* (`cardenginei_arm9`),
 with the whole chain intact:
@@ -104,10 +105,11 @@ with the whole chain intact:
 | `vcountRef` | `0x027FC348` | inside the cardengine (base `0x027FC000`) |
 | `origVcount` | `0x02006BD8` | inside the game's ARM9 binary — the game had its own VCOUNT handler, so chaining is safe |
 
-Note that `data[]` looks static: `0x02000000` is where the game's ARM9 **code**
-loads, so the mirror is full of instructions that never change (`E7FFDEFF`, the
-ARM trap encoding). Liveness is proved by `ticks`, not by the contents. Watching
-memory that actually changes needs the parameterised window, which is phase 1.
+A note from that session worth keeping, because it is the trap anyone pointing a
+watch at `0x02000000` will fall into: that address is where the game's ARM9 **code**
+loads, so what came back was instructions that never change (`E7FFDEFF`, the ARM trap
+encoding) and it looked as though nothing was being read. Liveness is proved by
+`ticks` and by the watch statuses, not by a value that happens to hold still.
 
 ### Files
 
@@ -118,7 +120,8 @@ memory that actually changes needs the parameterised window, which is phase 1.
 | `retail/cardenginei/arm9/source/ra_reader.c` | Reader implementation |
 | `retail/common/include/ra_overlay.h` | Notification API |
 | `retail/cardenginei/arm9/source/ra_overlay.c` | Notification implementation |
-| `tools/ra_snapshot_addr.sh` | Prints the snapshot address from the link maps |
+| `tools/ra_snapshot_addr.sh` | Prints the snapshot address and the space left, from the link maps |
+| `tools/ra_reader_test.c` / `.sh` | Host-side test for the watchlist and the chain walker |
 
 `RA_READER_ENABLED` in `ra.h` is the kill switch. Set it to `0` and the cardengine
 behaves exactly like upstream: no per-frame work, and no `IRQ_VCOUNT` forced on for
@@ -150,9 +153,16 @@ VBlank hook (`vblankHandler` in `retail/cardenginei/arm7/source/card_engine_head
 but the ARM7's view of main RAM is not the ARM9's cached view, so it is the wrong
 side to read from for RAM-watching accuracy.
 
-The cycle budget is not yet measured — that needs hardware. The 256-byte word copy
-is ~64 loads and stores, which is negligible; the question only becomes real at
-phase 1 watchlist sizes.
+The cycle budget is now **instrumented rather than argued about**, though the figure
+itself still needs hardware. `ra_reader_tick()` samples `VCOUNT` on entry and again on
+exit and records the difference in `linesLast` / `linesMax`. Scanlines are a coarse
+unit — one is roughly 1,600 ARM9 cycles — but they are the right unit for the question
+being asked, which is whether the watchlist eats into the frame, and `VCOUNT` is the
+only clock available: the game owns the hardware timers.
+
+The measurement is deliberately of the reader alone, not of the overlay that runs
+just before it in the same handler. The overlay's cost is fixed; the reader's is the
+one that scales with configuration, so it is the one worth a knob and a number.
 
 ### #4 — does `rc_client` fit in the cardengine? **No.**
 
@@ -163,8 +173,7 @@ cardengine is linked into a fixed 12 KB window:
 MEMORY { vram : ORIGIN = CARDENGINEI_ARM9_LOCATION, LENGTH = 12K - 0x60 }
 ```
 
-which is `0x027FC000`–`0x027FEFA0`. Current occupancy with the phase 0 reader
-included:
+which is `0x027FC000`–`0x027FEFA0`. Occupancy with the phase 0 reader included was:
 
 | | |
 | --- | --- |
@@ -180,13 +189,185 @@ nds-bootstrap already manages for ROM caching is the obvious candidate, with the
 cardengine keeping only the reader and a small bridge. That decision should be
 made before any `rcheevos` integration work starts.
 
-### #1 — network transport, and #3 — pointer chains
+Phase 1 sharpened this in two ways, both worth recording.
 
-Untouched. #1 (can the cardengine reach the 3DS's ARM11 WiFi stack, or is dswifi
-the only option?) still gates the phase 3 architecture and is worth asking the
-DS-Homebrew / RetroAchievements Discords before any hardware is bought. #3 needs
-the reader to resolve pointer chains freshly each frame, which the current fixed
-window does not do — it is a phase 1 design requirement, not a retrofit.
+**840 bytes was never the real ceiling.** `cardenginei_arm9` is one of eight variants
+that link the reader, and it is not the tightest. `arm9_dldi`, `arm9_twlsdk_dldi` and
+`arm9_twlsdk3_dldi` all carry more code in the same or a smaller window. Whatever the
+reader costs, it costs in the tightest of them, so that is the number that matters —
+`tools/ra_snapshot_addr.sh` now prints it per variant, and CI prints it on every build
+so the margin is visible while it is still a margin.
+
+**Running out was silent.** The stacks are placed by subtracting from the top of the
+window, so they sit directly above `.bss` with nothing in between. A `.bss` that grew
+past `__sp_usr` produced no diagnostic at all: the region only overflows once `.bss`
+passes the very top, and long before that the usr, svc and irq stacks are running
+through `.data` and `.bss` on the first call. The symptom is a game that misbehaves
+for no visible reason — which, in a project where the reader is *suspected first* any
+time a game acts up, is the worst possible failure mode. The eight linker scripts now
+assert `__bss_end <= __sp_usr`, so it is a build failure instead.
+
+### #3 — pointer chains: **done**, see phase 1 below.
+
+The reader walks a chain from scratch on every tick and validates every address in the
+moment it is about to be used. Caching a resolved address was never an option: that is
+the exact thing a pointer chain exists to avoid.
+
+### #1 — network transport
+
+Untouched. Can the cardengine reach the 3DS's ARM11 WiFi stack, or is dswifi the only
+option? This still gates the phase 3 architecture and is worth asking the DS-Homebrew
+/ RetroAchievements Discords before any hardware is bought.
+
+## Phase 1 — the watchlist and pointer chains
+
+**Implemented and host-tested; not yet confirmed on hardware.** Everything below is
+true of the code and of `tools/ra_reader_test.sh`; the "confirmed on hardware" label
+this document uses elsewhere has been earned by phases 0 and 0.5 and has not been
+earned by this one yet. See *What to look for on hardware* at the end.
+
+Phase 0 read one fixed window. Phase 1 reads a list of watches, each of which is
+either a direct address or a **pointer chain**: read the word at the base, add an
+offset, read the word there, add another offset, then read the value. `RA_WATCH_MAX`
+watches with up to `RA_CHAIN_MAX` indirections each, both in `ra.h`.
+
+### The chain is walked from scratch every frame
+
+This is the whole point, and it is worth being explicit about because caching looks
+so obviously right. A chain exists precisely because the thing it points at *moves*:
+the game allocates a player structure, frees it on a scene change, allocates another
+somewhere else. An address that resolved correctly last frame does not point at the
+same field this frame — it points into the middle of whatever is there now, and reads
+a plausible-looking number out of it. So the resolved address is never kept, only
+reported.
+
+### Nothing read out of the game is trusted
+
+A pointer read from game RAM is whatever happens to be in that word right now,
+including garbage while the game is tearing one scene down and building the next.
+Following it blind takes a **Data Abort inside the game's own VCOUNT handler**, which
+is not a bad reading — it is a crash.
+
+So every address is range-checked immediately before it is used, and the checks are
+narrow rather than permissive:
+
+- A pointer the walker is about to follow must be word-aligned and in main RAM
+  (`0x02000000`–`0x03000000`). A game pointer is always a main RAM address; one that
+  is not has been read out of a structure that no longer exists.
+- The final address must be readable and aligned for its size. Main RAM, plus I/O
+  only because the diagnostic watch reads a display register. Anything else is
+  refused rather than tried.
+- Alignment is checked because an unaligned ARM9 load does not fault — it silently
+  returns rotated data, which is worse than failing, because the value looks fine.
+
+A chain that does not resolve is **not an error**. Games null their pointers between
+scenes; that is normal, and the reader reports it and carries on. What it must never
+do is fault or read a wrong value quietly.
+
+### Every watch says how it resolved
+
+`status` per watch, not one global flag, because "which watch stopped resolving, and
+at which step" is the question you actually have from a RAM viewer:
+
+| Status | Meaning |
+| --- | --- |
+| `RA_WATCH_UNUSED` / `PENDING` | free slot / added but not yet evaluated |
+| `RA_WATCH_OK` | resolved and read this tick |
+| `RA_WATCH_BAD_BASE` | the chain's first address is not usable |
+| `RA_WATCH_BAD_POINTER` | a word the walker had to follow for a further step was not usable |
+| `RA_WATCH_BAD_TARGET` | the resolved address is not readable |
+| `RA_WATCH_MISALIGNED` | the resolved address is not aligned for its size |
+
+The distinction between `BAD_POINTER` and `BAD_TARGET` is about *where* the chain
+broke, and it is easy to get backwards: a one-step chain whose pointer goes null
+reports `BAD_TARGET`, because there was no further step to take. Reaching
+`BAD_POINTER` takes at least two indirections. The host test asserts exactly this —
+it caught the author expecting the opposite.
+
+### Proving it works without a game
+
+There is a chicken-and-egg problem: demonstrating that the chain walker resolves and
+reads live memory needs a known pointer inside a game, and finding one is phase 2's
+job. So the reader carries its own:
+
+- **Watch 0** reads the sub engine's `DISPCNT` directly. A real register that really
+  changes — the overlay sets and clears a background-enable bit in it.
+- **Watch 1** walks one indirection to `snapshot.ticks`, via a cell holding the
+  snapshot's address.
+- **Watch 2** walks two indirections to the same place, via a cell holding *that*
+  cell's address.
+
+`ticks` climbs every frame, so watches 1 and 2 showing that same climbing number is
+proof the walker resolved a chain and read live memory through it — with no game
+knowledge at all. Between them the three defaults exercise every success path in the
+evaluator.
+
+### The per-frame cost
+
+`linesLast` and `linesMax` record how many scanlines a tick consumed, from `VCOUNT`
+before and after. That answers open question #2 above with a number instead of an
+argument, and it is the honest unit: the game owns the hardware timers, so `VCOUNT` is
+the only clock the reader can read without taking something in use.
+
+### Tested on the host, not just on hardware
+
+`tools/ra_reader_test.sh` builds `ra_reader.c` **verbatim** — nothing stubbed, nothing
+conditionally compiled — for the host and exercises the watchlist against real memory.
+The trick that makes it a real test rather than a mock is the link address: it links at
+`0x02100000` and maps a page at `0x04000000`, so the reader's own globals genuinely sit
+inside the main RAM range it validates against, and the I/O reads genuinely land on
+mapped memory. The chain self-tests resolve for the same reason they will on hardware,
+not because a check was relaxed.
+
+It covers the success paths, every failure status, sized reads, offset accumulation at
+each step, recovery after a pointer comes back, and a full list refusing more watches.
+CI runs it before the ARM build, so a logic regression fails in seconds.
+
+This matters here more than it would elsewhere. The alternative is a flash cycle per
+attempt, and the overlay work cost three of them to find three bugs. The chain walker
+is pure address logic; it does not need the hardware, and the part of it that fails
+worst — following a bad pointer — is exactly the part a host test can pin down.
+
+One thing it deliberately does not cover: `VCOUNT` does not advance on its own on the
+host, so a tick spanning the end of the frame cannot be produced there. The wrap
+arithmetic is written out explicitly rather than left to a mask, and it is unverified.
+
+### What it costs
+
+About 520 bytes of the cardengine window over phase 0, at `RA_WATCH_MAX` 4 and
+`RA_CHAIN_MAX` 2 — roughly 580 bytes of code and 128 of `.bss`, against 136 and 44
+before. That is a large fraction of what was left, which is why:
+
+- Both limits are knobs in `ra.h`, with the cost of a slot documented next to them.
+- `ra_reader.c` alone is built `-Os`, with `noinline` on the two functions the `-O2`
+  inliner duplicates — `ra_watch_eval()` into the tick loop and
+  `ra_reader_watch_add()` into each of `claim()`'s three default installs, ~190 bytes
+  for work that happens at most once per frame. Size is what is scarce in this file;
+  the rest of the cardengine is untouched at `-O2`.
+- The reader exposes `raSnapshotBuffer` directly instead of behind an accessor. In a
+  module with a few hundred bytes of headroom, a function that only returns `&buffer`
+  is not worth its own code.
+- The linker scripts now assert the window is not overrun, so the next thing that
+  does not fit fails the build.
+
+The direction of travel is unchanged and is now better supported: **code that grows
+does not belong in the cardengine.** Phase 1 fits. The overlay's real font does not,
+and `rc_client` is not close. That is the `cardenginei_arm9_ra` binary described under
+phase 0.5, and it is still the next structural piece of work.
+
+### What to look for on hardware
+
+Build, run `tools/ra_snapshot_addr.sh`, point the in-game menu's RAM viewer at the
+address for your variant, and check:
+
+- `RA1S` at `+0x00`, and `ticks` at `+0x04` climbing once per frame.
+- `watchCount` = 3 and `resolved` = 3 at `+0x14`.
+- Watch 1 at `+0x30` and watch 2 at `+0x48`: `address` equal to the snapshot address
+  plus 4, and `value` equal to `ticks`. **This is the phase 1 result** — chains
+  resolving through one and two indirections against live memory.
+- Watch 0 at `+0x18`: `value` tracking `DISPCNT`, changing when a notification is up.
+- `linesMax` at `+0x17`: the per-frame cost, in scanlines, and the answer to open
+  question #2.
 
 ## Phase 0.5 — on-screen notification
 
@@ -301,9 +482,10 @@ permission is `0x0`, so code could never have executed from `0x0C`/`0x0D`.
 - [x] Baseline: unmodified nds-bootstrap builds
 - [x] Phase 0: per-frame game RAM snapshot — **confirmed on hardware**
 - [x] Phase 0.5: text notification over a running game — **confirmed on hardware**
+- [x] Phase 1: parameterised watchlist + pointer chains — host-tested, **hardware
+      confirmation outstanding**
 - [ ] Next: `cardenginei_arm9_ra`, a separate ARM9 binary for RA code, following the
       colour LUT's pattern. Unblocks both a real font for the overlay and phase 2.
-- [ ] Phase 1: parameterised watchlist + pointer chains
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status

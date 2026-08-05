@@ -17,20 +17,43 @@
 #if RA_READER_ENABLED
 
 /*
-    Capture the current watch window. Call once per frame; it runs in the VCOUNT
+    Re-resolve and re-read every watch. Call once per frame; it runs in the VCOUNT
     interrupt handler, so it must stay short and must not block.
 */
 void ra_reader_tick(void);
 
 /*
-    Point the reader at a different range. length is clamped to
-    RA_SNAPSHOT_WINDOW. Safe to call while ticking: the change is picked up on
-    the next tick.
-*/
-void ra_reader_set_window(u32 address, u32 length);
+    Add a watch, returning its index or -1 if the list is full or the request is
+    malformed.
 
-/* The snapshot buffer. Never NULL. */
-const raSnapshot* ra_reader_snapshot(void);
+    size must be 1, 2 or 4. depth is the number of pointer indirections to walk
+    before the final read, up to RA_CHAIN_MAX; offsets[] supplies the offset added
+    after each one and may be NULL when depth is 0.
+
+    Nothing is trusted at add time -- addresses are validated on every tick, not
+    here -- because a chain that resolves now may not resolve next frame, and the
+    reader has to survive that either way.
+*/
+int ra_reader_watch_add(u32 base, u8 size, u8 depth, const u32* offsets);
+
+/*
+    Drop every watch. Safe to call while ticking: the reader skips free slots, so
+    the worst a race can do is miss a frame.
+*/
+void ra_reader_watch_clear(void);
+
+/*
+    The watch results and the reader's own diagnostics, in the cardengine's .bss.
+
+    Exposed directly rather than behind an accessor because there is nothing an
+    accessor could add: the buffer is at a fixed link-time address, it is what
+    tools/ra_snapshot_addr.sh reports and what the in-game menu's RAM viewer is
+    pointed at, and in a module with a few hundred bytes of headroom a function that
+    only returns &buffer is not worth its own code.
+
+    Do not read it without checking magic[] first -- .bss here is never zeroed.
+*/
+extern raSnapshot raSnapshotBuffer;
 
 #endif /* RA_READER_ENABLED */
 
