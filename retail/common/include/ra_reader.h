@@ -37,10 +37,11 @@ void ra_reader_tick(void);
 int ra_reader_watch_add(u32 base, u8 size, u8 depth, const u32* offsets);
 
 /*
-    Drop every watch. Safe to call while ticking: the reader skips free slots, so
-    the worst a race can do is miss a frame.
+    There is deliberately no ra_reader_watch_clear() yet. It is the obvious
+    counterpart to _add and phase 2 will want it, but nothing calls it today and the
+    cardengine window has tens of bytes spare, not hundreds -- see the space budget in
+    docs/retroachievements.md. It costs about 44 of them, so it waits for its caller.
 */
-void ra_reader_watch_clear(void);
 
 /*
     The watch results and the reader's own diagnostics, in the cardengine's .bss.

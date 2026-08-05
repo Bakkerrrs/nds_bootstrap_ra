@@ -23,8 +23,28 @@
     Master switch for the whole RA reader. Set to 0 to build a cardengine that
     behaves exactly like upstream nds-bootstrap: no extra per-frame work and no
     VCOUNT interrupt forced on for games that did not ask for one.
+
+    Eight cardengine variants compile this file, and the reader is not wanted in all
+    of them. Two groups opt out by default:
+
+      DLDI -- nds-bootstrap running from a flashcard in DS mode. Out of scope for the
+      fork, which targets the DSi-capable path, and out of room besides: after phase 1
+      `arm9_twlsdk_dldi` and `arm9_twlsdk3_dldi` have 176 bytes left in their windows
+      and `arm9_dldi` has 208, against the reader's ~550.
+
+      GSDD -- hookIPC_SYNC() is compiled out under #ifndef GSDD, so these variants
+      link the reader but never install the per-frame handler. It could never tick
+      there; carrying it was only ever dead weight.
+
+    Override on the command line (-DRA_READER_ENABLED=1) to build it anyway.
 */
+#ifndef RA_READER_ENABLED
+#if defined(DLDI) || defined(GSDD)
+#define RA_READER_ENABLED 0
+#else
 #define RA_READER_ENABLED 1
+#endif
+#endif
 
 /*
     How many watches the reader evaluates per frame, and how many pointer

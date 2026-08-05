@@ -36,6 +36,19 @@ u32 raOverlayShows, raOverlayDenied, raOverlayEvicted;
 
 static int failures;
 
+/*
+    The reader has no watch_clear() of its own yet -- it had no caller and the
+    cardengine had no room, see ra_reader.h. The test needs to start from an empty
+    list, so it does what that function would have done.
+*/
+static void clear_watches(void) {
+	int i;
+	for (i = 0; i < RA_WATCH_MAX; i++) {
+		raSnapshotBuffer.watches[i].status = RA_WATCH_UNUSED;
+	}
+	raSnapshotBuffer.watchCount = 0;
+}
+
 #define CHECK(cond) do { \
 	if (cond) { \
 		printf("  ok    %s\n", #cond); \
@@ -128,8 +141,8 @@ int main(void) {
 	CHECK(raSnapshotBuffer.watches[2].value == 10);
 	CHECK(raSnapshotBuffer.watches[0].value == 0x0100);
 
-	printf("\nclearing empties the list\n");
-	ra_reader_watch_clear();
+	printf("\nan emptied list resolves nothing\n");
+	clear_watches();
 	CHECK(raSnapshotBuffer.watchCount == 0);
 	ra_reader_tick();
 	CHECK(raSnapshotBuffer.resolved == 0);
@@ -146,7 +159,7 @@ int main(void) {
 
 	printf("\nsized reads take the right width\n");
 	target = 0x11223344;
-	ra_reader_watch_clear();
+	clear_watches();
 	CHECK(ra_reader_watch_add((u32)&target, 1, 0, 0) == 0);
 	CHECK(ra_reader_watch_add((u32)&target, 2, 0, 0) == 1);
 	CHECK(ra_reader_watch_add((u32)&target, 4, 0, 0) == 2);
@@ -161,14 +174,14 @@ int main(void) {
 	CHECK(ra_reader_watch_add((u32)&target, 4, 0, 0) == -1);
 
 	printf("\nan unreadable base is reported, not dereferenced\n");
-	ra_reader_watch_clear();
+	clear_watches();
 	ra_reader_watch_add(0x09000000, 4, 0, 0);   /* GBA cart space: not in the list */
 	ra_reader_tick();
 	expect_status("bad base", 0, RA_WATCH_BAD_BASE);
 	CHECK(raSnapshotBuffer.watches[0].address == 0);
 
 	printf("\na misaligned target is reported rather than silently rotated\n");
-	ra_reader_watch_clear();
+	clear_watches();
 	ra_reader_watch_add((u32)&target + 1, 4, 0, 0);
 	ra_reader_watch_add((u32)&target + 1, 2, 0, 0);
 	ra_reader_watch_add((u32)&target + 1, 1, 0, 0);   /* bytes are never misaligned */
@@ -187,7 +200,7 @@ int main(void) {
 	*/
 	printf("\na one-step chain that stops resolving reports its target\n");
 	targetPtr = (u32)&target;
-	ra_reader_watch_clear();
+	clear_watches();
 	offsets[0] = 0;
 	offsets[1] = 0;
 	ra_reader_watch_add((u32)&targetPtr, 4, 1, offsets);
@@ -216,7 +229,7 @@ int main(void) {
 	CHECK(raSnapshotBuffer.watches[0].value == 0x11223344);
 
 	printf("\na pointer the walker would have to follow again is BAD_POINTER\n");
-	ra_reader_watch_clear();
+	clear_watches();
 	targetPtr     = (u32)&target;
 	targetPtrPtr  = (u32)&targetPtr;
 	offsets[0] = 0;
@@ -240,7 +253,7 @@ int main(void) {
 	expect_status("mid-chain outside main RAM", 0, RA_WATCH_BAD_POINTER);
 
 	printf("\nan unreadable base is BAD_BASE even on a chain\n");
-	ra_reader_watch_clear();
+	clear_watches();
 	ra_reader_watch_add(0x09000000, 4, 2, offsets);
 	ra_reader_tick();
 	expect_status("bad base, depth 2", 0, RA_WATCH_BAD_BASE);
@@ -251,7 +264,7 @@ int main(void) {
 		pair[0] = 0;
 		pair[1] = 0x0BADF00D;
 		targetPtr = (u32)&pair[0];
-		ra_reader_watch_clear();
+		clear_watches();
 		offsets[0] = 4;             /* one word into pair[] */
 		offsets[1] = 0;
 		ra_reader_watch_add((u32)&targetPtr, 4, 1, offsets);

@@ -164,19 +164,22 @@ SECTIONS
 	PROVIDE (end = _end);
 
 	/*
-	    The cardengine is linked into a fixed window and the stacks are placed by
-	    subtracting from the top of it, so they sit *above* .bss with nothing between
-	    them. That makes an over-large .bss silent: the region does not overflow until
-	    .bss passes the very top, and long before that the usr, svc and irq stacks are
-	    running through .data and .bss on the first call. The symptom on hardware is a
-	    game that crashes or misbehaves for no visible reason.
+	    The linker already refuses a section that leaves the region, so this is not the
+	    only guard -- it is the one with a message that says what to do. `vram` is the
+	    cardengine's whole window and .bss is the last thing in it, so this is the real
+	    ceiling.
 
-	    So assert it instead. If this fires, the cardengine is out of room: reduce
-	    RA_WATCH_MAX in retail/common/include/ra.h, or move the code that needs the
-	    space out of the cardengine and into a separate ARM9 binary -- see
-	    docs/retroachievements.md.
+	    It is deliberately *not* asserted against __sp_usr. Those stack symbols come
+	    from the standard NDS linker script this was derived from and nothing in the
+	    cardengine installs them: injected code runs on the game's stack. Measuring the
+	    free space against __sp_usr understates it by 0x260 bytes, which is how
+	    docs/retroachievements.md came to report 840 bytes free when there were 1,448.
+
+	    If this fires, the cardengine is out of room: reduce RA_WATCH_MAX in
+	    retail/common/include/ra.h, or move the code that needs the space out of the
+	    cardengine and into a separate ARM9 binary -- see docs/retroachievements.md.
 	*/
-	ASSERT(__bss_end <= __sp_usr, "cardengine .bss overruns the stacks: out of room in the cardengine window")
+	ASSERT(__bss_end <= __vram_top, "cardengine .bss overruns its window: out of room in the cardengine")
 
 	/* Stabs debugging sections.  */
 	.stab 0 : { *(.stab) }

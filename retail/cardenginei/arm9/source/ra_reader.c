@@ -230,17 +230,6 @@ int ra_reader_watch_add(u32 base, u8 size, u8 depth, const u32* offsets) {
 	return -1;
 }
 
-void ra_reader_watch_clear(void) {
-	raWatch* w;
-	int i;
-
-	claim();
-	for (i = 0, w = snapshot.watches; i < RA_WATCH_MAX; i++, w++) {
-		w->status = RA_WATCH_UNUSED;
-	}
-	snapshot.watchCount = 0;
-}
-
 /*
     Walk one watch's chain from its base and read the value at the end. Every
     address is checked in the moment it is about to be used; nothing is carried

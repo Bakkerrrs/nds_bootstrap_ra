@@ -40,12 +40,20 @@ gcc lzss.c -o /usr/local/bin/lzss   # host tool, required; CI does the same
 make                                # serial -- see below
 ```
 
-Two things that are easy to trip over:
+Three things that are easy to trip over:
 
 - `lzss` is a **host** tool built from `lzss.c` in the repo root. Without it every
   `.lz77` target fails with `Error 127`.
 - Build serially. `make -j` races: sub-makes link before their dependencies exist
   (`cannot find arm9mpu_reset.o`, `cannot find my_fat.o`).
+- Each cardengine Makefile generates its linker script with
+  `$(CPP) -P $(INCLUDE) $< $@`, which needs `CPP` to be a real preprocessor driver
+  that takes an output filename. devkitARM's rules do not set `CPP`, so it falls
+  back to GNU make's default of `$(CC) -E` — and `gcc -E in out` treats `out` as a
+  second *input*, failing with `linker input file not found: cardengine.ld`. If you
+  hit that, build with `make CPP=arm-none-eabi-cpp`. Worth knowing before trusting
+  a green or red CI run: this repository's Actions have never executed, so the
+  workflow is unproven either way.
 
 Output is `retail/bin/nds-bootstrap.nds` and `hb/bin/nds-bootstrap.nds`.
 
@@ -134,8 +142,9 @@ games that never asked for one.
   reader's hook too, so those games are not newly broken — but on them the reader
   simply will not tick, and phase 1 will need another hook for them.
 - **GSDD builds never tick.** `hookIPC_SYNC()` is compiled out under `#ifndef
-  GSDD`, so `cardenginei_arm9_gsdd*` links the reader but never installs the
-  handler.
+  GSDD`, so `cardenginei_arm9_gsdd*` could link the reader and never install the
+  handler. Since phase 1 they do not link it either: `RA_READER_ENABLED` defaults to 0
+  for `GSDD`, and for `DLDI`, which has no room for it. See open question #4.
 - **Forcing `IRQ_VCOUNT` on is a real behaviour change** for games that did not
   enable it. This is the same thing the colour-LUT path does, so there is
   precedent, but it is the most likely source of regressions and is the first
@@ -189,23 +198,46 @@ nds-bootstrap already manages for ROM caching is the obvious candidate, with the
 cardengine keeping only the reader and a small bridge. That decision should be
 made before any `rcheevos` integration work starts.
 
-Phase 1 sharpened this in two ways, both worth recording.
+Phase 1 corrected this table in two ways, both worth recording, because the numbers
+above are wrong.
 
-**840 bytes was never the real ceiling.** `cardenginei_arm9` is one of eight variants
-that link the reader, and it is not the tightest. `arm9_dldi`, `arm9_twlsdk_dldi` and
-`arm9_twlsdk3_dldi` all carry more code in the same or a smaller window. Whatever the
-reader costs, it costs in the tightest of them, so that is the number that matters —
-`tools/ra_snapshot_addr.sh` now prints it per variant, and CI prints it on every build
-so the margin is visible while it is still a margin.
+**840 bytes was measured against the wrong symbol.** `__sp_usr` is where the user-mode
+stack would start in a normal NDS program. Nothing in the cardengine installs it —
+there is no reference to `__sp_usr`, `__sp_svc` or `__sp_irq` anywhere in
+`retail/cardenginei/`. Injected code runs on the *game's* stack; those symbols are
+inherited from the stock linker script this one was derived from and are vestigial.
 
-**Running out was silent.** The stacks are placed by subtracting from the top of the
-window, so they sit directly above `.bss` with nothing in between. A `.bss` that grew
-past `__sp_usr` produced no diagnostic at all: the region only overflows once `.bss`
-passes the very top, and long before that the usr, svc and irq stacks are running
-through `.data` and `.bss` on the first call. The symptom is a game that misbehaves
-for no visible reason — which, in a project where the reader is *suspected first* any
-time a game acts up, is the worst possible failure mode. The eight linker scripts now
-assert `__bss_end <= __sp_usr`, so it is a build failure instead.
+The real ceiling is `__vram_top`, the end of the linker `MEMORY` region, and it sits
+0x260 bytes higher. So the free space at phase 0 was not 840 bytes, it was **1,448** —
+and by the time the overlay had been added it was 544, which is the figure phase 1 was
+actually working against. `tools/ra_snapshot_addr.sh` now reports
+`__vram_top - __bss_end`, and CI prints it on every build so the margin is visible
+while it is still a margin.
+
+**`cardenginei_arm9` is not one of eight, it is one of three.** Eight variants compiled
+the reader; only three could ever run it, and the other five were paying for it in a
+window they could not spare:
+
+- The four `*_dldi` variants are nds-bootstrap running from a flashcard in DS mode,
+  which the fork does not target — and they are the tightest of the eight. After phase
+  1 `arm9_twlsdk_dldi` and `arm9_twlsdk3_dldi` would have had **176 bytes** left and
+  `arm9_dldi` 208, against a reader costing about 550. They could not have carried it.
+- The `GSDD` variants never tick at all: `hookIPC_SYNC()` is compiled out under
+  `#ifndef GSDD`, so they linked the reader and never installed the handler.
+
+`RA_READER_ENABLED` now defaults to 0 for both groups, which is why the space report
+lists three variants rather than eight. Overridable on the command line.
+
+**What is left.** `cardenginei_arm9` — the variant a plain retail DS game on a DSi or
+3DS actually loads, and the one this fork tests on — has **44 bytes** free after phase
+1. That is a real margin and not a negative one, but it is 44 bytes: the linker scripts
+now assert `__bss_end <= __vram_top` so the next thing that does not fit fails the
+build with a message saying what to do, and in practice the answer will not be to trim.
+The two `twlsdk` variants have ~7,000 bytes and are not the constraint.
+
+So the conclusion this section reached at phase 0 is not merely still true, it is now
+quantified: **nothing else goes in the cardengine.** Not `rc_client`, not a font, not
+the next 200 bytes of anything.
 
 ### #3 — pointer chains: **done**, see phase 1 below.
 
@@ -334,9 +366,10 @@ arithmetic is written out explicitly rather than left to a mask, and it is unver
 
 ### What it costs
 
-About 520 bytes of the cardengine window over phase 0, at `RA_WATCH_MAX` 4 and
-`RA_CHAIN_MAX` 2 — roughly 580 bytes of code and 128 of `.bss`, against 136 and 44
-before. That is a large fraction of what was left, which is why:
+About 500 bytes of the cardengine window over phase 0, at `RA_WATCH_MAX` 4 and
+`RA_CHAIN_MAX` 2 — 564 bytes of code and 128 of `.bss` on devkitARM r65, against 136
+and 44 before. `cardenginei_arm9` had 544 bytes free and now has 44. That is most of
+what was left, which is why:
 
 - Both limits are knobs in `ra.h`, with the cost of a slot documented next to them.
 - `ra_reader.c` alone is built `-Os`, with `noinline` on the two functions the `-O2`
@@ -345,10 +378,15 @@ before. That is a large fraction of what was left, which is why:
   for work that happens at most once per frame. Size is what is scarce in this file;
   the rest of the cardengine is untouched at `-O2`.
 - The reader exposes `raSnapshotBuffer` directly instead of behind an accessor. In a
-  module with a few hundred bytes of headroom, a function that only returns `&buffer`
-  is not worth its own code.
+  module with tens of bytes of headroom, a function that only returns `&buffer` is not
+  worth its own code, and there is nothing an accessor could add.
+- There is no `ra_reader_watch_clear()`, though it is the obvious counterpart to
+  `_add`. It has no caller until phase 2 and costs 44 bytes — as large as the entire
+  remaining margin.
+- It is not built at all for the `DLDI` and `GSDD` variants, which respectively cannot
+  afford it and can never run it. See open question #4.
 - The linker scripts now assert the window is not overrun, so the next thing that
-  does not fit fails the build.
+  does not fit fails the build with a message rather than an address.
 
 The direction of travel is unchanged and is now better supported: **code that grows
 does not belong in the cardengine.** Phase 1 fits. The overlay's real font does not,
@@ -357,8 +395,9 @@ phase 0.5, and it is still the next structural piece of work.
 
 ### What to look for on hardware
 
-Build, run `tools/ra_snapshot_addr.sh`, point the in-game menu's RAM viewer at the
-address for your variant, and check:
+Build, run `tools/ra_snapshot_addr.sh` — it now lists three variants, not eight, and
+for a plain retail DS game on a DSi or 3DS the one you want is `cardenginei_arm9` —
+then point the in-game menu's RAM viewer at that address and check:
 
 - `RA1S` at `+0x00`, and `ticks` at `+0x04` climbing once per frame.
 - `watchCount` = 3 and `resolved` = 3 at `+0x14`.
