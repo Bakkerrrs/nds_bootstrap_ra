@@ -23,6 +23,7 @@
 */
 
 #include "ra_reader.h"
+#include "ra_overlay.h"
 
 #if RA_READER_ENABLED
 
@@ -276,6 +277,30 @@ static void ra_watch_eval(raWatch* w) {
 	w->address = addr;
 	w->value   = ra_read(addr, w->size);
 	w->status  = RA_WATCH_OK;
+}
+
+/*
+    The per-frame entry point for all of the RA work, and the one place the target
+    console is checked.
+
+    consoleModel > 0 is the 3DS family, which is what this fork supports. The hook is
+    already not installed for the reader's sake on anything else, but the colour LUT
+    installs the same handler and does run on a DSi -- so being called is not proof the
+    reader was wanted, and it is checked here too.
+
+    One call rather than two plus an inline test at the call site, so there is a single
+    per-frame entry point and a single place the supported-console rule is enforced. It
+    does not save space -- measured, it costs 8 bytes more than the inline version -- but
+    the separate ARM9 binary will need a bridge here too, and one entry point is the
+    right shape for that. The scope gate as a whole costs 48 bytes of the cardengine's
+    margin, which is what it is worth to leave a DSi running exactly upstream.
+*/
+void ra_tick(u8 consoleModel) {
+	if (consoleModel == 0) {
+		return;
+	}
+	ra_overlay_tick();
+	ra_reader_tick();
 }
 
 void ra_reader_tick(void) {

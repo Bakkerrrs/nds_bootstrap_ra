@@ -12,6 +12,13 @@ one thing on top: achievements that unlock against the RetroAchievements servers
 while you play on the console, with no emulator involved. Development and testing
 happen on a Nintendo 3DS running DS games natively in DS mode.
 
+**The RetroAchievements support targets the 3DS family only.** On a DSi, or on a DS
+through a flashcard, this fork behaves exactly like upstream: no reader, no overlay, and
+no VCOUNT interrupt forced on. That is a deliberate scope decision, not a limitation
+waiting to be lifted — the two things this fork does to a running game are the kind that
+surface as intermittent oddities rather than crashes, and no other console has been
+tested. See [docs/retroachievements.md](docs/retroachievements.md) for the reasoning.
+
 If you want plain nds-bootstrap, use
 [the upstream project](https://github.com/DS-Homebrew/nds-bootstrap) instead —
 it is maintained, this fork is experimental.

@@ -116,10 +116,17 @@ void hookIPC_SYNC(void) {
 		// colorLutBlockVCount marks games that misbehave when a VCOUNT interrupt
 		// is forced on, so it vetoes the hook for the reader too.
 		//
+		// consoleModel > 0 is the 3DS family. The RetroAchievements work targets it
+		// only -- see the scope note in docs/retroachievements.md -- so on a DSi the
+		// hook is not installed for the reader's sake and the fork behaves exactly
+		// like upstream. Forcing IRQ_VCOUNT on is a real behaviour change, and it is
+		// not one to impose on a console nobody is testing.
+		//
 		// Only chain if there is a table to patch and a handler to install: with
 		// a null irqTable this would write over the exception vectors, and with a
 		// null handler the forced VCOUNT interrupt would jump to address zero.
-		if ((RA_READER_ENABLED || (ce9->valueBits & useColorLut)) && !(ce9->valueBits & colorLutBlockVCount)
+		if (((RA_READER_ENABLED && ce9->consoleModel > 0) || (ce9->valueBits & useColorLut))
+		 && !(ce9->valueBits & colorLutBlockVCount)
 		 && ce9->irqTable && ce9->patches->vcountHandlerRef) {
 			u32* vcountHandler = ce9->irqTable + 2;
 			ce9->intr_vcount_orig_return = *vcountHandler;

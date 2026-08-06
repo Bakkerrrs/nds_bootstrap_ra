@@ -26,8 +26,14 @@
 
 #include "../retail/cardenginei/arm9/source/ra_reader.c"
 
-/* ra_reader.c reads these out of the overlay; here they are just storage. */
+/*
+    ra_reader.c reads these out of the overlay; here they are just storage. And ra_tick()
+    drives the overlay, which is all sub-engine register pokes and cannot run on a host --
+    so it is stubbed. The tests call ra_reader_tick() directly, which is the half being
+    tested; ra_tick() only adds the console check on top of it.
+*/
 u32 raOverlayShows, raOverlayDenied, raOverlayEvicted, raOverlayDeniedNoLayer;
+void ra_overlay_tick(void) { }
 
 #define IO_BASE  0x04000000
 #define IO_SIZE  0x2000
@@ -282,6 +288,17 @@ int main(void) {
 	    the reader. What can be checked is that a tick which consumes nothing reports
 	    nothing, i.e. the counter is a delta and not an absolute scanline.
 	*/
+	printf("\nra_tick() skips everything on an unsupported console\n");
+	{
+		const u32 before = raSnapshotBuffer.ticks;
+		ra_tick(0);                       /* DSi: out of scope */
+		CHECK(raSnapshotBuffer.ticks == before);
+		ra_tick(1);                       /* 3DS */
+		CHECK(raSnapshotBuffer.ticks == before + 1);
+		ra_tick(2);                       /* New 3DS */
+		CHECK(raSnapshotBuffer.ticks == before + 2);
+	}
+
 	printf("\nthe per-frame cost is a delta, not an absolute scanline\n");
 	*VCOUNT = 200;
 	raSnapshotBuffer.linesMax = 0;

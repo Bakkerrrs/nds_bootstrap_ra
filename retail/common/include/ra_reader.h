@@ -17,8 +17,18 @@
 #if RA_READER_ENABLED
 
 /*
-    Re-resolve and re-read every watch. Call once per frame; it runs in the VCOUNT
-    interrupt handler, so it must stay short and must not block.
+    Everything this fork does per frame, from the VCOUNT interrupt handler: the
+    notification overlay, then the watchlist. Pass ce9->consoleModel; the work is
+    skipped on anything but the 3DS family, which is the only target -- see the scope
+    note in docs/retroachievements.md.
+
+    Runs in an interrupt handler, so it must stay short and must not block.
+*/
+void ra_tick(u8 consoleModel);
+
+/*
+    Re-resolve and re-read every watch. Called by ra_tick(); separate so the reader
+    stays testable on its own.
 */
 void ra_reader_tick(void);
 

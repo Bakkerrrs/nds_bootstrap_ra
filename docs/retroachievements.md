@@ -735,6 +735,56 @@ It no longer matters. The separate-binary approach puts code and state in the
 `0x02xxxxxx` space instead, which is required anyway: region 3's *instruction*
 permission is `0x0`, so code could never have executed from `0x0C`/`0x0D`.
 
+## Supported hardware: the 3DS family, and nothing else
+
+Decided deliberately rather than drifted into. `consoleModel > 0` — the 3DS family,
+including the New 3DS — is the only configuration this fork supports for
+RetroAchievements. On a DSi, and on a DS through a flashcard, it behaves exactly like
+upstream nds-bootstrap: no reader, no overlay, and no `IRQ_VCOUNT` forced on.
+
+### Why
+
+Development and testing happen on a 3DS, and nothing else has ever been tried. Two of
+the things this fork does are real behaviour changes to a running game — forcing a
+VCOUNT interrupt on for games that never enabled one, and borrowing a background layer
+and a palette entry from the sub engine. Both are the kind of thing that shows up as an
+intermittent oddity rather than a crash, which is exactly what a console nobody is
+testing on cannot be trusted to reveal. Shipping them to a DSi on the strength of "it
+should work" is not a trade worth making.
+
+It also removes work that would otherwise be speculative. The DSi WRAM the separate
+binary needs is guaranteed present on a 3DS with SCFG unlocked, so no fallback has to
+be designed for the case where it is not.
+
+### How it is enforced
+
+`consoleModel` is not detected — it comes from `CONSOLE_MODEL` in the configuration
+file, so the launcher, which knows the console, supplies it. It was already being passed
+through to the ARM9 cardengine as `ce9->consoleModel`, so no new plumbing was needed.
+
+Two checks, both necessary:
+
+- `hookIPC_SYNC()` in `misc.c` will not install the VCOUNT hook for the reader's sake
+  unless `ce9->consoleModel > 0`. This is the one that matters, because installing it is
+  what forces `IRQ_VCOUNT` on.
+- `ra_tick()` checks again, because the colour LUT installs the *same* handler and does
+  run on a DSi — so being called is not proof the reader was wanted.
+
+The gate costs 48 bytes of the cardengine's margin, taking it from 104 to 56. That is
+what it is worth to leave an untested console running stock.
+
+### What it does not change
+
+- **DSi-enhanced games on a 3DS come along for free.** They load `cardenginei_arm9_twlsdk`
+  or `_twlsdk3`, which already carry the reader and have ~7,100 bytes spare rather than
+  56. Nothing extra is needed for them.
+- **All eight variants still have to compile.** The gate is a runtime check, not a build
+  configuration, so nothing can be deleted from the tree. The `DLDI` and `GSDD` variants
+  remain compiled out via `RA_READER_ENABLED` for the separate reasons given under open
+  question #4.
+- **The cardengine's 12 KB window is the same on every console**, so the space pressure
+  this document keeps returning to is unaffected.
+
 ## Where `cardenginei_arm9_ra` goes, and whether `rcheevos` fits
 
 Researched before writing any of it, because the placement is hard to undo once the

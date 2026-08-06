@@ -37,7 +37,6 @@
 #include "cardengine.h"
 #include "locations.h"
 #include "ra_reader.h"
-#include "ra_overlay.h"
 #include "cardengine_header_arm9.h"
 #include "unpatched_funcs.h"
 
@@ -1614,8 +1613,7 @@ void myIrqHandlerVcount(void) {
 	}
 
 	#if RA_READER_ENABLED
-	ra_overlay_tick();
-	ra_reader_tick();
+	ra_tick(ce9->consoleModel);
 	#endif
 
 	/* #ifndef TWLSDK
