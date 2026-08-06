@@ -956,7 +956,8 @@ break a boot.
 | Built by `retail/Makefile` and packed as `nitro:/cardenginei_arm9_ra.bin` | done |
 | `ra_tick()` calls it, gated on a flag and on the window containing code | done |
 | `wramMagic` / `wramTicks` / `wramState` in the snapshot | done |
-| Launcher reads the nitrofile into a buffer | **not started** |
+| Staging address chosen and justified (`0x02600000`) | done |
+| Launcher reads the nitrofile into that buffer | **not started** |
 | Bootloader ARM7 copies the buffer into WRAM and sets `b_raWramLoaded` | **not started** |
 | `wramSize` reduced to `CARDENGINEI_ARM9_RA_WRAMSIZE` when it is loaded | **not started** |
 
@@ -988,16 +989,61 @@ because the bridge is what ends the competition — once the loader works and th
 proven on hardware, the reader and the overlay move into the 256K window and stop fighting
 over 12K. Until then every further byte here is a trade.
 
-### The open question the loader still needs answered
+### Where the staging buffer can live: `0x02600000`
 
-The launcher has to read the nitrofile into main RAM before the ARM7 can copy it into
-WRAM, the way `CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION` works for the colour LUT. That
-buffer has to be somewhere genuinely free at launcher time, and the colour LUT's is 6K
-against a binary that will grow towards 256K. Picking an address without mapping what
-else is live in main RAM at that moment is how a bootloader quietly corrupts something,
-so that mapping is the next piece of work rather than a guess. The alternative worth
-weighing is reading it in chunks, or into the ROM cache region in `0x0C`, where stores are
-known to work.
+The launcher reads the nitrofile into main RAM and the bootloader's ARM7 copies it into
+WRAM, the way `CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION` works for the colour LUT. Finding
+a safe address for that turned out to hinge on a mechanism that is invisible from the
+address list, so it is worth writing down.
+
+**What decides it is the bootloader's early clear list.** Before anything else,
+`main.arm7.c` blanks most of EWRAM:
+
+```c
+memset_addrs_arm7(0x02000000, 0x02000400);
+memset_addrs_arm7(0x02000620, 0x02084000);
+memset_addrs_arm7(0x02280000, IMAGES_LOCATION);
+dma_twlFill32(0, 0, (u32*)0x02380000, 0x3F000);
+dma_twlFill32(0, 0, (u32*)0x023C0000, 0x40000);
+memset_addrs_arm7(0x02700000, BLOWFISH_LOCATION);   // 0x02700000-0x027B0C00
+dma_twlFill32(0, 0, (u32*)0x027F8000, 0x8000);
+memset_addrs_arm7(0x02800000, 0x02E80000);
+```
+
+Anything the launcher stages inside one of those ranges is wiped before the bootloader can
+use it. That is *why* the existing staging addresses are where they are — `0x026F0000`
+(the ARM9 cardengine, 64K), `0x027CE800` (the colour LUT), `0x027D0000` (its table) all sit
+in gaps between the clears, and the comment on the `0x02700000` line even says so:
+"except before ce7 and ce9 binaries".
+
+So the ranges that survive, in the space above the game's own 4MB:
+
+| Range | Size | State |
+| --- | --- | --- |
+| `0x02400000`–`0x02680000` | 2.5 MB | preserved, nothing claims it |
+| `0x02680000`–`0x02700000` | 512 K | preserved; donor ROM, IGM extension, ARM9 cardengine staging |
+| `0x02700000`–`0x027B0C00` | 700 K | **cleared on startup**; FAT table cache lives here transiently |
+| `0x027B0C00`–`0x027F8000` | 285 K | preserved; blowfish, ARM7 staging, colour LUT staging, cache tables |
+| `0x027F8000`–`0x02800000` | 32 K | **cleared on startup** |
+
+`CARDENGINEI_ARM9_RA_BUFFERED_LOCATION` is therefore `0x02600000`, in the middle of the
+2.5 MB preserved block and 512 K clear of the donor ROM above it, with a 256 K cap.
+
+**A wrong turn worth recording**, because it is the trap this whole exercise was meant to
+avoid. `0x02700000` looked free: it appears in no location constant, and the first
+references a grep turns up are in `retail/bootloader/` — the B4DS path, not ours. Widening
+the search showed `bootloaderi` clears that entire span on startup *and* puts the FAT table
+cache there. Two truncated greps in a row would have produced a bootloader that corrupts
+its own file tables. "Not in locations.h" does not mean free, and neither does "the first
+few hits are in another path".
+
+**And the requirement is smaller than it looked.** Only the loadable image passes through
+the buffer, not the 256K window: the heap is allocated in WRAM and never copied. rcheevos
+measures 48K linked, so 256K of cap is generous rather than tight.
+
+The staging strategy that follows from all of this: prove the load path with the 48-byte
+stub that exists now. If the address is wrong after all, the blast radius is 48 bytes and
+it shows up as a failed verification on hardware before anything grows into it.
 
 ## Known graphical limitations of the overlay (deferred)
 

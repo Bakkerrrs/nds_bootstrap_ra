@@ -75,6 +75,21 @@
 #define BLOWFISH_LOCATION                            0x027B0C00
 #define ARM7_FIX_BUFFERED_LOCATION                   0x027B1E00
 #define CARDENGINEI_ARM7_BUFFERED_LOCATION           0x027B2000
+/*
+    Where the launcher stages cardenginei_arm9_ra for the bootloader to copy into DSi
+    WRAM. It has to be in a range the bootloader does *not* clear on startup -- see the
+    main-RAM staging map in docs/retroachievements.md, which is the thing that decides
+    this. 0x02400000-0x02680000 is 2.5MB of preserved, unclaimed EWRAM; this sits in the
+    middle of it, 512K clear of the donor ROM above.
+
+    The cap is a cap, not a reservation: only the loadable image passes through here, not
+    the 256K window, and rcheevos measures 48K linked. Grow it if that changes, but
+    re-read the staging map first -- the neighbouring ranges are preserved for reasons
+    that are not obvious from the addresses.
+*/
+#define CARDENGINEI_ARM9_RA_BUFFERED_LOCATION        0x02600000
+#define CARDENGINEI_ARM9_RA_BUFFERED_MAX             0x40000
+
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
 #define COLOR_LUT_BUFFERED_LOCATION                  0x027D0000
 #define CARDENGINEI_ARM9_SDK5_BUFFERED_LOCATION      0x027E0000
