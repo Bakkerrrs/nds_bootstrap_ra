@@ -1761,6 +1761,25 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 			}
 		}
 
+		/*
+		    Stage cardenginei_arm9_ra for the bootloader to copy into DSi WRAM. Only on
+		    the 3DS family, which is the only hardware this fork supports for
+		    RetroAchievements, and only when the colour filter is off: the two compete for
+		    the same WRAM, since the LUT's stored palettes live inside the window the RA
+		    binary takes. An explicit user choice of colour filters wins over a feature
+		    nobody asked for yet.
+
+		    The magic goes in only after a successful read, and is cleared first, because
+		    the staging region is uninitialised and the bootloader trusts that word.
+		*/
+		*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = 0;
+		if (!colorTable && conf->consoleModel > 0) {
+			if (loadCardEngineBinary("nitro:/cardenginei_arm9_ra.bin",
+					(u8*)(CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + CARDENGINEI_ARM9_RA_IMAGE_OFFSET)) == 0) {
+				*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = CARDENGINEI_ARM9_RA_STAGE_MAGIC;
+			}
+		}
+
 		if (colorTable) {
 			loadCardEngineBinary("nitro:/cardenginei_arm9_colorlut.bin", (u8*)CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION);
 

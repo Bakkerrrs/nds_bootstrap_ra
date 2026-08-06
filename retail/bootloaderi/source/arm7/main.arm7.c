@@ -187,6 +187,29 @@ bool ndmaDisabled = false;
 bool sharedWramEnabled = false;
 bool colorLutEnabled = false;
 bool colorLutBlockVCount = false;
+bool raWramLoaded = false;
+
+/*
+    How much of DSi WRAM is left for the nitro file info preload and for the ROM-in-RAM
+    headroom, after whichever tenant took the top of the window.
+
+    The colour LUT and cardenginei_arm9_ra are mutually exclusive -- the LUT's stored
+    palettes sit inside the range the RA binary occupies -- so this is a choice of one,
+    not a sum. Three callers consult it and they were three copies of the same ternary
+    before; see the space budget in docs/retroachievements.md.
+
+    Deliberately does *not* check dsiWramAccess: the callers already have, and returning
+    0 here would make loadNitroFileInfoIntoRAM() skip its preload for the wrong reason.
+*/
+u32 dsiWramCacheSize(void) {
+	if (colorLutEnabled) {
+		return 0x32800;
+	}
+	if (raWramLoaded) {
+		return CARDENGINEI_ARM9_RA_WRAMSIZE;
+	}
+	return 0x80000;
+}
 
 u32 newArm7binarySize = 0;
 u32 newArm7ibinarySize = 0;
@@ -894,7 +917,7 @@ static bool isROMLoadableInRAM(const tDSiHeader* dsiHeader, const tNDSHeader* nd
 	) {
 		const bool twlType = (ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed);
 		const bool cheatsEnabled = (cheatSizeTotal > 4 && cheatSizeTotal <= 0x8000);
-		u32 wramSize = (dsiWramAccess && !dsiWramMirrored) ? (colorLutEnabled ? 0x32800 : 0x80000) : 0;
+		u32 wramSize = (dsiWramAccess && !dsiWramMirrored) ? dsiWramCacheSize() : 0;
 		if (ce7Location == CARDENGINEI_ARM7_LOCATION) {
 			wramSize += 0x8000; // Shared 32KB of WRAM is available for ARM9 to use
 			sharedWramEnabled = true;
@@ -1288,7 +1311,7 @@ static void loadNitroFileInfoIntoRAM(const tNDSHeader* ndsHeader, aFile* romFile
 	if (baseFatSize == 0) return;
 
 	const u32 size = (baseFatOff-baseFntOff)+baseFatSize;
-	if (size > (colorLutEnabled ? 0x32800 : 0x80000)) return;
+	if (size > dsiWramCacheSize()) return;
 
 	sdmmc_set_ndma_slot(0);
 	fileRead((char*)0x03700000, romFile, baseFntOff, size);
@@ -2319,6 +2342,40 @@ int arm7_main(void) {
 				while (arm9_stateFlag != ARM9_READY);
 			}
 		}
+
+		/*
+		    Copy cardenginei_arm9_ra into DSi WRAM, mirroring the colour LUT above --
+		    including handing WRAM to the ARM7 only in DSi mode, which is what the LUT
+		    does and therefore what is known to work.
+
+		    !colorLutEnabled because the two share the window; the launcher already
+		    refuses to stage this when the filter is on, and this is the second half of
+		    the same rule. Placed here so raWramLoaded is set before
+		    isROMLoadableInRAM() consults dsiWramCacheSize() further down.
+
+		    The verification compares the first word rather than trusting the copy, the
+		    same way colorLutEnabled is decided. The cardengine checks again that the
+		    window begins with a branch before it ever calls into it.
+		*/
+		if ((dsiWramAccess && !dsiWramMirrored) && !colorLutEnabled
+		 && *(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION == CARDENGINEI_ARM9_RA_STAGE_MAGIC) {
+			const u32* raSrc = (u32*)(CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + CARDENGINEI_ARM9_RA_IMAGE_OFFSET);
+			dbg_printf("RetroAchievements WRAM binary\n");
+
+			if (ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed) {
+				arm9_stateFlag = ARM9_WRAMONARM7;
+				while (arm9_stateFlag != ARM9_READY);
+			}
+
+			tonccpy((u32*)CARDENGINEI_ARM9_RA_LOCATION, raSrc, CARDENGINEI_ARM9_RA_IMAGE_MAX);
+			raWramLoaded = (*(u32*)CARDENGINEI_ARM9_RA_LOCATION == *raSrc);
+
+			if (ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed) {
+				arm9_stateFlag = ARM9_WRAMONARM9;
+				while (arm9_stateFlag != ARM9_READY);
+			}
+		}
+		*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = 0;
 
 		toncset((u32*)CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION, 0, 0x1800);
 		*(u32*)(COLOR_LUT_BUFFERED_LOCATION-4) = 0;

@@ -43,34 +43,33 @@ The change is inert and cannot break a boot.
 The ARM9 cardengine has **28 bytes** left. That is the constraint behind almost every
 decision in this document, and the reason the next task matters.
 
-### The next task: make the binary load
+### The next task: confirm the loader on hardware
 
-Three steps, in this order, all with their addresses already settled:
+The load path is written and builds clean; it has never run. Three pieces:
 
-1. **`retail/arm9/source/conf_sd.cpp`** — read the nitrofile into the staging buffer,
-   next to where the colour LUT does it at line ~1765:
-   ```c
-   loadCardEngineBinary("nitro:/cardenginei_arm9_ra.bin",
-                        (u8*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION);
-   ```
-   Gate it on `conf->consoleModel > 0`, since the fork is 3DS-only.
+- **`retail/arm9/source/conf_sd.cpp`** stages `nitro:/cardenginei_arm9_ra.bin` at
+  `CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x10`, then writes the `SRA1` magic at +0x00.
+  Gated on `conf->consoleModel > 0` and on `!colorTable`.
+- **`retail/bootloaderi/source/arm7/main.arm7.c`** copies it into
+  `CARDENGINEI_ARM9_RA_LOCATION`, mirroring the colour LUT's retail-path block —
+  including handing WRAM to the ARM7 only in DSi mode, which is what the LUT does and
+  therefore the only thing known to work. Placed immediately after that block so
+  `raWramLoaded` is set before `isROMLoadableInRAM()` reads the WRAM budget.
+- **`dsiWramCacheSize()`** replaces the three copies of
+  `(colorLutEnabled ? 0x32800 : 0x80000)` that used to be duplicated across two files,
+  and returns `CARDENGINEI_ARM9_RA_WRAMSIZE` when the RA binary is loaded. Verified in
+  the disassembly: the compiler emits a branchless select over 0x32800, 0x40000 and
+  0x80000.
 
-2. **`retail/bootloaderi/source/arm7/main.arm7.c`** — copy the buffer into WRAM, the
-   way the colour LUT is copied at lines ~1944-1958: hand WRAM to the ARM7 with
-   `arm9_stateFlag = ARM9_WRAMONARM7`, wait for `ARM9_READY`, `tonccpy` into
-   `CARDENGINEI_ARM9_RA_LOCATION`, verify the copy took, hand WRAM back. Then set
-   `b_raWramLoaded` in `hook_arm9.c` where `b_useColorLut` is set.
+**It is designed to fail safe and to name the stage that failed.** Two independent checks
+guard the call: the bootloader compares the first word after copying, which proves the
+copy landed, and the cardengine checks the window begins with a branch, which proves what
+landed is code. A stale staging magic cannot survive either — the launcher clears it
+before loading and the bootloader clears it after copying.
 
-3. **`wramSize`** — the literal `(colorLutEnabled ? 0x32800 : 0x80000)` appears in
-   three places: `main.arm7.c` line ~897 (inside `isROMLoadableInRAM`), `main.arm7.c`
-   line ~1291 (`loadNitroFileInfoIntoRAM`), and `hook_arm9.c` line ~298. All three need
-   to account for `CARDENGINEI_ARM9_RA_WRAMSIZE` when the RA binary is loaded. RA and the
-   colour LUT are mutually exclusive by design — the LUT's stored palettes live inside the
-   RA window.
-
-**Do it with the 48-byte stub that is already there.** If the staging address is wrong
-after all, the blast radius is 48 bytes and it surfaces as a failed verification rather
-than as corruption. Grow the buffer only once the path is proven.
+The residual risk is the one the mapping could not fully retire: if `0x02600000` turns out
+to be live after all, the image written there is 48 bytes. That is why this is being proven
+with the stub rather than with `rcheevos`.
 
 ### How you know it worked
 
@@ -1105,9 +1104,9 @@ break a boot.
 | `ra_tick()` calls it, gated on a flag and on the window containing code | done |
 | `wramMagic` / `wramTicks` / `wramState` in the snapshot | done |
 | Staging address chosen and justified (`0x02600000`) | done |
-| Launcher reads the nitrofile into that buffer | **not started** |
-| Bootloader ARM7 copies the buffer into WRAM and sets `b_raWramLoaded` | **not started** |
-| `wramSize` reduced to `CARDENGINEI_ARM9_RA_WRAMSIZE` when it is loaded | **not started** |
+| Launcher reads the nitrofile into that buffer | written, hardware-unverified |
+| Bootloader ARM7 copies the buffer into WRAM and sets `b_raWramLoaded` | written, hardware-unverified |
+| `wramSize` reduced to `CARDENGINEI_ARM9_RA_WRAMSIZE` when it is loaded | written, hardware-unverified |
 
 The stub does one thing: write `RAH1` into `wramMagic` on its first call and increment
 `wramTicks` every frame. Useless on its own, and that is the point — the milestone is the
@@ -1268,10 +1267,10 @@ patching them into a 104-byte margin first would be work done twice.
       on *Space Invaders Extreme* and *Final Fantasy III*. Known overlay limitations
       found along the way are catalogued and deferred, see above.
 - [~] `cardenginei_arm9_ra`, a separate ARM9 binary in DSi WRAM. Built, packed, called,
-      and verified inert on hardware (`wramState` = `00`). Placement, sizing and the
-      staging address are all researched and settled. **Remaining: the launcher read, the
-      ARM7 copy, and the `wramSize` arithmetic** — step by step in *Where this stands*
-      near the top of this document.
+      and previously verified inert on hardware (`wramState` = `00`). The loader is now
+      written too — launcher staging, ARM7 copy into WRAM, and the WRAM budget arithmetic
+      — and builds clean, but **has never run**. Confirming it is the next thing: see
+      *Where this stands* near the top of this document.
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status

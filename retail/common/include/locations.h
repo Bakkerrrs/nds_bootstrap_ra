@@ -90,6 +90,24 @@
 #define CARDENGINEI_ARM9_RA_BUFFERED_LOCATION        0x02600000
 #define CARDENGINEI_ARM9_RA_BUFFERED_MAX             0x40000
 
+/*
+    Staging layout at that address. The magic is how the bootloader knows the launcher
+    actually put something there: the region is uninitialised otherwise, and jumping into
+    whatever the last occupant left would be a crash. It is the same device the colour LUT
+    uses with its 'cLUT' word, for the same reason.
+
+      +0x00  CARDENGINEI_ARM9_RA_STAGE_MAGIC, written last and cleared after the copy
+      +0x10  the binary image, starting with the branch the loader checks for
+
+    Reads as "SRA1" in a byte-wise hex dump. IMAGE_MAX is how much gets copied -- a fixed
+    amount rather than a carried length, again like the colour LUT, since the destination
+    window is 256K and copying past the image only touches .bss, which this binary does
+    not assume is initialised anyway.
+*/
+#define CARDENGINEI_ARM9_RA_STAGE_MAGIC              0x31415253
+#define CARDENGINEI_ARM9_RA_IMAGE_OFFSET             0x10
+#define CARDENGINEI_ARM9_RA_IMAGE_MAX                0x10000
+
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
 #define COLOR_LUT_BUFFERED_LOCATION                  0x027D0000
 #define CARDENGINEI_ARM9_SDK5_BUFFERED_LOCATION      0x027E0000

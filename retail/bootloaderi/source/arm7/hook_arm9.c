@@ -40,6 +40,9 @@
 // guarantee -- see ra_tick().
 #define b_raWramLoaded BIT(23)
 
+/* Defined in main.arm7.c: the colour LUT and the RA binary share the WRAM window. */
+extern u32 dsiWramCacheSize(void);
+
 
 static const int MAX_HANDLER_LEN = 50;
 static const int MAX_HANDLER_LEN_ALT = 0x200;
@@ -231,6 +234,7 @@ int hookNdsRetailArm9(
 	extern u32* mobiclipEndOffset;
 	extern bool colorLutEnabled;
 	extern bool colorLutBlockVCount;
+	extern bool raWramLoaded;
 	extern u32 newSwiHaltAddr;
 	extern bool romLocationAdjust(const tNDSHeader* ndsHeader, const bool laterSdk, const bool isSdk5, u32* romLocation, const u16 blockSize);
 	extern u32 dataToPreloadFullSize(void);
@@ -297,9 +301,12 @@ int hookNdsRetailArm9(
 	if (colorLutBlockVCount) {
 		ce9->valueBits |= b_colorLutBlockVCount;
 	}
+	if (raWramLoaded) {
+		ce9->valueBits |= b_raWramLoaded;
+	}
 	if (!ROMinRAM && dsiWramAccess && !dsiWramMirrored && (ndsHeader->unitCode == 0 || !dsiModeConfirmed) && baseFatSize != 0) {
 		const u32 fntFatSize = (baseFatOff-baseFntOff)+baseFatSize;
-		if (fntFatSize <= (colorLutEnabled ? 0x32800 : 0x80000)) {
+		if (fntFatSize <= dsiWramCacheSize()) {
 			ce9->fntSrc = baseFntOff;
 			ce9->fntFatSize = fntFatSize;
 			ce9->valueBits |= b_fntFatCached;
@@ -524,11 +531,15 @@ int hookNdsRetailArm9Mini(cardengineArm9* ce9, const tNDSHeader* ndsHeader, s32 
 	ce9->valueBits |= b_enableExceptionHandler;
 	extern bool colorLutEnabled;
 	extern bool colorLutBlockVCount;
+	extern bool raWramLoaded;
 	if (colorLutEnabled) {
 		ce9->valueBits |= b_useColorLut;
 	}
 	if (colorLutBlockVCount) {
 		ce9->valueBits |= b_colorLutBlockVCount;
+	}
+	if (raWramLoaded) {
+		ce9->valueBits |= b_raWramLoaded;
 	}
 
 	extern u32 iUncompressedSize;
