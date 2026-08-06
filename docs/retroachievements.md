@@ -510,6 +510,48 @@ Fixed to borrow the single entry the design actually needs, which also freed 30 
 from 44 bytes to 104. One entry is still one the game may be using, since the text has
 to be *some* colour, but that is the floor rather than fifteen times it.
 
+### What the split counter answered, next session
+
+Two more samples from *Final Fantasy III* with the palette fix and the split denial
+counter in, snapshot at `0x027FEEA0`:
+
+| Field | at 4,411 frames | at 7,782 frames |
+| --- | --- | --- |
+| `shows` | 5 | 7 |
+| `denied` / `deniedNoLayer` | 1 / **1** | 4 / **4** |
+| `evicted` | 3 | 3 |
+| `linesLast` / `linesMax` | 11 / 11 | 0 / 11 |
+| watch 1 / watch 2 | both `S+4` → 4,411 | both `S+4` → 7,782 |
+
+**The fade hypothesis is confirmed, and completely.** `deniedNoLayer` equals `denied` in
+both samples — every single denial was "no background layer was switched off", and VRAM
+was never once the reason. That also clears the `surveyBlocks()` hole below of any
+involvement in the denials. The fix is the unlock queue and nothing else; block
+management does not need touching for this.
+
+**The eviction path works, and this is the first time it has run.** `evicted` was 0
+through every earlier session, so the code phase 0.5 wrote from a hardware lesson had
+never actually executed. Here it fired three times: the game reclaimed the borrowed block
+mid-notification, the overlay handed it back, and the reported graphical faults went
+*down* rather than up.
+
+**And a caveat about the cost measurement that these samples expose.** `linesLast` was 11
+in the first sample — that tick really did take 11 scanlines — and the reading was taken
+with the in-game menu open. The menu runs on the ARM9 and does substantial work, so it
+is contending with the very thing being measured. Since `linesMax` is a running maximum,
+menu frames feed into it too, and the only way to read it is to open the menu. It is
+therefore entirely possible that the 11 is a menu artefact and the cost during actual
+gameplay is nearer 0–1 lines. Nothing in the current instrumentation can separate them:
+the observation perturbs the observed.
+
+**A known interaction, deliberately not fixed.** The one graphical fault that remained
+after the palette fix appeared at the moment of pressing X to open the in-game menu. That
+is the menu taking over both screens; if the overlay holds a borrowed layer at that
+instant, both are writing sub engine registers at once. It is an interaction by
+construction rather than a new bug, and no achievement is going to unlock on the exact
+frame the menu opens, so it stands as accepted. The clean answer, when the overlay is
+rewritten, is for it to stand down while the menu is up.
+
 **A hole this exposed that is not fixed.** `surveyBlocks()` reads every enabled layer's
 `BGCNT` as though it were a text background: character base in 16K units, screen base in
 2K units, map size from bits 14-15. It never looks at the BG mode in `DISPCNT` or at the
@@ -623,9 +665,11 @@ there is nowhere to draw, and no amount of engineering changes that short of
 pausing the game — which is worse than not showing text. Unlocks will need queuing
 until a slot frees up rather than being dropped.
 
-**Confirmed at phase 1**: on *Final Fantasy III* the overlay was refused 4 times out of
-13 attempts (`denied` = 4), apparently across map transitions where the game fades the
-screen. The queue is not a precaution, it is required.
+**Confirmed at phase 1**, and then pinned down: on *Final Fantasy III* the overlay was
+refused across map transitions where the game fades the screen, and once the denial
+counter was split, **every refusal was a "no free layer" one** — `deniedNoLayer` equalled
+`denied` in both samples. VRAM was never the constraint. The queue is not a precaution,
+it is required, and it is the only thing required.
 
 The current version is a feasibility proof, not the finished notification: one fixed
 message, glyphs stored in message order so there is no font and no lookup table.
@@ -639,6 +683,11 @@ in the separate ARM9 binary described below.
   were stomped for free. It took playing *Final Fantasy III* to see it, as a transient
   fault on the title screen. "Ask for what is needed at the moment it is needed" applies
   to how *much* is borrowed, not only to when.
+- **Handing the block back actually happens.** `evicted` sat at 0 through every session
+  until *Final Fantasy III*, where it reached 3 -- so the give-it-back path, written from
+  a hardware lesson at phase 0.5, had never once run before. When it did, the reported
+  faults went down. Code written from a correct lesson can still sit unexercised for a
+  long time; the counter is what said when it finally ran.
 - **DS VRAM ignores 8-bit writes.** The tiles were built a byte at a time and simply
   never got written, leaving every pixel at index 0 — transparent. A fully correct,
   fully configured layer drew nothing. Registers, map and palette all worked because
