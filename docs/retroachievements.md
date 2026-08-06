@@ -734,6 +734,149 @@ It no longer matters. The separate-binary approach puts code and state in the
 `0x02xxxxxx` space instead, which is required anyway: region 3's *instruction*
 permission is `0x0`, so code could never have executed from `0x0C`/`0x0D`.
 
+## Where `cardenginei_arm9_ra` goes, and whether `rcheevos` fits
+
+Researched before writing any of it, because the placement is hard to undo once the
+bootloader plumbing exists. Everything below is measured on the pinned toolchain
+(devkitARM r65, thumb, `-Os`) or read out of the bootloader source, not estimated.
+
+### Only one region can host it
+
+Three candidates, and two are already eliminated:
+
+- **`0x0C`/`0x0D` extended main RAM** — ruled out earlier and worth restating, because it
+  is the obvious choice by size. MPU region 3's *instruction* permission is `0x0`, so code
+  can never execute there. Data stores do work inside the ROM cache, which matters below.
+- **`0x02xxxxxx` main RAM** — the game's own address space. Taking a few hundred KB from a
+  running game is not a thing that can be done safely.
+- **DSi WRAM, `0x03700000`–`0x03780000` (512 KB)** — the only region with a *working
+  precedent*: `cardenginei_arm9_colorlut` executes from `0x03732800` today. Requires
+  `dsiWramAccess && !dsiWramMirrored`.
+
+So it is DSi WRAM, and the colour LUT is the pattern to copy.
+
+### Is that region available on the target hardware?
+
+Yes, for a retail DS game on a 3DS with SCFG unlocked. From `retail/arm9/source/conf_sd.cpp`:
+
+- `dsiWramAccess` is `true` outright when `REG_SCFG_EXT7 != 0`. Otherwise it is probed by
+  writing a magic word to `0x03700000` and reading it back.
+- `dsiWramMirrored` is set when `0x03700000` and `0x03708000` read back the *same* magic,
+  meaning only the shared 32 KB exists rather than the full 512 KB. That is the flashcard
+  case, which the fork does not target anyway.
+
+Switching ownership of the region between CPUs needs the same IPC handshake the colour LUT
+does (`arm9_stateFlag = ARM9_WRAMONARM7`, wait for `ARM9_READY`, copy, hand back).
+
+### What the region is already spent on
+
+The whole 512 KB is claimed, and the earlier assumption that the colour LUT leaves a gap
+was wrong — the apparent hole is its stored-palette buffers:
+
+| Range | Size | Used by |
+| --- | --- | --- |
+| `0x03700000` + `wramSize` | up to 512 KB | nitro file info preload / ROM-in-RAM headroom |
+| `0x03732800` | 4 KB | colour LUT code |
+| `0x03733800`, `0x0374B800`, `0x0374C000`, `0x0375C000`, `0x03760000`, `0x03764000`, `0x0376C000` | — | colour LUT stored palettes |
+| `0x03770000` | 64 KB | the colour LUT table itself |
+
+`wramSize` is computed in one place and duplicated as a literal in two more:
+
+```c
+u32 wramSize = (dsiWramAccess && !dsiWramMirrored) ? (colorLutEnabled ? 0x32800 : 0x80000) : 0;
+```
+
+`0x03700000 + 0x32800` is exactly `0x03732800`, so with the colour LUT on the preload
+budget stops precisely where the LUT code starts. The LUT costs `0x4D800` (317 KB).
+
+### What reserving space actually costs
+
+Not the ROM cache — that is a separate thing in `0x0C`/`0x0D`. `wramSize` feeds two
+consumers:
+
+1. **`isROMLoadableInRAM()`**, where it is *added* to `romSizeLimit`. On a 3DS with a
+   retail non-DSi-mode game that limit is `0xBE0000 + 0x1000000 + wramSize`:
+
+   | Reserved for RA | ROM-in-RAM limit |
+   | --- | --- |
+   | nothing | 28.375 MiB |
+   | 256 KB | 28.125 MiB |
+   | all 512 KB | 27.875 MiB |
+
+2. **`loadNitroFileInfoIntoRAM()`**, which preloads the ROM's filename and file-allocation
+   tables and simply `return`s — skipping the optimisation, not failing — when they exceed
+   the budget.
+
+Both costs are **cliffs, not gradients**: a ROM either fits entirely in RAM or does not.
+The band that changes hands is ~0.5 MiB out of ~28, and standard cart sizes cluster at
+powers of two, so no common size sits inside it. The exposure is titles whose *trimmed*
+size lands in that half-megabyte, which will be few but is not nothing.
+
+### Does `rcheevos` fit? Measured, and comfortably
+
+Cloned upstream and compiled for `armv5te` thumb `-Os`. 32 of 34 translation units build
+unmodified; the two that do not are `rc_libretro.c` and `rc_validate.c`, neither of which
+is needed at runtime.
+
+Unlinked, by module:
+
+| Module | text | rodata | total |
+| --- | --- | --- | --- |
+| `rcheevos` runtime — parse and evaluate conditions | 25,756 | 10,081 | **35 KB** |
+| `rc_client` | 22,434 | 4,068 | 26 KB |
+| `rapi` — request building, JSON | 18,248 | 6,364 | 24 KB |
+| `rhash` — game identification | 26,188 | 8,639 | 34 KB |
+| compat / util / version | 480 | 1,130 | 2 KB |
+| **all of it** | 93,106 | 30,282 | **121 KB** |
+
+Then linked for real, with `--gc-sections`, for the shape phase 2 needs — activate an
+achievement from a definition string and evaluate it once per frame:
+
+**48 KB** of `.text` + `.rodata` + `.data`, and **492 bytes** of `.bss`, *including*
+everything newlib contributes to that path.
+
+### Runtime state, also measured
+
+`rc_runtime_activate_achievement()` mallocs per achievement. Wrapping `malloc` and feeding
+it definition shapes RetroAchievements actually uses — a simple flag, a delta compare, a
+pointer chain with an AND of several conditions, a reset condition:
+
+| Definition | Bytes |
+| --- | --- |
+| `0xH00b8b1=1` | 1,912 (includes one-time runtime setup) |
+| `d0xH0016c0<0xH0016c0_0xH0016c0>10` | 432 |
+| `I:0xX0019c8_0xH000048=5_..._0xX00004c>1000` | 1,368 |
+| six conditions plus a reset | 968 |
+
+So roughly **1 KB per achievement** — 50–150 KB of heap for a real set of 50–150.
+
+### The budget, end to end
+
+| | Minimum viable | Full client, large set |
+| --- | --- | --- |
+| code | 48 KB | 121 KB |
+| heap | ~50 KB | ~150 KB |
+| **total** | **~100 KB** | **~270 KB** |
+
+Against 512 KB of DSi WRAM, both fit. And the answer to the phase 0 question — *does
+`rc_client` fit in the cardengine?* — is now quantified from the other direction too: 48 KB
+is 460 times the 104 bytes the cardengine has left.
+
+### Two consequences worth deciding on deliberately
+
+**RA and the colour filter compete.** The LUT holds 317 KB, leaving 195 KB. The minimum RA
+configuration (~100 KB) coexists with it; the full one (~270 KB) does not. So either RA runs
+reduced when colour filters are on, or the two are mutually exclusive and the user picks. It
+does not have to be decided now, but the code should not assume they can both be maximal.
+
+**The RA binary needs a heap and a libc, unlike the cardengine.** `rcheevos` calls `malloc`,
+`realloc`, `snprintf` — which drags in newlib's floating-point formatting — and `fmod`,
+which pulls in soft-float doubles. The 48 KB figure already includes all of that, so it is
+paid for rather than surprising. But it means `cardenginei_arm9_ra` has to be a properly
+linked program with its own allocator over a reserved arena, not an injected blob in the
+style of `cardenginei_arm9_colorlut`. That is the single biggest structural difference from
+the pattern being copied, and it is worth knowing before starting rather than after.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
@@ -809,7 +952,11 @@ patching them into a 104-byte margin first would be work done twice.
       on *Space Invaders Extreme* and *Final Fantasy III*. Known overlay limitations
       found along the way are catalogued and deferred, see above.
 - [ ] Next: `cardenginei_arm9_ra`, a separate ARM9 binary for RA code, following the
-      colour LUT's pattern. Unblocks both a real font for the overlay and phase 2.
+      colour LUT's pattern. Unblocks a real font for the overlay, phase 2, the overlay
+      fixes deferred above, and a control measurement for the per-frame cost. Placement
+      and sizing are researched — see the section above; `rcheevos` needs 48 KB linked
+      against DSi WRAM's 512 KB, so the region is settled and the open item is the
+      bootloader plumbing.
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status
