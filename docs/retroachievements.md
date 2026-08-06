@@ -451,7 +451,7 @@ either way. And the overlay's 9 shows with 0 evictions is better than phase 0.5'
 1 on the same game, which is what more play time in one session looks like rather than
 a change in behaviour.
 
-#### A second game, sampled twice in one session
+#### *Final Fantasy III*, sampled twice in one session
 
 | Field | at 6,403 frames | at 9,247 frames |
 | --- | --- | --- |
@@ -462,7 +462,8 @@ a change in behaviour.
 | `linesLast` / `linesMax` | 0 / 10 | 0 / 11 |
 
 The walker behaves identically on a second title, which is the point of running one:
-both chains resolved to `ticks` and read its live value, twice, 2,844 frames apart.
+both chains resolved to `ticks` and read its live value, twice, 2,844 frames apart. The
+game itself ran well throughout.
 
 The new information is `denied` = **4**. This is the first time on hardware that the
 overlay has asked for a layer and a block and been refused — 4 refusals against 13
@@ -471,6 +472,53 @@ is *opportunistic by nature*, a game that keeps its sub layers busy leaves nowhe
 draw, and unlocks will have to queue until a slot frees rather than being dropped. That
 is no longer a design argument, it is a measurement. `evicted` stayed 0, so when it did
 get a block it never had to hand it back mid-notification.
+
+### Four things the field report taught us that the counters could not
+
+Playing a real game for real found things no snapshot field was going to.
+
+**The notification does not have a screen.** It appeared on the top screen in the field
+and on the bottom in battles. That is not a bug and not a choice — the overlay draws on
+the *sub* engine, and which physical panel the sub engine feeds is bit 15 of `POWCNT1`,
+the display-swap bit, which belongs to the game. *Final Fantasy III* flips it by
+context. Nothing in `ra_overlay.c` reads `POWCNT1`, so the overlay has no idea where its
+own text is coming out.
+
+For a feasibility proof that does not matter. For a real unlock notification it is a
+decision to make deliberately: either read the swap bit and accept whichever screen the
+sub engine is on, or be prepared to borrow from the main engine too so the notification
+can be put somewhere predictable.
+
+**The denials line up with the fades.** The notification went missing while moving
+between maps, which is where the game fades the screen to black — plausibly by enabling
+every sub background layer to do it, which would leave `chooseLayer()` nothing to take.
+`denied` could not confirm that because it counted both failure modes as one, so it is
+now split: `deniedNoLayer` counts the times no layer was switched off, and
+`denied - deniedNoLayer` the times no VRAM block was spare. The next session can stop
+guessing which one is happening.
+
+**A palette bug the counters were blind to.** A graphical fault appeared on the title
+screen at the moment the notification came up. `draw()` was saving and whitening all
+sixteen entries of palette bank 15, but the glyphs are drawn entirely in colour index 1
+— it ORs a nibble of 1 for every set pixel — so fifteen of those entries were being
+overwritten for nothing. Any game using them saw them go white for the three seconds a
+notification was up, and come back on hide: exactly a transient fault tied to the
+toaster appearing.
+
+Fixed to borrow the single entry the design actually needs, which also freed 30 bytes of
+`.bss` — more than the new counter above cost, so the margin on `cardenginei_arm9` went
+from 44 bytes to 104. One entry is still one the game may be using, since the text has
+to be *some* colour, but that is the floor rather than fifteen times it.
+
+**A hole this exposed that is not fixed.** `surveyBlocks()` reads every enabled layer's
+`BGCNT` as though it were a text background: character base in 16K units, screen base in
+2K units, map size from bits 14-15. It never looks at the BG mode in `DISPCNT` or at the
+colour-depth bit. For an affine or bitmap background those fields mean different things
+— a bitmap's base is in 16K units, not 2K — so the survey can both miss blocks the game
+is using and mark ones it is not. A title screen is a likely place for a bitmap
+background. This was not the cause of the fault above, but it is a real way for the
+overlay to pick a block that is in use, and it belongs with the overlay rewrite in the
+separate ARM9 binary rather than with a patch here.
 
 ### What to look for on hardware
 
@@ -485,11 +533,12 @@ The header is the first two rows:
 | `+0x00` | `magic` | `52 41 31 53` — `RA1S` |
 | `+0x04` | `ticks` | climbing once per frame |
 | `+0x08` / `+0x0C` / `+0x10` | `shows` / `denied` / `evicted` | the overlay's negotiation |
-| `+0x14` | `watchCount` | `03` |
-| `+0x15` | `resolved` | `03` — all three defaults resolving |
-| `+0x16` / `+0x17` | `linesLast` / `linesMax` | the per-frame cost in scanlines |
+| `+0x14` | `deniedNoLayer` | of the denials, how many found no free layer |
+| `+0x18` | `watchCount` | `03` |
+| `+0x19` | `resolved` | `03` — all three defaults resolving |
+| `+0x1A` / `+0x1B` | `linesLast` / `linesMax` | the per-frame cost in scanlines |
 
-Then one 0x18-byte block per watch, at `+0x18`, `+0x30`, `+0x48`, `+0x60`. Within a
+Then one 0x18-byte block per watch, at `+0x1C`, `+0x34`, `+0x4C`, `+0x64`. Within a
 block:
 
 | Offset in block | Field |
@@ -502,12 +551,12 @@ block:
 
 So, with the snapshot at `S`:
 
-- **Watch 0** (`S+0x18`), the direct read: `base` and `address` both `0x04001000`,
+- **Watch 0** (`S+0x1C`), the direct read: `base` and `address` both `0x04001000`,
   `depth` `00`, `size` `02`, `status` `02`. `value` tracks `DISPCNT` and changes when a
   notification is up.
-- **Watch 1** (`S+0x30`), one indirection: `offsets[0]` `04`, `depth` `01`, `status`
+- **Watch 1** (`S+0x34`), one indirection: `offsets[0]` `04`, `depth` `01`, `status`
   `02`, `address` = **`S+4`**, `value` = `ticks`.
-- **Watch 2** (`S+0x48`), two indirections: `offsets[0]` `00`, `offsets[1]` `04`,
+- **Watch 2** (`S+0x4C`), two indirections: `offsets[0]` `00`, `offsets[1]` `04`,
   `depth` `02`, `status` `02`, `address` = **`S+4`**, `value` = `ticks`.
 
 Watches 1 and 2 reading `ticks` through one and through two indirections is **the phase
@@ -574,16 +623,22 @@ there is nowhere to draw, and no amount of engineering changes that short of
 pausing the game — which is worse than not showing text. Unlocks will need queuing
 until a slot frees up rather than being dropped.
 
-**Confirmed at phase 1**: on a second game the overlay was refused 4 times out of 13
-attempts (`denied` = 4). The queue is not a precaution, it is required.
+**Confirmed at phase 1**: on *Final Fantasy III* the overlay was refused 4 times out of
+13 attempts (`denied` = 4), apparently across map transitions where the game fades the
+screen. The queue is not a precaution, it is required.
 
 The current version is a feasibility proof, not the finished notification: one fixed
 message, glyphs stored in message order so there is no font and no lookup table.
 That is what let it fit in the cardengine at all, and it is why the real one belongs
 in the separate ARM9 binary described below.
 
-### Three hardware lessons, each of which cost a flash cycle
+### Hardware lessons, each of which cost a flash cycle
 
+- **Borrow the minimum, not the convenient amount.** The palette code saved and
+  whitened all sixteen entries of a bank when the glyphs only ever use one, so fifteen
+  were stomped for free. It took playing *Final Fantasy III* to see it, as a transient
+  fault on the title screen. "Ask for what is needed at the moment it is needed" applies
+  to how *much* is borrowed, not only to when.
 - **DS VRAM ignores 8-bit writes.** The tiles were built a byte at a time and simply
   never got written, leaving every pixel at index 0 — transparent. A fully correct,
   fully configured layer drew nothing. Registers, map and palette all worked because

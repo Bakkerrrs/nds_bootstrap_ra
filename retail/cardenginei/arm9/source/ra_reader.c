@@ -289,9 +289,11 @@ void ra_reader_tick(void) {
 	snapshot.ticks++;
 	{
 		extern u32 raOverlayShows, raOverlayDenied, raOverlayEvicted;
-		snapshot.shows   = raOverlayShows;
-		snapshot.denied  = raOverlayDenied;
-		snapshot.evicted = raOverlayEvicted;
+		extern u32 raOverlayDeniedNoLayer;
+		snapshot.shows         = raOverlayShows;
+		snapshot.denied        = raOverlayDenied;
+		snapshot.evicted       = raOverlayEvicted;
+		snapshot.deniedNoLayer = raOverlayDeniedNoLayer;
 	}
 
 	for (i = 0, w = snapshot.watches; i < RA_WATCH_MAX; i++, w++) {

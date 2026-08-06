@@ -41,6 +41,22 @@
 #define CHAR_BLOCKS 8
 
 #define OVERLAY_PAL_BANK 15
+
+/*
+    The glyphs are drawn entirely in colour index 1 -- see draw(), which ORs a nibble of
+    1 for every set pixel -- so exactly one palette entry has to be borrowed. An earlier
+    version saved and whitened all sixteen in the bank, which cost nothing to write and
+    everything to a game using those colours: on Final Fantasy III's title screen
+    fourteen entries the overlay never needed went white for the three seconds a
+    notification was up, and came back when it hid. A transient graphical fault tied to
+    the toaster appearing, for no benefit.
+
+    One entry is still one entry the game may be using; that is unavoidable, since the
+    text has to be *some* colour. But the blast radius is now the minimum the design
+    requires rather than fifteen times it.
+*/
+#define OVERLAY_PAL_INDEX 1
+#define OVERLAY_PAL_ENTRY (OVERLAY_PAL_BANK * 16 + OVERLAY_PAL_INDEX)
 #define OVERLAY_ROW 10
 #define OVERLAY_COL 10
 
@@ -88,13 +104,22 @@ static int  layer;        /* background layer currently borrowed */
 static u16  savedBgCnt;
 static u16  savedHofs;
 static u16  savedVofs;
-static u16  savedPalette[16];
+static u16  savedPaletteEntry;
 static bool savedDispcntBg;
 
 /* Read into the snapshot, so the negotiation is observable rather than guessed at. */
 u32 raOverlayShows;
 u32 raOverlayDenied;   /* wanted to show, found nothing free */
 u32 raOverlayEvicted;  /* the game reclaimed the block mid-notification */
+/*
+    Of those denials, the ones where no background layer was switched off -- as opposed
+    to no VRAM block being spare. The two have different answers, and lumping them
+    together left the obvious hypothesis untestable: on Final Fantasy III the
+    notification went missing across map transitions, where the screen fades and the
+    game plausibly has every sub layer enabled to do it. If that is right, this counter
+    accounts for nearly all of them.
+*/
+u32 raOverlayDeniedNoLayer;
 
 /*
     Which 16K blocks of sub BG VRAM the game is using, for tiles or for maps. Read
@@ -164,12 +189,8 @@ static void draw(int b) {
 	vu16* map = mapOf(b);
 	int g, y, x;
 
-	for (g = 0; g < 16; g++) {
-		savedPalette[g] = SUB_BG_PALETTE[OVERLAY_PAL_BANK * 16 + g];
-		if (g > 0) {
-			SUB_BG_PALETTE[OVERLAY_PAL_BANK * 16 + g] = 0x7FFF;  /* white */
-		}
-	}
+	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
+	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 
 	/* Words, never bytes: DS VRAM ignores 8-bit writes. */
 	for (g = 0; g < GLYPH_COUNT; g++) {
@@ -201,6 +222,7 @@ static void show(void) {
 	const int l = chooseLayer();
 	if (l < 0) {
 		raOverlayDenied++;
+		raOverlayDeniedNoLayer++;
 		return;  /* every layer in use: stay quiet rather than displace one */
 	}
 
@@ -234,8 +256,6 @@ static void show(void) {
 }
 
 static void hide(void) {
-	int g;
-
 	framesLeft = 0;
 
 	SUB_BGCNT(layer)  = savedBgCnt;
@@ -244,9 +264,7 @@ static void hide(void) {
 	if (!savedDispcntBg) {
 		SUB_DISPCNT &= ~(1u << (8 + layer));
 	}
-	for (g = 0; g < 16; g++) {
-		SUB_BG_PALETTE[OVERLAY_PAL_BANK * 16 + g] = savedPalette[g];
-	}
+	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = savedPaletteEntry;
 }
 
 void ra_overlay_tick(void) {
@@ -257,6 +275,7 @@ void ra_overlay_tick(void) {
 		raOverlayShows = 0;
 		raOverlayDenied = 0;
 		raOverlayEvicted = 0;
+		raOverlayDeniedNoLayer = 0;
 	}
 
 	if (framesLeft) {

@@ -51,13 +51,13 @@
     indirections a single watch may walk.
 
     Both are budget decisions, not design limits. The reader lives in the ARM9
-    cardengine's fixed window and the whole watchlist -- code, descriptors and
-    results -- has to fit in what is left of it. The tightest variant that links
-    this code has roughly 600 bytes spare, so a watch costs about 4% of the
-    remaining space; see docs/retroachievements.md for the per-variant figures and
-    tools/ra_snapshot_addr.sh for the current ones. The linker scripts assert that
-    .bss stays below the stacks, so raising these too far fails the build rather
-    than corrupting the stack on hardware.
+    cardengine's fixed window and the whole watchlist -- code, descriptors and results
+    -- has to fit in what is left of it, which on `cardenginei_arm9` is a margin best
+    described in tens of bytes. A watch costs 24 of them. Run
+    tools/ra_snapshot_addr.sh for the current figure and see the space budget in
+    docs/retroachievements.md for how little room there is; the linker scripts assert
+    .bss stays inside the window, so raising these too far fails the build rather than
+    producing a cardengine that does not fit.
 
     Two indirections cover the shape RetroAchievements actually uses on the DS --
     a pointer to a player or save structure, then a field inside it -- and a third
@@ -149,8 +149,15 @@ typedef struct raSnapshot {
 	u32 shows;           /* +0x08  notifications actually displayed */
 	u32 denied;          /* +0x0C  wanted to show, nothing was free */
 	u32 evicted;         /* +0x10  game reclaimed the block mid-notification */
-	u8  watchCount;      /* +0x14  slots in use */
-	u8  resolved;        /* +0x15  of those, how many resolved this tick */
+	/*
+	    Of `denied`, the share where no background layer was free rather than no VRAM
+	    block. Split because the two have different answers and the obvious hypothesis
+	    was otherwise untestable -- see the phase 1 field notes in
+	    docs/retroachievements.md.
+	*/
+	u32 deniedNoLayer;   /* +0x14 */
+	u8  watchCount;      /* +0x18  slots in use */
+	u8  resolved;        /* +0x19  of those, how many resolved this tick */
 	/*
 	    The per-frame cost, in scanlines. The game owns the hardware timers, so
 	    VCOUNT is the only clock the reader can read without taking something the
@@ -158,9 +165,9 @@ typedef struct raSnapshot {
 	    being answered is "does the watchlist eat into the frame", and for that it is
 	    exactly the right unit.
 	*/
-	u8  linesLast;       /* +0x16  scanlines the last tick consumed */
-	u8  linesMax;        /* +0x17  worst seen since the buffer was claimed */
-	raWatch watches[RA_WATCH_MAX];  /* +0x18 */
+	u8  linesLast;       /* +0x1A  scanlines the last tick consumed */
+	u8  linesMax;        /* +0x1B  worst seen since the buffer was claimed */
+	raWatch watches[RA_WATCH_MAX];  /* +0x1C */
 } raSnapshot;
 
 #endif /* RA_H */

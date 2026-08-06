@@ -27,7 +27,7 @@
 #include "../retail/cardenginei/arm9/source/ra_reader.c"
 
 /* ra_reader.c reads these out of the overlay; here they are just storage. */
-u32 raOverlayShows, raOverlayDenied, raOverlayEvicted;
+u32 raOverlayShows, raOverlayDenied, raOverlayEvicted, raOverlayDeniedNoLayer;
 
 #define IO_BASE  0x04000000
 #define IO_SIZE  0x2000
@@ -100,11 +100,12 @@ int main(void) {
 	CHECK(sizeof(raWatch) == 0x18);
 	CHECK(__builtin_offsetof(raSnapshot, ticks) == 0x04);
 	CHECK(__builtin_offsetof(raSnapshot, shows) == 0x08);
-	CHECK(__builtin_offsetof(raSnapshot, watchCount) == 0x14);
-	CHECK(__builtin_offsetof(raSnapshot, linesMax) == 0x17);
-	CHECK(__builtin_offsetof(raSnapshot, watches) == 0x18);
-	CHECK((u32)&raSnapshotBuffer.watches[1] - (u32)&raSnapshotBuffer == 0x30);
-	CHECK((u32)&raSnapshotBuffer.watches[2] - (u32)&raSnapshotBuffer == 0x48);
+	CHECK(__builtin_offsetof(raSnapshot, deniedNoLayer) == 0x14);
+	CHECK(__builtin_offsetof(raSnapshot, watchCount) == 0x18);
+	CHECK(__builtin_offsetof(raSnapshot, linesMax) == 0x1B);
+	CHECK(__builtin_offsetof(raSnapshot, watches) == 0x1C);
+	CHECK((u32)&raSnapshotBuffer.watches[1] - (u32)&raSnapshotBuffer == 0x34);
+	CHECK((u32)&raSnapshotBuffer.watches[2] - (u32)&raSnapshotBuffer == 0x4C);
 
 	*DISPCNT = 0x1F40;
 	*VCOUNT = 0;
