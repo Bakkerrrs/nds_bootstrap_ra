@@ -27,7 +27,7 @@ The work is split into four deliberately separate modules:
 
 | Module | Responsibility | Status |
 | --- | --- | --- |
-| `ra_reader` | Read the game's RAM every frame: a watchlist with pointer chains, re-resolved each frame. Knows nothing about RetroAchievements. | working |
+| `ra_reader` | Read the game's RAM every frame: a watchlist with pointer chains, re-resolved each frame. Knows nothing about RetroAchievements. | working on hardware |
 | `ra_overlay` | Draw a notification over the running game. Knows nothing about RetroAchievements either. | working, needs a real font |
 | `ra_client` | Wrap `rcheevos`' `rc_client`; evaluate conditions, fire unlocks. | not started |
 | `ra_net` | HTTP(S) transport to the RA servers. | not started |

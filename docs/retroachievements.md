@@ -19,7 +19,7 @@ without rewriting the reader:
 
 | Module | Responsibility | Status |
 | --- | --- | --- |
-| `ra_reader` | Read the game's RAM. Knows nothing about RetroAchievements. | phase 1 done, hardware unconfirmed |
+| `ra_reader` | Read the game's RAM. Knows nothing about RetroAchievements. | phase 1 done, confirmed on hardware |
 | `ra_overlay` | Show a notification over the running game. Knows nothing about RetroAchievements either. | proven, needs a real font |
 | `ra_client` | Wrap `rcheevos`' `rc_client`; decide what to watch, evaluate, fire unlocks. | not started |
 | `ra_net` | HTTP(S) transport to the RA servers. `rcheevos` ships no networking. | not started |
@@ -162,9 +162,12 @@ VBlank hook (`vblankHandler` in `retail/cardenginei/arm7/source/card_engine_head
 but the ARM7's view of main RAM is not the ARM9's cached view, so it is the wrong
 side to read from for RAM-watching accuracy.
 
-The cycle budget is now **instrumented rather than argued about**, though the figure
-itself still needs hardware. `ra_reader_tick()` samples `VCOUNT` on entry and again on
-exit and records the difference in `linesLast` / `linesMax`. Scanlines are a coarse
+The cycle budget is **measured: under one scanline of 262**, with three watches active
+and two of them walking pointer chains. `ra_reader_tick()` samples `VCOUNT` on entry and
+again on exit and records the difference in `linesLast` / `linesMax`; on hardware
+`linesMax` stayed at 1 across 7,433 consecutive frames, and a tick that fits inside a
+scanline still reads 1 whenever a boundary falls inside it, so 1 is the ceiling rather
+than the cost. Scanlines are a coarse
 unit — one is roughly 1,600 ARM9 cycles — but they are the right unit for the question
 being asked, which is whether the watchlist eats into the frame, and `VCOUNT` is the
 only clock available: the game owns the hardware timers.
@@ -253,10 +256,9 @@ option? This still gates the phase 3 architecture and is worth asking the DS-Hom
 
 ## Phase 1 — the watchlist and pointer chains
 
-**Implemented and host-tested; not yet confirmed on hardware.** Everything below is
-true of the code and of `tools/ra_reader_test.sh`; the "confirmed on hardware" label
-this document uses elsewhere has been earned by phases 0 and 0.5 and has not been
-earned by this one yet. See *What to look for on hardware* at the end.
+**Confirmed on hardware**, on a 3DS running *Space Invaders Extreme* through
+`cardenginei_arm9`, and host-tested besides. The measured results are at the end of
+this section.
 
 Phase 0 read one fixed window. Phase 1 reads a list of watches, each of which is
 either a direct address or a **pointer chain**: read the word at the base, add an
@@ -341,6 +343,12 @@ before and after. That answers open question #2 above with a number instead of a
 argument, and it is the honest unit: the game owns the hardware timers, so `VCOUNT` is
 the only clock the reader can read without taking something in use.
 
+Measured: **`linesMax` = 1 over 7,433 consecutive frames.** A tick short enough to fit
+inside one scanline still reads 1 whenever a scanline boundary happens to fall inside
+it, so a maximum of 1 across that many samples means the cost is *under* one scanline
+of 262 — on the order of 1,600 ARM9 cycles, with three watches active, two of them
+walking chains. It does not eat the frame.
+
 ### Tested on the host, not just on hardware
 
 `tools/ra_reader_test.sh` builds `ra_reader.c` **verbatim** — nothing stubbed, nothing
@@ -392,6 +400,41 @@ The direction of travel is unchanged and is now better supported: **code that gr
 does not belong in the cardengine.** Phase 1 fits. The overlay's real font does not,
 and `rc_client` is not close. That is the `cardenginei_arm9_ra` binary described under
 phase 0.5, and it is still the next structural piece of work.
+
+### Measured on hardware
+
+3DS, *Space Invaders Extreme*, `cardenginei_arm9`, snapshot at `0x027FEEE0`, after
+7,433 frames (about two minutes of play):
+
+| Field | Value | What it says |
+| --- | --- | --- |
+| `magic` | `RA1S` | the phase 1 buffer, at the address the tool reported |
+| `ticks` | 7,433 | the VCOUNT handler is still firing every frame |
+| `watchCount` / `resolved` | 3 / 3 | every default watch resolved on the frame that was sampled |
+| `linesLast` / `linesMax` | 0 / 1 | the per-frame cost, under one scanline of 262 |
+| `shows` / `denied` / `evicted` | 9 / 0 / 0 | the overlay got a layer and a block all nine times it asked |
+
+And the watches themselves:
+
+| Watch | `base` | `address` | `value` | `depth` / `size` / `status` |
+| --- | --- | --- | --- | --- |
+| 0, direct | `0x04001000` | `0x04001000` | `0x1110` | 0 / 2 / OK |
+| 1, one indirection | `0x027FEF58` | `0x027FEEE4` | 7,433 | 1 / 4 / OK |
+| 2, two indirections | `0x027FEF5C` | `0x027FEEE4` | 7,433 | 2 / 4 / OK |
+
+Watches 1 and 2 both resolved to `0x027FEEE4` — the snapshot address plus 4, which is
+`ticks` — and both read 7,433, the live value of that field. **That is phase 1 working:
+a chain walked through one indirection and a chain walked through two, re-resolved from
+scratch that frame, reading memory that was changing underneath them.** The self-test
+cells read back as `0x027FEEE0` and `0x027FEF58`, exactly the addresses the two chains
+started from.
+
+Two things worth noting about the numbers. Watch 0 read `0x1110` from the sub engine's
+`DISPCNT`, but the in-game menu is drawn on that screen, so while the RAM viewer is
+open that register describes the *menu*, not the game — the watch is doing its job
+either way. And the overlay's 9 shows with 0 evictions is better than phase 0.5's 4 and
+1 on the same game, which is what more play time in one session looks like rather than
+a change in behaviour.
 
 ### What to look for on hardware
 
@@ -553,8 +596,7 @@ permission is `0x0`, so code could never have executed from `0x0C`/`0x0D`.
 - [x] Baseline: unmodified nds-bootstrap builds
 - [x] Phase 0: per-frame game RAM snapshot — **confirmed on hardware**
 - [x] Phase 0.5: text notification over a running game — **confirmed on hardware**
-- [x] Phase 1: parameterised watchlist + pointer chains — host-tested, **hardware
-      confirmation outstanding**
+- [x] Phase 1: parameterised watchlist + pointer chains — **confirmed on hardware**
 - [ ] Next: `cardenginei_arm9_ra`, a separate ARM9 binary for RA code, following the
       colour LUT's pattern. Unblocks both a real font for the overlay and phase 2.
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
