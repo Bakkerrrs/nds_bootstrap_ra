@@ -474,6 +474,26 @@ draw, and unlocks will have to queue until a slot frees rather than being droppe
 is no longer a design argument, it is a measurement. `evicted` stayed 0, so when it did
 get a block it never had to hand it back mid-notification.
 
+#### The two-watch layout, after the bridge
+
+A third confirmation, on the build where `RA_WATCH_MAX` had dropped to 2 to pay for the
+bridge into `cardenginei_arm9_ra`. Every value predicted in advance matched what the
+hardware showed, field for field: the magic, `watchCount` and `resolved` at 2, watch 0's
+base and address at `0x04001000`, watch 1's base at `&raSelfCellPtr`, its offsets at 0 and
+4, its resolved address at `S+4`, its value equal to `ticks` (0x6AE, 1710), the status
+bytes, and both self-test cells.
+
+Two things it established beyond the layout. Losing the depth-1 self-test did not cost the
+walker anything — the two-step chain still resolves against live memory. And `wramState`
+read `00`, not `01` or `02`, so the bridge correctly recognised that the separate binary
+was not loaded and did not jump into an empty WRAM window. That was the point of the
+reading: not proving something new works, but proving the bridge is inert before writing
+the loader that will make it live.
+
+Also `linesMax` = **1** on this run, where *Final Fantasy III* showed 11. Consistent with
+the reading that 11 was contention from a busy machine rather than the reader's own cost,
+though 28 seconds of session makes it an indication rather than evidence.
+
 ### Four things the field report taught us that the counters could not
 
 Playing a real game for real found things no snapshot field was going to.
@@ -552,6 +572,42 @@ instant, both are writing sub engine registers at once. It is an interaction by
 construction rather than a new bug, and no achievement is going to unlock on the exact
 frame the menu opens, so it stands as accepted. The clean answer, when the overlay is
 rewritten, is for it to stand down while the menu is up.
+
+### The RAM viewer will crash on a mistyped address — fixed
+
+Not a bug in this fork's code, but a bug in the tool this fork's entire debug workflow
+depends on, so it is fixed here.
+
+The in-game menu's RAM viewer has no value search. What it has is a jump-to-address
+screen where the address is edited one hex digit at a time, and then:
+
+```c
+u8 *ramPtr = arm7Ram ? arm7RamBuffer : (u8*)address;
+```
+
+Dereferenced with no bounds check anywhere in the file. Typing a value where an address
+belongs — `52413153`, the snapshot magic, instead of `027FEF10`, where it lives — points
+it at unmapped memory and takes a Data Abort straight to the red exception screen.
+
+What makes it worse than one crash is the declaration:
+
+```c
+// For RAM viewer, global so it's persistant
+vu32 *address = (vu32*)0x02000000;
+```
+
+Persistent by design, so the viewer reopens where you left it. Once poisoned, it faults
+again on every re-entry before any keypress can correct it, and the only way out is
+rebooting the game.
+
+`clampAddress()` now runs before every read and on leaving the jump screen. An address
+whose whole visible span is not inside a real region snaps back to `0x02000000`, which
+also un-poisons the global. The range list is deliberately generous — main RAM, shared
+and DSi WRAM, I/O, palette, VRAM, OAM, the GBA slot, and the extended RAM above
+`0x0C000000` — because the point is to catch a typo, not to police where anyone looks.
+
+It costs 176 bytes in a binary with 11.4 KB spare, so unlike everything else in this
+document it was not a trade.
 
 **A hole this exposed that is not fixed.** `surveyBlocks()` reads every enabled layer's
 `BGCNT` as though it were a text background: character base in 16K units, screen base in

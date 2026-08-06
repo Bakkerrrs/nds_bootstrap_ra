@@ -29,6 +29,52 @@ static u16 palBak[256];
 
 // For RAM viewer, global so it's persistant
 vu32 *address = (vu32*)0x02000000;
+
+/*
+    Ranges the ARM9 can actually read here. The RAM viewer's `address` is edited a hex
+    digit at a time and then dereferenced with no check at all, so a single mistyped
+    digit -- 0x52413153 instead of 0x027FEF10, say -- is a Data Abort and the red
+    exception screen.
+
+    Worse, `address` is a deliberately persistent global so the viewer reopens where you
+    left it, which means a poisoned value faults again on every re-entry, before you can
+    reach the keys to correct it. The only way out is rebooting the game.
+
+    So an address outside every real region snaps back to the start of main RAM instead.
+    The list is deliberately generous -- viewing I/O, VRAM, DSi WRAM and the extended RAM
+    above 0x0C000000 are all legitimate things to do with this tool -- because the point
+    is to catch a typo, not to police where you look.
+*/
+static const u32 ramViewerRanges[][2] = {
+	{ 0x02000000, 0x03000000 },  /* main RAM */
+	{ 0x03000000, 0x04000000 },  /* shared WRAM and DSi WRAM */
+	{ 0x04000000, 0x04001100 },  /* I/O registers */
+	{ 0x05000000, 0x05000800 },  /* palette RAM */
+	{ 0x06000000, 0x07000000 },  /* VRAM, all banks */
+	{ 0x07000000, 0x07000800 },  /* OAM */
+	{ 0x08000000, 0x0A000000 },  /* GBA slot */
+	{ 0x0C000000, 0x0E000000 },  /* the extended RAM a DSi and 3DS expose */
+};
+
+/*
+    Called before every read and after every navigation step. One screen is 23 rows of
+    16 bytes, so the whole of what is about to be displayed has to be inside a range,
+    not just the first byte.
+*/
+static void clampAddress(void) {
+	const u32 span = 23 * 0x10;
+	unsigned int i;
+
+	for (i = 0; i < sizeof(ramViewerRanges) / sizeof(ramViewerRanges[0]); i++) {
+		if ((u32)address >= ramViewerRanges[i][0]
+		 && (u32)address <= ramViewerRanges[i][1] - span) {
+			return;
+		}
+	}
+
+	address = (vu32*)0x02000000;
+}
+
 static bool arm7Ram = false;
 static u8 arm7RamBak[0xC0];
 
@@ -698,6 +744,7 @@ static void jumpToAddress(void) {
 			if(cursorPosition > 0)
 				cursorPosition--;
 		} else if(KEYS & (KEY_A | KEY_B)) {
+			clampAddress();
 			return;
 		}
 	}
@@ -712,7 +759,10 @@ static void ramViewer(void) {
 	bool ramLoaded = false;
 	u8 cursorPosition = 0, mode = 0;
 	while(1) {
-		u8 *ramPtr = arm7Ram ? arm7RamBuffer : (u8*)address;
+		u8 *ramPtr;
+
+		clampAddress();
+		ramPtr = arm7Ram ? arm7RamBuffer : (u8*)address;
 
 		unsigned char armText[5] = {'A', 'R', 'M', arm7Ram ? '7' : '9', 0};
 		printCenter(14, 0, igmText.ramViewer, FONT_WHITE, false);
