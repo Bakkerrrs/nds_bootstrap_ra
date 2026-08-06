@@ -35,6 +35,10 @@
 #define b_resetOnEveryException BIT(20)
 #define b_useColorLut BIT(21)
 #define b_colorLutBlockVCount BIT(22)
+// Set when cardenginei_arm9_ra has been copied into DSi WRAM. The cardengine verifies
+// the window really contains code before calling it, so this is a claim rather than a
+// guarantee -- see ra_tick().
+#define b_raWramLoaded BIT(23)
 
 
 static const int MAX_HANDLER_LEN = 50;

@@ -18,13 +18,15 @@
 
 /*
     Everything this fork does per frame, from the VCOUNT interrupt handler: the
-    notification overlay, then the watchlist. Pass ce9->consoleModel; the work is
-    skipped on anything but the 3DS family, which is the only target -- see the scope
-    note in docs/retroachievements.md.
+    notification overlay, the watchlist, and then cardenginei_arm9_ra if it is there.
+
+    Pass ce9->consoleModel; the work is skipped on anything but the 3DS family, which is
+    the only target -- see the scope note in docs/retroachievements.md. Pass wramLoaded
+    from the bootloader's flag; it is verified again here before anything is called.
 
     Runs in an interrupt handler, so it must stay short and must not block.
 */
-void ra_tick(u8 consoleModel);
+void ra_tick(u8 consoleModel, bool wramLoaded);
 
 /*
     Re-resolve and re-read every watch. Called by ra_tick(); separate so the reader

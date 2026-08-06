@@ -59,6 +59,7 @@
 #define tFormersFix BIT(18)
 #define useColorLut BIT(21)
 #define colorLutBlockVCount BIT(22)
+#define raWramLoaded BIT(23)
 
 //#ifdef DLDI
 #include "my_fat.h"
@@ -1613,7 +1614,7 @@ void myIrqHandlerVcount(void) {
 	}
 
 	#if RA_READER_ENABLED
-	ra_tick(ce9->consoleModel);
+	ra_tick(ce9->consoleModel, (ce9->valueBits & raWramLoaded) != 0);
 	#endif
 
 	/* #ifndef TWLSDK

@@ -62,8 +62,18 @@
     Two indirections cover the shape RetroAchievements actually uses on the DS --
     a pointer to a player or save structure, then a field inside it -- and a third
     can be added when a game needs one.
+
+    RA_WATCH_MAX went from 4 to 2 to pay for the bridge into cardenginei_arm9_ra, which
+    needed 84 bytes against the 56 that were left. Two slots is exactly what the two
+    default watches use, so there is no spare one until the watchlist moves out of here.
+
+    That is the trade this budget note has been pointing at all along, and it is the
+    right way round: the bridge is worth more than a spare watch, because the bridge is
+    what stops the watchlist having to live in a 12K window at all. Once the separate
+    binary is proven on hardware, the reader moves into it and this constant stops being
+    a budget decision.
 */
-#define RA_WATCH_MAX 4
+#define RA_WATCH_MAX 2
 #define RA_CHAIN_MAX 2
 
 /*
@@ -108,6 +118,22 @@ typedef struct raWatch {
 	u8  status;                 /* +0x16  RA_WATCH_* */
 	u8  reserved;               /* +0x17 */
 } raWatch;                      /*        0x18 bytes */
+
+/*
+    Written into the snapshot by cardenginei_arm9_ra on its first call, so a counter
+    coming from that binary can be told apart from whatever was in the buffer. Reads as
+    "RAH1" in a byte-wise dump -- H for helper, since it is not the snapshot's own magic.
+*/
+#define RA_WRAM_MAGIC 0x31484152
+
+/*
+    What the cardengine made of the separate binary on the most recent tick. Reported so
+    each link in the chain -- built, packed, loaded, copied, recognised, called -- fails
+    visibly and separately rather than as one silent absence.
+*/
+#define RA_WRAM_ABSENT  0  /* the bootloader did not report it loaded */
+#define RA_WRAM_NO_CODE 1  /* the window does not begin with a branch, so nothing valid is there */
+#define RA_WRAM_CALLED  2  /* called on the most recent tick */
 
 /*
     Reads as the ASCII bytes "RA1S" in a byte-wise hex dump, which is how the
@@ -168,6 +194,13 @@ typedef struct raSnapshot {
 	u8  linesLast;       /* +0x1A  scanlines the last tick consumed */
 	u8  linesMax;        /* +0x1B  worst seen since the buffer was claimed */
 	raWatch watches[RA_WATCH_MAX];  /* +0x1C */
+	/*
+	    Filled in from the far side of the cardengine boundary. Appended after the
+	    watches so every offset quoted in docs/retroachievements.md keeps its address.
+	*/
+	u32 wramMagic;       /* +0x7C  RA_WRAM_MAGIC, written by the binary itself */
+	u32 wramTicks;       /* +0x80  incremented by it once per frame */
+	u8  wramState;       /* +0x84  RA_WRAM_*, written by the cardengine */
 } raSnapshot;
 
 #endif /* RA_H */

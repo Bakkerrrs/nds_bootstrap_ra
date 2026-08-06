@@ -111,7 +111,9 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, linesMax) == 0x1B);
 	CHECK(__builtin_offsetof(raSnapshot, watches) == 0x1C);
 	CHECK((u32)&raSnapshotBuffer.watches[1] - (u32)&raSnapshotBuffer == 0x34);
-	CHECK((u32)&raSnapshotBuffer.watches[2] - (u32)&raSnapshotBuffer == 0x4C);
+	CHECK(__builtin_offsetof(raSnapshot, wramMagic) == 0x4C);
+	CHECK(__builtin_offsetof(raSnapshot, wramTicks) == 0x50);
+	CHECK(__builtin_offsetof(raSnapshot, wramState) == 0x54);
 
 	*DISPCNT = 0x1F40;
 	*VCOUNT = 0;
@@ -122,21 +124,18 @@ int main(void) {
 	CHECK(raSnapshotBuffer.magic[0] == 'R' && raSnapshotBuffer.magic[1] == 'A');
 	CHECK(raSnapshotBuffer.magic[2] == '1' && raSnapshotBuffer.magic[3] == 'S');
 	CHECK(raSnapshotBuffer.ticks == 1);
-	CHECK(raSnapshotBuffer.watchCount == 3);
-	CHECK(raSnapshotBuffer.resolved == 3);
+	CHECK(raSnapshotBuffer.watchCount == 2);
+	CHECK(raSnapshotBuffer.resolved == 2);
 
 	printf("\ndefault watch 0 reads a register directly\n");
 	expect_status("direct", 0, RA_WATCH_OK);
 	CHECK(raSnapshotBuffer.watches[0].address == RA_DEFAULT_WATCH_ADDRESS);
 	CHECK(raSnapshotBuffer.watches[0].value == 0x1F40);
 
-	printf("\ndefault watches 1 and 2 walk one and two indirections to ticks\n");
-	expect_status("one step", 1, RA_WATCH_OK);
-	expect_status("two steps", 2, RA_WATCH_OK);
+	printf("\ndefault watch 1 walks two indirections to ticks\n");
+	expect_status("two steps", 1, RA_WATCH_OK);
 	CHECK(raSnapshotBuffer.watches[1].address == (u32)&raSnapshotBuffer.ticks);
-	CHECK(raSnapshotBuffer.watches[2].address == (u32)&raSnapshotBuffer.ticks);
 	CHECK(raSnapshotBuffer.watches[1].value == 1);
-	CHECK(raSnapshotBuffer.watches[2].value == 1);
 
 	printf("\nthe chains are re-walked every tick, so the values track ticks\n");
 	*DISPCNT = 0x0100;
@@ -145,7 +144,6 @@ int main(void) {
 	}
 	CHECK(raSnapshotBuffer.ticks == 10);
 	CHECK(raSnapshotBuffer.watches[1].value == 10);
-	CHECK(raSnapshotBuffer.watches[2].value == 10);
 	CHECK(raSnapshotBuffer.watches[0].value == 0x0100);
 
 	printf("\nan emptied list resolves nothing\n");
@@ -169,11 +167,13 @@ int main(void) {
 	clear_watches();
 	CHECK(ra_reader_watch_add((u32)&target, 1, 0, 0) == 0);
 	CHECK(ra_reader_watch_add((u32)&target, 2, 0, 0) == 1);
-	CHECK(ra_reader_watch_add((u32)&target, 4, 0, 0) == 2);
 	ra_reader_tick();
 	CHECK(raSnapshotBuffer.watches[0].value == 0x44);      /* little-endian, as the DS is */
 	CHECK(raSnapshotBuffer.watches[1].value == 0x3344);
-	CHECK(raSnapshotBuffer.watches[2].value == 0x11223344);
+	clear_watches();
+	CHECK(ra_reader_watch_add((u32)&target, 4, 0, 0) == 0);
+	ra_reader_tick();
+	CHECK(raSnapshotBuffer.watches[0].value == 0x11223344);
 
 	printf("\nthe list fills up and then refuses\n");
 	slot = ra_reader_watch_add((u32)&target, 4, 0, 0);
@@ -191,11 +191,13 @@ int main(void) {
 	clear_watches();
 	ra_reader_watch_add((u32)&target + 1, 4, 0, 0);
 	ra_reader_watch_add((u32)&target + 1, 2, 0, 0);
-	ra_reader_watch_add((u32)&target + 1, 1, 0, 0);   /* bytes are never misaligned */
 	ra_reader_tick();
 	expect_status("misaligned word", 0, RA_WATCH_MISALIGNED);
 	expect_status("misaligned halfword", 1, RA_WATCH_MISALIGNED);
-	expect_status("byte", 2, RA_WATCH_OK);
+	clear_watches();
+	ra_reader_watch_add((u32)&target + 1, 1, 0, 0);   /* bytes are never misaligned */
+	ra_reader_tick();
+	expect_status("byte", 0, RA_WATCH_OK);
 
 	/*
 	    The failure statuses say where the chain broke, which is the useful thing to
@@ -291,12 +293,13 @@ int main(void) {
 	printf("\nra_tick() skips everything on an unsupported console\n");
 	{
 		const u32 before = raSnapshotBuffer.ticks;
-		ra_tick(0);                       /* DSi: out of scope */
+		ra_tick(0, false);                /* DSi: out of scope */
 		CHECK(raSnapshotBuffer.ticks == before);
-		ra_tick(1);                       /* 3DS */
+		ra_tick(1, false);                /* 3DS, no WRAM binary */
 		CHECK(raSnapshotBuffer.ticks == before + 1);
-		ra_tick(2);                       /* New 3DS */
+		ra_tick(2, false);                /* New 3DS */
 		CHECK(raSnapshotBuffer.ticks == before + 2);
+		CHECK(raSnapshotBuffer.wramState == RA_WRAM_ABSENT);
 	}
 
 	printf("\nthe per-frame cost is a delta, not an absolute scanline\n");

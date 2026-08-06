@@ -24,6 +24,7 @@
 
 #include "ra_reader.h"
 #include "ra_overlay.h"
+#include "locations.h"
 
 #if RA_READER_ENABLED
 
@@ -143,10 +144,13 @@ static void ra_install_defaults(void) {
 
 	ra_reader_watch_add(RA_DEFAULT_WATCH_ADDRESS, 2, 0, 0);
 
-	offsets[0] = RA_TICKS_OFFSET;
-	offsets[1] = 0;
-	ra_reader_watch_add((u32)&raSelfCell, 4, 1, offsets);
-
+	/*
+	    Only the two-step chain now, not one of each. A depth-1 default used to sit
+	    alongside it, which made it obvious from a RAM viewer *which* step had broken --
+	    but it cost a watch slot and a call at a point where the bridge into
+	    cardenginei_arm9_ra needed the room, and depth 2 walks every line of the depth-1
+	    path plus one more. The per-watch status codes already say where a chain broke.
+	*/
 	offsets[0] = 0;
 	offsets[1] = RA_TICKS_OFFSET;
 	ra_reader_watch_add((u32)&raSelfCellPtr, 4, 2, offsets);
@@ -295,12 +299,38 @@ static void ra_watch_eval(raWatch* w) {
     right shape for that. The scope gate as a whole costs 48 bytes of the cardengine's
     margin, which is what it is worth to leave a DSi running exactly upstream.
 */
-void ra_tick(u8 consoleModel) {
+void ra_tick(u8 consoleModel, bool wramLoaded) {
 	if (consoleModel == 0) {
 		return;
 	}
 	ra_overlay_tick();
 	ra_reader_tick();
+
+	/*
+	    Hand the frame to cardenginei_arm9_ra, the code that did not fit in here.
+
+	    Two gates, because there are two ways for this to be wrong and they are worth
+	    telling apart from a RAM viewer. wramLoaded is the bootloader's claim that it
+	    copied the binary in. The branch check is whether that claim is true: the window
+	    is DSi WRAM, which holds whatever the previous occupant left, so an unloaded or
+	    half-copied window reads as garbage rather than as zeroes. A branch is the first
+	    instruction of the binary by construction -- the same check the colour LUT makes
+	    on itself for the same reason.
+
+	    Calling into a window that failed either gate would be a jump into arbitrary
+	    data, in an interrupt handler, in the middle of a game.
+	*/
+	if (!wramLoaded) {
+		snapshot.wramState = RA_WRAM_ABSENT;
+		return;
+	}
+	if (*(const vu16*)(CARDENGINEI_ARM9_RA_LOCATION + 2) != 0xEA00) {
+		snapshot.wramState = RA_WRAM_NO_CODE;
+		return;
+	}
+
+	((void (*)(raSnapshot*))CARDENGINEI_ARM9_RA_LOCATION)(&snapshot);
+	snapshot.wramState = RA_WRAM_CALLED;
 }
 
 void ra_reader_tick(void) {

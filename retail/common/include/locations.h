@@ -102,6 +102,23 @@
 #define CARDENGINEI_ARM9_DSIWARE_LOCATION3         CARDENGINEI_ARM9_TWLSDK_LOCATION3
 #define CARDENGINEI_ARM9_CLUT_LOCATION             0x03732800
 
+/*
+    cardenginei_arm9_ra -- the RetroAchievements code that does not fit in the ARM9
+    cardengine's 12K window. DSi WRAM is the only region that can host it: MPU region 3
+    denies instruction fetches from 0x0C/0x0D, main RAM belongs to the running game, and
+    the colour LUT already proves code executes from here.
+
+    It takes the top 256K of the 512K window, leaving 0x03700000-0x03740000 for the
+    nitro file info preload and the ROM-in-RAM headroom -- so RA_WRAMSIZE below is what
+    wramSize becomes when this is loaded, exactly as 0x32800 is what it becomes for the
+    colour LUT. The two are mutually exclusive: the LUT's stored palettes live inside
+    this range. See the space budget in docs/retroachievements.md; 256K covers the
+    measured 100-270K that rcheevos plus a real achievement set needs.
+*/
+#define CARDENGINEI_ARM9_RA_LOCATION               0x03740000
+#define CARDENGINEI_ARM9_RA_SIZE                   0x40000
+#define CARDENGINEI_ARM9_RA_WRAMSIZE               0x40000
+
 #define CARDENGINE_SHARED_ADDRESS_SDK1 0x027FFA0C
 #define CARDENGINE_SHARED_ADDRESS_SDK5 0x02FFFA0C
 

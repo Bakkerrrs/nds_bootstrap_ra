@@ -577,12 +577,20 @@ The header is the first two rows:
 | `+0x04` | `ticks` | climbing once per frame |
 | `+0x08` / `+0x0C` / `+0x10` | `shows` / `denied` / `evicted` | the overlay's negotiation |
 | `+0x14` | `deniedNoLayer` | of the denials, how many found no free layer |
-| `+0x18` | `watchCount` | `03` |
-| `+0x19` | `resolved` | `03` — all three defaults resolving |
+| `+0x18` | `watchCount` | `02` |
+| `+0x19` | `resolved` | `02` — both defaults resolving |
 | `+0x1A` / `+0x1B` | `linesLast` / `linesMax` | the per-frame cost in scanlines |
 
-Then one 0x18-byte block per watch, at `+0x1C`, `+0x34`, `+0x4C`, `+0x64`. Within a
-block:
+Then one 0x18-byte block per watch, at `+0x1C` and `+0x34`, and after them the fields
+`cardenginei_arm9_ra` reports through:
+
+| Offset | Field | Expected |
+| --- | --- | --- |
+| `+0x4C` | `wramMagic` | `52 41 48 31` — `RAH1`, written by the separate binary |
+| `+0x50` | `wramTicks` | its own frame counter |
+| `+0x54` | `wramState` | `00` absent, `01` window holds no code, `02` called |
+
+Within a watch block:
 
 | Offset in block | Field |
 | --- | --- |
@@ -597,14 +605,17 @@ So, with the snapshot at `S`:
 - **Watch 0** (`S+0x1C`), the direct read: `base` and `address` both `0x04001000`,
   `depth` `00`, `size` `02`, `status` `02`. `value` tracks `DISPCNT` and changes when a
   notification is up.
-- **Watch 1** (`S+0x34`), one indirection: `offsets[0]` `04`, `depth` `01`, `status`
-  `02`, `address` = **`S+4`**, `value` = `ticks`.
-- **Watch 2** (`S+0x4C`), two indirections: `offsets[0]` `00`, `offsets[1]` `04`,
+- **Watch 1** (`S+0x34`), two indirections: `offsets[0]` `00`, `offsets[1]` `04`,
   `depth` `02`, `status` `02`, `address` = **`S+4`**, `value` = `ticks`.
 
-Watches 1 and 2 reading `ticks` through one and through two indirections is **the phase
-1 result**. `value` may lag `ticks` by one if the viewer refreshes while the game runs;
-what matters is that it tracks, not that it matches exactly.
+Watch 1 reading `ticks` through two indirections is **the phase 1 result**. `value` may
+lag `ticks` by one if the viewer refreshes while the game runs; what matters is that it
+tracks, not that it matches exactly.
+
+There used to be a depth-1 default alongside it, which made it obvious which *step* of a
+chain had broken. It was given up to pay for the bridge described below; the per-watch
+status codes still say where a chain broke, and depth 2 walks every line of the depth-1
+path plus one more.
 
 A `status` other than `02` says where a chain broke — `03` bad base, `04` bad pointer
 mid-chain, `05` bad target, `06` misaligned. All three defaults resolve against memory
@@ -928,6 +939,66 @@ linked program with its own allocator over a reserved arena, not an injected blo
 style of `cardenginei_arm9_colorlut`. That is the single biggest structural difference from
 the pattern being copied, and it is worth knowing before starting rather than after.
 
+## `cardenginei_arm9_ra` — the binary exists, the loader does not yet
+
+Built, packed into the `.nds`, and called from the cardengine. **Not yet loaded**, which
+means that on hardware today `wramState` reads `00` (absent) and nothing happens. That is
+the intended state of this step, and it is deliberately the safe half: the bridge is
+inert until a bootloader sets a flag that nothing currently sets, so this change cannot
+break a boot.
+
+### What is in place
+
+| Piece | State |
+| --- | --- |
+| `retail/cardenginei/arm9_ra/` — Makefile, linker script, entry point, a stub | done |
+| Linked into DSi WRAM at `0x03740000`, 256K window | done |
+| Built by `retail/Makefile` and packed as `nitro:/cardenginei_arm9_ra.bin` | done |
+| `ra_tick()` calls it, gated on a flag and on the window containing code | done |
+| `wramMagic` / `wramTicks` / `wramState` in the snapshot | done |
+| Launcher reads the nitrofile into a buffer | **not started** |
+| Bootloader ARM7 copies the buffer into WRAM and sets `b_raWramLoaded` | **not started** |
+| `wramSize` reduced to `CARDENGINEI_ARM9_RA_WRAMSIZE` when it is loaded | **not started** |
+
+The stub does one thing: write `RAH1` into `wramMagic` on its first call and increment
+`wramTicks` every frame. Useless on its own, and that is the point — the milestone is the
+*chain*, not the payload. Each link reports separately so a failure names itself instead
+of showing up as one silent absence.
+
+### Why the call is gated twice
+
+`ra_tick()` refuses to call the window unless the bootloader claims it is loaded *and*
+the first halfword at `+2` reads `0xEA00`. The binary's first instruction is a branch by
+construction, so that halfword is the signature — and DSi WRAM holds whatever its previous
+occupant left, so an unloaded or half-copied window reads as plausible garbage rather than
+as zeroes. Calling into it would be a jump into arbitrary data, inside an interrupt
+handler, in the middle of a game. The colour LUT makes the same check on itself for the
+same reason.
+
+### What it cost, and the trade that is now unavoidable
+
+The bridge needed **84 bytes** against the **56** the cardengine had. It was paid for by
+taking `RA_WATCH_MAX` from 4 to 2 and dropping the depth-1 self-test watch. Two slots is
+exactly what the two remaining defaults use, so there is no spare watch at all now, and
+`cardenginei_arm9` is left with 28 bytes.
+
+That is worth stating plainly rather than burying: **the cardengine is now full enough
+that adding anything means taking something out.** The bridge was worth a watch slot
+because the bridge is what ends the competition — once the loader works and the binary is
+proven on hardware, the reader and the overlay move into the 256K window and stop fighting
+over 12K. Until then every further byte here is a trade.
+
+### The open question the loader still needs answered
+
+The launcher has to read the nitrofile into main RAM before the ARM7 can copy it into
+WRAM, the way `CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION` works for the colour LUT. That
+buffer has to be somewhere genuinely free at launcher time, and the colour LUT's is 6K
+against a binary that will grow towards 256K. Picking an address without mapping what
+else is live in main RAM at that moment is how a bootloader quietly corrupts something,
+so that mapping is the next piece of work rather than a guess. The alternative worth
+weighing is reading it in chunks, or into the ROM cache region in `0x0C`, where stores are
+known to work.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
@@ -1002,12 +1073,11 @@ patching them into a 104-byte margin first would be work done twice.
 - [x] Phase 1: parameterised watchlist + pointer chains — **confirmed on hardware**,
       on *Space Invaders Extreme* and *Final Fantasy III*. Known overlay limitations
       found along the way are catalogued and deferred, see above.
-- [ ] Next: `cardenginei_arm9_ra`, a separate ARM9 binary for RA code, following the
-      colour LUT's pattern. Unblocks a real font for the overlay, phase 2, the overlay
-      fixes deferred above, and a control measurement for the per-frame cost. Placement
-      and sizing are researched — see the section above; `rcheevos` needs 48 KB linked
-      against DSi WRAM's 512 KB, so the region is settled and the open item is the
-      bootloader plumbing.
+- [~] `cardenginei_arm9_ra`, a separate ARM9 binary for RA code, following the colour
+      LUT's pattern. Built, packed and called; **not yet loaded**, so inert on hardware.
+      Unblocks a real font for the overlay, phase 2, the overlay fixes deferred above,
+      and a control measurement for the per-frame cost. Remaining: the launcher-side
+      buffer and the ARM7 copy — see the section above.
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status
