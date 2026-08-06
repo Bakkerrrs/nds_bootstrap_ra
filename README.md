@@ -39,8 +39,9 @@ The work is split into four deliberately separate modules:
 | `ra_client` | Wrap `rcheevos`' `rc_client`; evaluate conditions, fire unlocks. | not started |
 | `ra_net` | HTTP(S) transport to the RA servers. | not started |
 
-Current state, how to observe the reader on hardware, and the open design
-questions are all in **[docs/retroachievements.md](docs/retroachievements.md)**.
+Current state, what to do next, how to observe the reader on hardware, and the open
+design questions are all in **[docs/retroachievements.md](docs/retroachievements.md)** —
+start with *Where this stands, and what to do next* at the top of it.
 
 `RA_READER_ENABLED` in `retail/common/include/ra.h` is a kill switch: set it to
 `0` and the cardengine behaves exactly like upstream.

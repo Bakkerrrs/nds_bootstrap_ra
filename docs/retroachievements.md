@@ -24,6 +24,98 @@ without rewriting the reader:
 | `ra_client` | Wrap `rcheevos`' `rc_client`; decide what to watch, evaluate, fire unlocks. | not started |
 | `ra_net` | HTTP(S) transport to the RA servers. `rcheevos` ships no networking. | not started |
 
+## Where this stands, and what to do next
+
+Written as a handoff. Everything below the "Layering" table is background; this section
+is what you need to pick the work back up.
+
+### State
+
+Phase 1 is done and confirmed on hardware across three sessions and two games. The
+reader evaluates a watchlist with pointer chains, re-resolved from scratch every frame,
+and every value predicted in advance has matched what the hardware showed.
+
+`cardenginei_arm9_ra` — the separate ARM9 binary in DSi WRAM — is **built, packed into
+the `.nds`, and called, but not loaded**. Nothing sets `b_raWramLoaded`, so `wramState`
+reads `00` on hardware and the window is never entered. That is verified, not assumed.
+The change is inert and cannot break a boot.
+
+The ARM9 cardengine has **28 bytes** left. That is the constraint behind almost every
+decision in this document, and the reason the next task matters.
+
+### The next task: make the binary load
+
+Three steps, in this order, all with their addresses already settled:
+
+1. **`retail/arm9/source/conf_sd.cpp`** — read the nitrofile into the staging buffer,
+   next to where the colour LUT does it at line ~1765:
+   ```c
+   loadCardEngineBinary("nitro:/cardenginei_arm9_ra.bin",
+                        (u8*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION);
+   ```
+   Gate it on `conf->consoleModel > 0`, since the fork is 3DS-only.
+
+2. **`retail/bootloaderi/source/arm7/main.arm7.c`** — copy the buffer into WRAM, the
+   way the colour LUT is copied at lines ~1944-1958: hand WRAM to the ARM7 with
+   `arm9_stateFlag = ARM9_WRAMONARM7`, wait for `ARM9_READY`, `tonccpy` into
+   `CARDENGINEI_ARM9_RA_LOCATION`, verify the copy took, hand WRAM back. Then set
+   `b_raWramLoaded` in `hook_arm9.c` where `b_useColorLut` is set.
+
+3. **`wramSize`** — the literal `(colorLutEnabled ? 0x32800 : 0x80000)` appears in
+   three places: `main.arm7.c` line ~897 (inside `isROMLoadableInRAM`), `main.arm7.c`
+   line ~1291 (`loadNitroFileInfoIntoRAM`), and `hook_arm9.c` line ~298. All three need
+   to account for `CARDENGINEI_ARM9_RA_WRAMSIZE` when the RA binary is loaded. RA and the
+   colour LUT are mutually exclusive by design — the LUT's stored palettes live inside the
+   RA window.
+
+**Do it with the 48-byte stub that is already there.** If the staging address is wrong
+after all, the blast radius is 48 bytes and it surfaces as a failed verification rather
+than as corruption. Grow the buffer only once the path is proven.
+
+### How you know it worked
+
+Run `tools/ra_snapshot_addr.sh` for the snapshot address, point the RAM viewer at it, and
+look at two fields:
+
+- `wramState` at `+0x54` goes from `00` to **`02`**. Anything else names the failure:
+  `00` the bootloader never set the flag, `01` the flag was set but the window holds no
+  code, so the copy did not land.
+- `wramTicks` at `+0x50` starts climbing with its own counter, and `wramMagic` at `+0x4C`
+  reads `RAH1` (`52414831` byte-wise). That is the binary actually executing.
+
+When that happens, everything queued behind it unblocks: `rcheevos` (48 KB linked,
+measured), a real font for the overlay, the overlay fixes catalogued below, and a control
+measurement for the per-frame cost.
+
+### Things that will cost you time if you do not know them
+
+- **Build from the top level.** `make package-nightly`. Building a cardengine
+  subdirectory directly needs `make CPP=arm-none-eabi-cpp`, because only
+  `retail/Makefile` exports `CPP` — see the Building section.
+- **`git clean -xfd` deletes untracked directories.** It ate
+  `retail/cardenginei/arm9_ra/` once, mid-session. `git add` a new binary's directory
+  before cleaning.
+- **`tools/ra_reader_test.sh`** runs the reader's logic on the host in seconds, with no
+  devkitARM and no hardware. Use it before every flash cycle; it has already caught a
+  wrong assumption that would have cost one.
+- **`tools/ra_snapshot_addr.sh`** prints the snapshot address *and* the remaining space
+  per variant. The address moves whenever the code around it changes, so re-run it after
+  every build rather than reusing the last one.
+- **The linker scripts assert `__bss_end <= __vram_top`.** If a build fails with
+  "cardengine .bss overruns its window", that is the 28 bytes running out, not a mistake.
+
+### Not on the critical path
+
+- **Open question #1, the network transport.** Independent of everything above, and worth
+  asking the DS-Homebrew and RetroAchievements Discords rather than deriving: can the
+  cardengine reach the 3DS's ARM11 WiFi stack, or is dswifi the only option? The answer
+  decides whether phase 3 is live server contact or deferred sync through a file on the
+  SD card. See the open questions section.
+- **CI has never run on this repository.** The workflow exists and the build is verified
+  to pass on the pinned toolchain, but Actions appears disabled for the fork, so the host
+  test and the space-budget report added to it have never executed. Enabling it is a repo
+  setting.
+
 ## Building
 
 Upstream CI pins `devkitpro/devkitarm:20241104` — devkitARM r65 (gcc 14.2.0) with
@@ -1175,11 +1267,11 @@ patching them into a 104-byte margin first would be work done twice.
 - [x] Phase 1: parameterised watchlist + pointer chains — **confirmed on hardware**,
       on *Space Invaders Extreme* and *Final Fantasy III*. Known overlay limitations
       found along the way are catalogued and deferred, see above.
-- [~] `cardenginei_arm9_ra`, a separate ARM9 binary for RA code, following the colour
-      LUT's pattern. Built, packed and called; **not yet loaded**, so inert on hardware.
-      Unblocks a real font for the overlay, phase 2, the overlay fixes deferred above,
-      and a control measurement for the per-frame cost. Remaining: the launcher-side
-      buffer and the ARM7 copy — see the section above.
+- [~] `cardenginei_arm9_ra`, a separate ARM9 binary in DSi WRAM. Built, packed, called,
+      and verified inert on hardware (`wramState` = `00`). Placement, sizing and the
+      staging address are all researched and settled. **Remaining: the launcher read, the
+      ARM7 copy, and the `wramSize` arithmetic** — step by step in *Where this stands*
+      near the top of this document.
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status
