@@ -162,12 +162,14 @@ VBlank hook (`vblankHandler` in `retail/cardenginei/arm7/source/card_engine_head
 but the ARM7's view of main RAM is not the ARM9's cached view, so it is the wrong
 side to read from for RAM-watching accuracy.
 
-The cycle budget is **measured: under one scanline of 262**, with three watches active
-and two of them walking pointer chains. `ra_reader_tick()` samples `VCOUNT` on entry and
-again on exit and records the difference in `linesLast` / `linesMax`; on hardware
-`linesMax` stayed at 1 across 7,433 consecutive frames, and a tick that fits inside a
-scanline still reads 1 whenever a boundary falls inside it, so 1 is the ceiling rather
-than the cost. Scanlines are a coarse
+The cycle budget is **measured, and it is not the constraint**. `ra_reader_tick()`
+samples `VCOUNT` on entry and again on exit and records the difference in `linesLast` /
+`linesMax`. On hardware `linesLast` was 0 in every sample across two games, so a typical
+tick costs under one scanline of 262. `linesMax` was 1 on one game and 11 on a busier
+one, which is a ceiling on the *window* rather than on the reader: the work per tick is
+fixed at a few hundred cycles and 11 scanlines is ~17,000, so the difference is the
+machine being busy, not the reader. See the phase 1 measurements for the detail and for
+what it would take to separate the two. Scanlines are a coarse
 unit — one is roughly 1,600 ARM9 cycles — but they are the right unit for the question
 being asked, which is whether the watchlist eats into the frame, and `VCOUNT` is the
 only clock available: the game owns the hardware timers.
@@ -343,11 +345,23 @@ before and after. That answers open question #2 above with a number instead of a
 argument, and it is the honest unit: the game owns the hardware timers, so `VCOUNT` is
 the only clock the reader can read without taking something in use.
 
-Measured: **`linesMax` = 1 over 7,433 consecutive frames.** A tick short enough to fit
-inside one scanline still reads 1 whenever a scanline boundary happens to fall inside
-it, so a maximum of 1 across that many samples means the cost is *under* one scanline
-of 262 — on the order of 1,600 ARM9 cycles, with three watches active, two of them
-walking chains. It does not eat the frame.
+Measured on two games: `linesLast` was **0** in every sample taken, so the typical tick
+costs less than one scanline of 262. `linesMax` was **1** on *Space Invaders Extreme*
+over 7,433 frames but **11** on a second, busier game over 9,247.
+
+That spread is worth being careful about, because it is almost certainly not the
+reader's own cost. The work per tick is fixed — three watches, two chain walks, about
+thirty memory accesses, on the order of hundreds of cycles. Eleven scanlines is roughly
+17,000. What the measurement actually captures is *elapsed time across the window*, and
+on a DS that includes whatever else had the machine: DMA can halt the CPU, another
+interrupt can land inside the window, main RAM has wait states under contention.
+
+So `linesMax` is a ceiling on the window rather than a cost, and the honest form of the
+answer to open question #2 is: the reader does not eat the frame, its typical tick is
+under a scanline, and its worst observed window is 4% of a frame on a game that was
+busy for reasons of its own. Separating the two would need a control measurement — an
+empty window timed next to the real one, and subtracted. That costs about 20 bytes of
+the 44 left, so it waits for the separate binary.
 
 ### Tested on the host, not just on hardware
 
@@ -403,8 +417,9 @@ phase 0.5, and it is still the next structural piece of work.
 
 ### Measured on hardware
 
-3DS, *Space Invaders Extreme*, `cardenginei_arm9`, snapshot at `0x027FEEE0`, after
-7,433 frames (about two minutes of play):
+Two games, both on a 3DS through `cardenginei_arm9`, snapshot at `0x027FEEE0`.
+
+#### *Space Invaders Extreme*, after 7,433 frames (about two minutes of play)
 
 | Field | Value | What it says |
 | --- | --- | --- |
@@ -435,6 +450,27 @@ open that register describes the *menu*, not the game — the watch is doing its
 either way. And the overlay's 9 shows with 0 evictions is better than phase 0.5's 4 and
 1 on the same game, which is what more play time in one session looks like rather than
 a change in behaviour.
+
+#### A second game, sampled twice in one session
+
+| Field | at 6,403 frames | at 9,247 frames |
+| --- | --- | --- |
+| `watchCount` / `resolved` | 3 / 3 | 3 / 3 |
+| watch 1, one indirection | `0x027FEEE4` → 6,403 | `0x027FEEE4` → 9,247 |
+| watch 2, two indirections | `0x027FEEE4` → 6,403 | `0x027FEEE4` → 9,247 |
+| `shows` / `denied` / `evicted` | 5 / 4 / 0 | 9 / 4 / 0 |
+| `linesLast` / `linesMax` | 0 / 10 | 0 / 11 |
+
+The walker behaves identically on a second title, which is the point of running one:
+both chains resolved to `ticks` and read its live value, twice, 2,844 frames apart.
+
+The new information is `denied` = **4**. This is the first time on hardware that the
+overlay has asked for a layer and a block and been refused — 4 refusals against 13
+attempts. It confirms the prediction phase 0.5 made from first principles: the overlay
+is *opportunistic by nature*, a game that keeps its sub layers busy leaves nowhere to
+draw, and unlocks will have to queue until a slot frees rather than being dropped. That
+is no longer a design argument, it is a measurement. `evicted` stayed 0, so when it did
+get a block it never had to hand it back mid-notification.
 
 ### What to look for on hardware
 
@@ -537,6 +573,9 @@ It is **opportunistic by nature**. On a game that keeps all four sub layers busy
 there is nowhere to draw, and no amount of engineering changes that short of
 pausing the game — which is worse than not showing text. Unlocks will need queuing
 until a slot frees up rather than being dropped.
+
+**Confirmed at phase 1**: on a second game the overlay was refused 4 times out of 13
+attempts (`denied` = 4). The queue is not a precaution, it is required.
 
 The current version is a feasibility proof, not the finished notification: one fixed
 message, glyphs stored in message order so there is no font and no lookup table.
