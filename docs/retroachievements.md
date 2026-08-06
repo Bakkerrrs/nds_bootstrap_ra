@@ -46,14 +46,15 @@ Three things that are easy to trip over:
   `.lz77` target fails with `Error 127`.
 - Build serially. `make -j` races: sub-makes link before their dependencies exist
   (`cannot find arm9mpu_reset.o`, `cannot find my_fat.o`).
-- Each cardengine Makefile generates its linker script with
-  `$(CPP) -P $(INCLUDE) $< $@`, which needs `CPP` to be a real preprocessor driver
-  that takes an output filename. devkitARM's rules do not set `CPP`, so it falls
-  back to GNU make's default of `$(CC) -E` — and `gcc -E in out` treats `out` as a
-  second *input*, failing with `linker input file not found: cardengine.ld`. If you
-  hit that, build with `make CPP=arm-none-eabi-cpp`. Worth knowing before trusting
-  a green or red CI run: this repository's Actions have never executed, so the
-  workflow is unproven either way.
+- **Build from the top level**, not from a cardengine subdirectory. Each of the 40
+  cardengine Makefiles generates its linker script with `$(CPP) -P $(INCLUDE) $< $@`,
+  which needs `CPP` to be a preprocessor driver that accepts an output filename.
+  `retail/Makefile` and `hb/Makefile` export `CPP := arm-none-eabi-cpp` for exactly
+  that reason. devkitARM's own rules do not set it, so running
+  `make -C retail/cardenginei/arm9` directly falls back to GNU make's default of
+  `$(CC) -E` — and `gcc -E in out` treats `out` as a second *input*, failing with
+  `linker input file not found: cardengine.ld`. Pass `CPP=arm-none-eabi-cpp` when
+  building one variant in isolation, which is worth doing to read its `.map`.
 
 Output is `retail/bin/nds-bootstrap.nds` and `hb/bin/nds-bootstrap.nds`.
 
