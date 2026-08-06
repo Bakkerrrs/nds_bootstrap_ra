@@ -734,12 +734,80 @@ It no longer matters. The separate-binary approach puts code and state in the
 `0x02xxxxxx` space instead, which is required anyway: region 3's *instruction*
 permission is `0x0`, so code could never have executed from `0x0C`/`0x0D`.
 
+## Known graphical limitations of the overlay (deferred)
+
+These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
+left alone — including for a first public release. They are listed together so the
+decision is on the record rather than implicit in what nobody got around to fixing.
+
+The reason they are acceptable is the same in every case: the overlay's design rule is
+that **a notification that corrupts the game is worse than no notification**, and it
+holds that rule. Every item below is either cosmetic, transient, or a design choice.
+None of them can crash a game or corrupt a save.
+
+| # | Limitation | Severity | Observed? |
+| --- | --- | --- | --- |
+| 1 | Collides with the in-game menu on the frame it opens | cosmetic, transient | yes, once |
+| 2 | Borrows one palette entry the game may be using | cosmetic, transient | not since the fix |
+| 3 | `surveyBlocks()` mis-reads non-text backgrounds | **could corrupt graphics** | no |
+| 4 | Cannot choose which physical screen it appears on | design decision | yes, by design |
+| 5 | Silently skips notifications when no layer is free | design decision | yes, 5 of 18 attempts |
+
+**1 — the menu collision.** Pressing X to open the in-game menu hands both screens to
+the menu. If the overlay is holding a borrowed layer at that instant, both are writing
+sub engine registers in the same frame. This produced the single remaining fault seen
+after the palette fix. No achievement is going to unlock on the exact frame the menu
+opens, so the exposure is close to nil. The clean fix is for the overlay to stand down
+while the menu is up, which needs a way to know the menu is up.
+
+**2 — the borrowed palette entry.** The text has to be *some* colour, so one entry of the
+sub background palette is taken and restored on hide. Which entries a game is using is
+not discoverable from the registers, so there is no way to pick a provably free one. One
+entry is the floor this design has; it was fifteen until phase 1 found that the glyphs
+only ever use one.
+
+**3 — the only one that could actually corrupt something.** `surveyBlocks()` reads every
+enabled layer's `BGCNT` as though it were a text background — character base in 16K
+units, screen base in 2K units, map size from bits 14-15 — and never consults the BG mode
+in `DISPCNT` or the colour-depth bit. For an affine or bitmap background those fields
+mean different things; a bitmap's base is in 16K units, not 2K. So the survey can both
+miss a block the game is using and mark one it is not, and picking an in-use block would
+overwrite the game's tiles until it redrew them.
+
+This has never been observed, and phase 1 produced positive evidence that it is not
+firing in practice: every one of the 5 recorded denials was a missing *layer*, not a
+missing block, so the block search was never even the deciding factor. It is a latent
+correctness bug rather than an active one — but it is the one item here that is a bug and
+not a trade-off, and it should be fixed when the overlay is rewritten rather than
+patched in place.
+
+**4 — no control over the screen.** The overlay draws on the sub engine; which physical
+panel that feeds is `POWCNT1` bit 15, which belongs to the game. *Final Fantasy III*
+flips it by context, so the notification appeared on the top screen in the field and the
+bottom in battle. Putting it somewhere predictable means being able to borrow from the
+main engine too.
+
+**5 — skipped notifications.** Confirmed to be entirely a "no free layer" condition, and
+to line up with the fades on map transitions. The answer is a queue that holds an unlock
+until a layer frees, which is real work rather than a fix, and it belongs with the client
+that will generate the unlocks.
+
+### Disposition
+
+Items 1, 2, 4 and 5 are not defects to fix but properties to design around, and 5 needs
+the client to exist first. Item 3 is a real bug with no observed effect. None of them
+blocks a release, and all of them belong with the overlay rewrite in
+`cardenginei_arm9_ra` — which the overlay needs anyway for a font it can fit, so
+patching them into a 104-byte margin first would be work done twice.
+
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
 - [x] Phase 0: per-frame game RAM snapshot — **confirmed on hardware**
 - [x] Phase 0.5: text notification over a running game — **confirmed on hardware**
-- [x] Phase 1: parameterised watchlist + pointer chains — **confirmed on hardware**
+- [x] Phase 1: parameterised watchlist + pointer chains — **confirmed on hardware**,
+      on *Space Invaders Extreme* and *Final Fantasy III*. Known overlay limitations
+      found along the way are catalogued and deferred, see above.
 - [ ] Next: `cardenginei_arm9_ra`, a separate ARM9 binary for RA code, following the
       colour LUT's pattern. Unblocks both a real font for the overlay and phase 2.
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
