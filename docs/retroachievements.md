@@ -43,9 +43,25 @@ The change is inert and cannot break a boot.
 The ARM9 cardengine has **28 bytes** left. That is the constraint behind almost every
 decision in this document, and the reason the next task matters.
 
-### The next task: confirm the loader on hardware
+### The next task: put something real in the WRAM window
 
-The load path is written and builds clean; it has never run. Three pieces:
+The loader is **confirmed on hardware** — see the `cardenginei_arm9_ra` section for the
+reading. The 256K window is live, called every frame, and reporting back through the
+snapshot. What goes in it is now the open question rather than whether it works.
+
+The natural order from here, cheapest first:
+
+1. **Move the watchlist into WRAM.** It is the smallest useful thing that reclaims real
+   room: `RA_WATCH_MAX` went from 4 to 2 to pay for the bridge, and the whole reader is
+   ~590 bytes of a 12K window. Moving it also proves the window can hold state, not just
+   code, before `rcheevos` depends on that.
+2. **A real font for the overlay**, which unblocks the overlay rewrite and the graphical
+   limitations catalogued below.
+3. **`rcheevos`**, 48K linked, plus an allocator over the rest of the window. This is
+   phase 2 and it is the biggest single step; the two above are worth doing first because
+   they exercise the window with things that are easy to verify.
+
+For reference, the loader as built consists of:
 
 - **`retail/arm9/source/conf_sd.cpp`** stages `nitro:/cardenginei_arm9_ra.bin` at
   `CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x10`, then writes the `SRA1` magic at +0x00.
@@ -1086,13 +1102,47 @@ linked program with its own allocator over a reserved arena, not an injected blo
 style of `cardenginei_arm9_colorlut`. That is the single biggest structural difference from
 the pattern being copied, and it is worth knowing before starting rather than after.
 
-## `cardenginei_arm9_ra` — the binary exists, the loader does not yet
+## `cardenginei_arm9_ra` — running on hardware
 
-Built, packed into the `.nds`, and called from the cardengine. **Not yet loaded**, which
-means that on hardware today `wramState` reads `00` (absent) and nothing happens. That is
-the intended state of this step, and it is deliberately the safe half: the bridge is
-inert until a bootloader sets a flag that nothing currently sets, so this change cannot
-break a boot.
+Built, packed into the `.nds`, staged in main RAM, copied into DSi WRAM, recognised as
+code, called once per frame, and executing. **Confirmed on hardware**, first attempt.
+
+The reading that established it, snapshot at `0x027FEF10`:
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `wramMagic` `+0x4C` | `52414831` — `RAH1` | the separate binary wrote its own magic |
+| `wramTicks` `+0x50` | 2,701 | its own frame counter |
+| `wramState` `+0x54` | `02` | `RA_WRAM_CALLED` |
+| `ticks` `+0x04` | 2,701 | the reader's counter — *identical* |
+
+The two counters being equal is the strongest part. It means the WRAM binary was called on
+every frame since boot with none dropped; an intermittent call would leave `wramTicks`
+behind. And `linesMax` stayed at 1, so the jump into WRAM costs under a scanline.
+
+### The two things it answered that no amount of reading could
+
+**`0x02600000` really was free.** The staging address came out of reading the bootloader's
+early clear list rather than the address constants, which is what caught `0x02700000` being
+the FAT table cache. Getting that wrong would have corrupted the bootloader's own file
+tables; instead the copy landed intact.
+
+**The colour LUT's retail path works.** The block this mirrors hands WRAM to the ARM7 only
+in DSi mode, so for a plain DS game the ARM7 writes `0x03740000` with no handover at all.
+Whether anyone had ever exercised that path was the largest unknown in the design, and it
+could only be settled by running it. It works — and the MBK mapping evidently survives into
+gameplay too, since the ARM9 cardengine reaches the same window afterwards.
+
+### What this changes
+
+The ARM9 cardengine's 28-byte margin stops being the binding constraint on the project.
+Everything that was queued behind a 256K window with code execution now has one:
+
+- `rcheevos`, measured at 48K linked, for phase 2
+- a real font for the overlay instead of eleven hand-drawn glyphs
+- the overlay rewrite, and with it the `surveyBlocks()` bug and the menu stand-down
+- a control measurement to separate the reader's own cost from machine contention
+- and the reader itself, which no longer has to live in 12K
 
 ### What is in place
 
@@ -1104,9 +1154,9 @@ break a boot.
 | `ra_tick()` calls it, gated on a flag and on the window containing code | done |
 | `wramMagic` / `wramTicks` / `wramState` in the snapshot | done |
 | Staging address chosen and justified (`0x02600000`) | done |
-| Launcher reads the nitrofile into that buffer | written, hardware-unverified |
-| Bootloader ARM7 copies the buffer into WRAM and sets `b_raWramLoaded` | written, hardware-unverified |
-| `wramSize` reduced to `CARDENGINEI_ARM9_RA_WRAMSIZE` when it is loaded | written, hardware-unverified |
+| Launcher reads the nitrofile into that buffer | **confirmed on hardware** |
+| Bootloader ARM7 copies the buffer into WRAM and sets `b_raWramLoaded` | **confirmed on hardware** |
+| `wramSize` reduced to `CARDENGINEI_ARM9_RA_WRAMSIZE` when it is loaded | done |
 
 The stub does one thing: write `RAH1` into `wramMagic` on its first call and increment
 `wramTicks` every frame. Useless on its own, and that is the point — the milestone is the
@@ -1266,11 +1316,10 @@ patching them into a 104-byte margin first would be work done twice.
 - [x] Phase 1: parameterised watchlist + pointer chains — **confirmed on hardware**,
       on *Space Invaders Extreme* and *Final Fantasy III*. Known overlay limitations
       found along the way are catalogued and deferred, see above.
-- [~] `cardenginei_arm9_ra`, a separate ARM9 binary in DSi WRAM. Built, packed, called,
-      and previously verified inert on hardware (`wramState` = `00`). The loader is now
-      written too — launcher staging, ARM7 copy into WRAM, and the WRAM budget arithmetic
-      — and builds clean, but **has never run**. Confirming it is the next thing: see
-      *Where this stands* near the top of this document.
+- [x] `cardenginei_arm9_ra`, a separate ARM9 binary in DSi WRAM — **confirmed on
+      hardware**. Staged, copied, recognised, called every frame, executing, and
+      reporting back. 256K of window with code execution, which retires the cardengine's
+      12K as the project's binding constraint.
 - [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status
