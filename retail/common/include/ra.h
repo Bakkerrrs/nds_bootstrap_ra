@@ -304,18 +304,36 @@ typedef struct raSnapshot {
 	u8  rcLinesMax;      /* +0x85  worst seen, excluding the init frame */
 	u8  rcEvents;        /* +0x86  events of any kind delivered, clamped at 255 */
 	u8  reserved3;       /* +0x87 */
-} raSnapshot;            /*              0x88 bytes */
+	/*
+	    The allocator, reported separately from the arena. Added after a reading that could
+	    not be diagnosed: rcheevos failed to allocate 32 bytes while heapSize said 189K was
+	    free, and nothing in the snapshot could say whether the arena bookkeeping was wrong
+	    or newlib was refusing for its own reasons.
+
+	    heapBreak and heapTop are _sbrk()'s own two numbers, so the arena is *shown* rather
+	    than inferred from a subtraction. sbrkProbe is the discriminator: a non-zero value
+	    here next to a zero mallocProbe means _sbrk() will hand out memory that malloc()
+	    will not, which puts the fault in newlib rather than in the window.
+
+	    Only written on the failure path -- sbrkProbe moves the break, which is free on a
+	    heap that is already dead and not something to do to a working one.
+	*/
+	u32 heapBreak;       /* +0x88 */
+	u32 heapTop;         /* +0x8C */
+	u32 mallocProbe;     /* +0x90  what malloc(32) returned; 0 = refused */
+	u32 sbrkProbe;       /* +0x94  what _sbrk(64) returned; 0 = refused */
+} raSnapshot;            /*              0x98 bytes */
 
 /*
     How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail
     for its own reason, and without this they all present as an achievement that does not
     unlock.
 */
-#define RA_RC_NONE       0  /* not reached -- the window did not come up */
-#define RA_RC_NO_MEMORY  1  /* the arena cannot supply rcheevos' first allocation */
-#define RA_RC_INIT       2  /* rc_runtime_init() returned */
-#define RA_RC_PARSE_BAD  3  /* the definition was rejected; see rcActivate */
-#define RA_RC_ACTIVE     4  /* one achievement activated and validated */
-#define RA_RC_FRAME      5  /* rc_runtime_do_frame() has run */
+#define RA_RC_NONE        0  /* not reached -- the window did not come up */
+#define RA_RC_NO_MEMORY   1  /* malloc() refused; see heapBreak/heapTop/sbrkProbe */
+#define RA_RC_NO_MEMREFS  2  /* malloc() worked but rc_runtime_init()'s allocation did not */
+#define RA_RC_PARSE_BAD   3  /* the definition was rejected; see rcActivate */
+#define RA_RC_ACTIVE      4  /* one achievement activated and validated */
+#define RA_RC_FRAME       5  /* rc_runtime_do_frame() has run */
 
 #endif /* RA_H */

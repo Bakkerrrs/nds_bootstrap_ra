@@ -64,7 +64,7 @@ rc_runtime_sources=$(ls "$RC"/src/rcheevos/*.c | grep -v 'rc_validate\.c$')
 $CC -std=gnu99 -Wall -Wno-unused-function -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -O1 \
 	-I"$out/include" -Iretail/common/include \
 	-I"$RC/include" -I"$RC/src" \
-	-no-pie -Wl,-Ttext-segment=0x02100000 \
+	-no-pie -Wl,-Ttext-segment=0x02100000 -Wl,--wrap=malloc \
 	tools/ra_reader_test.c \
 	$rc_runtime_sources \
 	"$RC"/src/rc_util.c "$RC"/src/rc_compat.c "$RC"/src/rc_version.c \

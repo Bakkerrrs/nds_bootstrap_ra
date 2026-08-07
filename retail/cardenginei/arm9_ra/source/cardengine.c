@@ -38,6 +38,10 @@
 extern u8  ra_startup(char* bssStart, char* bssEnd, char* windowTop);
 extern u32 ra_heap_size(void);
 extern u32 ra_heap_used(void);
+extern u32 ra_heap_break(void);
+extern u32 ra_heap_top(void);
+extern u32 ra_malloc_probe(void);
+extern u32 ra_sbrk_probe(void);
 
 /* retail/cardenginei/arm9_ra/source/ra_rcheevos.c -- the RetroAchievements runtime. */
 extern void ra_rc_tick(raSnapshot* snapshot);
@@ -246,6 +250,15 @@ void ra_wram_tick(raSnapshot* snapshot) {
 	snapshot->wramStage = stage;
 	snapshot->heapSize  = ra_heap_size();
 	snapshot->heapUsed  = ra_heap_used();
+	/*
+	    _sbrk()'s own view, written on every tick including the failing ones -- which is the
+	    point. The previous build reported a 189K arena and a failed 32-byte allocation with
+	    no way to tell which of the two was lying.
+	*/
+	snapshot->heapBreak   = ra_heap_break();
+	snapshot->heapTop     = ra_heap_top();
+	snapshot->mallocProbe = ra_malloc_probe();
+	snapshot->sbrkProbe   = ra_sbrk_probe();
 	if (stage < RA_STAGE_ALLOC) {
 		/*
 		    The allocator did not come up. Stop here rather than run the watchlist anyway:

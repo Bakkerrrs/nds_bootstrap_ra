@@ -234,6 +234,7 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 
 	{
 		void* probe = malloc(sizeof(rc_memrefs_t));
+
 		if (probe == 0) {
 			return RA_RC_NO_MEMORY;
 		}
@@ -242,7 +243,7 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 
 	rc_runtime_init(&runtime);
 	if (runtime.memrefs == 0) {
-		return RA_RC_NO_MEMORY;
+		return RA_RC_NO_MEMREFS;
 	}
 
 	activate = rc_runtime_activate_achievement(

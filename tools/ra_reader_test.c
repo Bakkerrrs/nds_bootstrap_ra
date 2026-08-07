@@ -79,6 +79,25 @@ static void expect_status(const char* what, int index, u8 want) {
 	}
 }
 
+/*
+    A failable malloc, so the probe inside ra_startup() can be made to fail on the host.
+
+    This exists for one specific bug, which cost a flash cycle to find and was invisible
+    here: ra_startup() set its "already ran" flag *before* the allocator probe and then
+    returned RA_STAGE_ALLOC unconditionally on every later call. A probe that failed on the
+    first frame was therefore reported as a working heap from the second frame onward, and
+    the snapshot showed wramStage 04 over a dead heap.
+
+    The runner links with -Wl,--wrap=malloc, so every malloc in the code under test comes
+    through here. Passing through by default keeps every other test unaffected.
+*/
+static int failMalloc;
+extern void* __real_malloc(size_t n);
+
+void* __wrap_malloc(size_t n) {
+	return failMalloc ? 0 : __real_malloc(n);
+}
+
 /* Words inside main RAM the test can point chains at. */
 static u32 target = 0xDEADBEEF;
 static u32 targetPtr;
@@ -129,9 +148,39 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, rcPeeks) == 0x7C);
 	CHECK(__builtin_offsetof(raSnapshot, rcPeeksRejected) == 0x80);
 	CHECK(__builtin_offsetof(raSnapshot, rcLines) == 0x84);
-	CHECK(sizeof(raSnapshot) == 0x88);
+	CHECK(__builtin_offsetof(raSnapshot, heapBreak) == 0x88);
+	CHECK(__builtin_offsetof(raSnapshot, heapTop) == 0x8C);
+	CHECK(__builtin_offsetof(raSnapshot, mallocProbe) == 0x90);
+	CHECK(__builtin_offsetof(raSnapshot, sbrkProbe) == 0x94);
+	CHECK(sizeof(raSnapshot) == 0x98);
 
 	*DISPCNT = 0x1F40;
+
+	/*
+	    Run before the real startup, because ra_startup() only does its work once per boot
+	    and this needs to be that once.
+	*/
+	printf("\na failed allocator stays failed, on every call\n");
+	{
+		failMalloc = 1;
+		CHECK(ra_startup(fakeBss, fakeBss + sizeof(fakeBss),
+		                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_HEAP);
+		/*
+		    The regression. This second call used to return RA_STAGE_ALLOC and claim a
+		    working heap, because the "already ran" flag is set before the probe.
+		*/
+		CHECK(ra_startup(fakeBss, fakeBss + sizeof(fakeBss),
+		                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_HEAP);
+		CHECK(ra_malloc_probe() == 0);
+		/* And the arena is still shown to be fine, which is what names newlib as the fault. */
+		CHECK(ra_sbrk_probe() != 0);
+		CHECK(ra_heap_top() == (u32)(fakeBss + sizeof(fakeBss) + 0x3B000));
+
+		/* Back to a fresh boot for the tests below. */
+		failMalloc   = 0;
+		startupState = RA_STARTUP_FRESH;
+		startupStage = RA_STAGE_NONE;
+	}
 
 	printf("\nstartup zeroes .bss once and measures the arena\n");
 	memset(fakeBss, 0xA5, sizeof(fakeBss));
