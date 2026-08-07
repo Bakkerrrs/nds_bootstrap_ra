@@ -19,7 +19,7 @@ without rewriting the reader:
 
 | Module | Responsibility | Status |
 | --- | --- | --- |
-| `ra_reader` | Read the game's RAM. Knows nothing about RetroAchievements. | phase 1 done, confirmed on hardware |
+| `ra_reader` | Read the game's RAM. Knows nothing about RetroAchievements. The watchlist lives in `cardenginei_arm9_ra`; the cardengine keeps the per-frame bridge and the snapshot. | phase 1 done, confirmed on hardware |
 | `ra_overlay` | Show a notification over the running game. Knows nothing about RetroAchievements either. | proven, needs a real font |
 | `ra_client` | Wrap `rcheevos`' `rc_client`; decide what to watch, evaluate, fire unlocks. | not started |
 | `ra_net` | HTTP(S) transport to the RA servers. `rcheevos` ships no networking. | not started |
@@ -49,17 +49,14 @@ The loader is **confirmed on hardware** — see the `cardenginei_arm9_ra` sectio
 reading. The 256K window is live, called every frame, and reporting back through the
 snapshot. What goes in it is now the open question rather than whether it works.
 
-The natural order from here, cheapest first:
-
-1. **Move the watchlist into WRAM.** It is the smallest useful thing that reclaims real
-   room: `RA_WATCH_MAX` went from 4 to 2 to pay for the bridge, and the whole reader is
-   ~590 bytes of a 12K window. Moving it also proves the window can hold state, not just
-   code, before `rcheevos` depends on that.
+1. ~~Move the watchlist into WRAM.~~ **Done**, pending hardware. It took
+   `cardenginei_arm9` from 28 bytes free to 476 and `RA_WATCH_MAX` from 2 to 16, and it
+   carries the `.bss`-persistence test described in the section on that binary.
 2. **A real font for the overlay**, which unblocks the overlay rewrite and the graphical
    limitations catalogued below.
 3. **`rcheevos`**, 48K linked, plus an allocator over the rest of the window. This is
-   phase 2 and it is the biggest single step; the two above are worth doing first because
-   they exercise the window with things that are easy to verify.
+   phase 2 and the biggest single step; the two above are worth doing first because they
+   exercise the window with things that are easy to verify.
 
 For reference, the loader as built consists of:
 
@@ -732,53 +729,37 @@ Build, run `tools/ra_snapshot_addr.sh` — it now lists three variants, not eigh
 for a plain retail DS game on a DSi or 3DS the one you want is `cardenginei_arm9` —
 then point the in-game menu's RAM viewer at that address.
 
-The header is the first two rows:
+The layout, with the snapshot at `S`:
 
 | Offset | Field | Expected |
 | --- | --- | --- |
-| `+0x00` | `magic` | `52 41 31 53` — `RA1S` |
-| `+0x04` | `ticks` | climbing once per frame |
+| `+0x00` | `magic` | `52 41 32 53` — `RA2S`. The digit is the layout version; an older build reads `RA1S` |
+| `+0x04` | `ticks` | the cardengine's frame counter, climbing |
 | `+0x08` / `+0x0C` / `+0x10` | `shows` / `denied` / `evicted` | the overlay's negotiation |
 | `+0x14` | `deniedNoLayer` | of the denials, how many found no free layer |
-| `+0x18` | `watchCount` | `02` |
-| `+0x19` | `resolved` | `02` — both defaults resolving |
+| `+0x18` / `+0x19` | `watchCount` / `resolved` | `02` / `02` |
 | `+0x1A` / `+0x1B` | `linesLast` / `linesMax` | the per-frame cost in scanlines |
+| `+0x1C` | `wramMagic` | `52 41 48 31` — `RAH1` |
+| `+0x20` | `wramTicks` | **the WRAM binary's own counter, kept in its own .bss** |
+| `+0x24` | `wramState` | `02` — called |
+| `+0x28` | `selfCell` | = `S` |
+| `+0x2C` | `selfCellPtr` | = `S+0x28` |
+| `+0x30` | `results[0]` | the direct watch |
+| `+0x3C` | `results[1]` | the two-step chain |
+| `+0x48`, `+0x54` | `results[2]`, `results[3]` | unused, zero |
 
-Then one 0x18-byte block per watch, at `+0x1C` and `+0x34`, and after them the fields
-`cardenginei_arm9_ra` reports through:
+Each result is 0x0C bytes: `address` at +0x00, `value` at +0x04, then `depth`, `size`,
+`status`. So:
 
-| Offset | Field | Expected |
-| --- | --- | --- |
-| `+0x4C` | `wramMagic` | `52 41 48 31` — `RAH1`, written by the separate binary |
-| `+0x50` | `wramTicks` | its own frame counter |
-| `+0x54` | `wramState` | `00` absent, `01` window holds no code, `02` called |
+- **`results[0]`** (`S+0x30`), the direct read: `address` `0x04001000`, `depth` `00`,
+  `size` `02`, `status` `02`. `value` tracks the sub engine's `DISPCNT`.
+- **`results[1]`** (`S+0x3C`), two indirections: `address` = **`S+4`**, `value` = `ticks`,
+  `depth` `02`, `size` `04`, `status` `02`.
 
-Within a watch block:
-
-| Offset in block | Field |
-| --- | --- |
-| `+0x00` | `base` |
-| `+0x04` / `+0x08` | `offsets[0]` / `offsets[1]` |
-| `+0x0C` | `address` — resolved this frame, `0` if it did not |
-| `+0x10` | `value` |
-| `+0x14` / `+0x15` / `+0x16` | `depth` / `size` / `status` |
-
-So, with the snapshot at `S`:
-
-- **Watch 0** (`S+0x1C`), the direct read: `base` and `address` both `0x04001000`,
-  `depth` `00`, `size` `02`, `status` `02`. `value` tracks `DISPCNT` and changes when a
-  notification is up.
-- **Watch 1** (`S+0x34`), two indirections: `offsets[0]` `00`, `offsets[1]` `04`,
-  `depth` `02`, `status` `02`, `address` = **`S+4`**, `value` = `ticks`.
-
-Watch 1 reading `ticks` through two indirections is **the phase 1 result**. `value` may
-lag `ticks` by one if the viewer refreshes while the game runs; what matters is that it
-tracks, not that it matches exactly.
-
-There used to be a depth-1 default alongside it, which made it obvious which *step* of a
-chain had broken. It was given up to pay for the bridge described below; the per-watch
-status codes still say where a chain broke, and depth 2 walks every line of the depth-1
-path plus one more.
+`wramTicks` equalling `ticks` is the thing to check first now. That counter lives in the
+WRAM binary's own `.bss` and is copied here each frame rather than incremented here, so
+the two staying level is what proves state persists in that window between frames.
+Everything built there from now on depends on it.
 
 A `status` other than `02` says where a chain broke — `03` bad base, `04` bad pointer
 mid-chain, `05` bad target, `06` misaligned. All three defaults resolve against memory
@@ -1133,16 +1114,49 @@ Whether anyone had ever exercised that path was the largest unknown in the desig
 could only be settled by running it. It works — and the MBK mapping evidently survives into
 gameplay too, since the ARM9 cardengine reaches the same window afterwards.
 
+### The watchlist moved in, and the cardengine got its room back
+
+First thing built there, and chosen first deliberately: it is the smallest useful payload,
+and it tests the one property nothing had tested — whether `.bss` in that window survives
+between frames. `wramTicks` is now the WRAM binary's own counter, kept in its own `.bss`
+and copied into the snapshot each frame rather than incremented there. If the window does
+not hold state, it sticks at 1 while `ticks` climbs. Finding that out with a watchlist
+costs a flash cycle; finding it out with `rcheevos` half-integrated costs a week.
+
+What moved: the descriptors, the pointer-chain walker, the range checks, `ra_watch_add()`.
+What stayed: the snapshot, the per-frame entry point, the bridge, the overlay.
+
+| | Before | After |
+| --- | --- | --- |
+| `ra_reader.o` text | 648 | **188** |
+| `cardenginei_arm9` free | 28 | **476** |
+| `RA_WATCH_MAX` | 2 | **16** |
+| WRAM binary image | 48 bytes | 880 bytes |
+
+The snapshot could not move with it. It is the only debug channel this project has, it is
+read at a fixed cardengine address the RAM viewer is known to reach, and keeping it there
+means the counters still work when the WRAM binary is absent — which is exactly when you
+most want to see them. So the split is: the WRAM binary owns the watchlist and mirrors the
+first `RA_RESULT_MAX` results into the snapshot, in a 12-byte form that drops `base` and
+`offsets`. Those are static configuration; if they were wrong the address would not
+resolve, which `status` already says.
+
+One detail worth keeping. The self-test chain's cells used to live beside the watchlist,
+but a pointer the walker follows must be a main RAM address and this binary runs from
+`0x0374xxxx`. Relaxing that check to accommodate our own cells would have weakened it for
+the game addresses it exists to guard, so the cells moved into the snapshot instead —
+`selfCell` and `selfCellPtr` — and the WRAM binary fills them in, being the only side that
+knows the address.
+
 ### What this changes
 
-The ARM9 cardengine's 28-byte margin stops being the binding constraint on the project.
-Everything that was queued behind a 256K window with code execution now has one:
+The ARM9 cardengine's margin stops being the binding constraint on the project. Still
+queued for the 256K window:
 
 - `rcheevos`, measured at 48K linked, for phase 2
 - a real font for the overlay instead of eleven hand-drawn glyphs
 - the overlay rewrite, and with it the `surveyBlocks()` bug and the menu stand-down
 - a control measurement to separate the reader's own cost from machine contention
-- and the reader itself, which no longer has to live in 12K
 
 ### What is in place
 

@@ -18,41 +18,22 @@
 
 /*
     Everything this fork does per frame, from the VCOUNT interrupt handler: the
-    notification overlay, the watchlist, and then cardenginei_arm9_ra if it is there.
+    notification overlay, then cardenginei_arm9_ra, which evaluates the watchlist.
 
     Pass ce9->consoleModel; the work is skipped on anything but the 3DS family, which is
     the only target -- see the scope note in docs/retroachievements.md. Pass wramLoaded
-    from the bootloader's flag; it is verified again here before anything is called.
+    from the bootloader's flag; the window is verified again here before anything in it is
+    called.
 
     Runs in an interrupt handler, so it must stay short and must not block.
 */
 void ra_tick(u8 consoleModel, bool wramLoaded);
 
 /*
-    Re-resolve and re-read every watch. Called by ra_tick(); separate so the reader
-    stays testable on its own.
-*/
-void ra_reader_tick(void);
-
-/*
-    Add a watch, returning its index or -1 if the list is full or the request is
-    malformed.
-
-    size must be 1, 2 or 4. depth is the number of pointer indirections to walk
-    before the final read, up to RA_CHAIN_MAX; offsets[] supplies the offset added
-    after each one and may be NULL when depth is 0.
-
-    Nothing is trusted at add time -- addresses are validated on every tick, not
-    here -- because a chain that resolves now may not resolve next frame, and the
-    reader has to survive that either way.
-*/
-int ra_reader_watch_add(u32 base, u8 size, u8 depth, const u32* offsets);
-
-/*
-    There is deliberately no ra_reader_watch_clear() yet. It is the obvious
-    counterpart to _add and phase 2 will want it, but nothing calls it today and the
-    cardengine window has tens of bytes spare, not hundreds -- see the space budget in
-    docs/retroachievements.md. It costs about 44 of them, so it waits for its caller.
+    The watchlist API moved to cardenginei_arm9_ra along with the watchlist. ra_watch_add()
+    and ra_watch_clear() live in retail/cardenginei/arm9_ra/source/cardengine.c, which is
+    also where phase 2's client will call them from -- there is no reason for a request to
+    cross into the cardengine and back out again.
 */
 
 /*

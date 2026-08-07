@@ -1,48 +1,246 @@
 /*
-    RetroAchievements support for nds-bootstrap -- the ARM9 code that lives outside
-    the cardengine.
+    RetroAchievements support for nds-bootstrap -- the ARM9 code that lives outside the
+    cardengine, and the watchlist it now owns.
 
-    The ARM9 cardengine is linked into a fixed 12K window with tens of bytes to spare,
-    and everything still to be built is larger than that by orders of magnitude:
-    `rcheevos` measures 48K linked, a font the overlay could use is a few K, and the
-    overlay's own rewrite needs room to be correct rather than clever. So this binary
-    exists, in DSi WRAM, following the colour LUT's pattern -- which is the one thing in
-    this project already proven to execute from that region on hardware.
+    The cardengine is linked into a fixed 12K window and at its tightest had 28 bytes
+    spare, against a single watch costing 24. This binary has 256K of DSi WRAM, so the
+    watchlist and the pointer-chain walker moved here and RA_WATCH_MAX went from 2 to 16.
+    The cardengine keeps the per-frame entry point and the snapshot; it hands over a
+    pointer once a frame and knows nothing else about how any of this works.
 
-    Right now it does one thing: prove the chain. Built, packed into the .nds, loaded,
-    copied into WRAM, recognised as code, called, and reporting back through the
-    snapshot the cardengine already exposes. Nothing here is useful yet; what matters is
-    that every link can be seen separately in a RAM viewer, so when one of them fails it
-    is obvious which. That is the order phases 0 and 0.5 were built in, for the same
-    reason: a flash cycle is expensive and a silent failure costs several.
+    Two things shape the walker, and they are the same two that shaped it in the
+    cardengine.
+
+    The first is that a pointer read out of a running game is not trustworthy. It is
+    whatever happens to be in that word this frame, including garbage while the game
+    tears down one scene and builds the next. Dereferencing it blind takes a Data Abort
+    in the middle of the game's interrupt handler, which is a crash. So every address is
+    range-checked immediately before it is used, and a chain that does not resolve is
+    reported as not resolved rather than chased.
+
+    The second is that the resolved address may not be cached. That is the entire reason
+    pointer chains exist: the structure moves, and an address that was correct last frame
+    points into the middle of something else this frame. Walking the chain again every
+    tick is not wasted work, it is the work.
 
     This file is part of nds-bootstrap and is licensed under the GPL-3.0,
     the same terms as the rest of the project.
 */
 
 #include "ra.h"
+#include "locations.h"
+
+/* Main RAM as the game sees it, mirrors included. */
+#define RA_MAIN_RAM_START 0x02000000
+#define RA_MAIN_RAM_END   0x03000000
+
+/* Offset of raSnapshot.ticks -- what the self-test chains resolve to. */
+#define RA_TICKS_OFFSET 4
+typedef char raTicksOffsetCheck[
+	(RA_TICKS_OFFSET == __builtin_offsetof(raSnapshot, ticks)) ? 1 : -1];
+
+/*
+    The watchlist, and this binary's own frame counter, both in .bss.
+
+    Nothing had ever kept state in this window between frames before, so `frames` is
+    also a test: the cardengine copies it into snapshot.wramTicks every tick rather than
+    counting there itself, so if .bss here does not persist it sticks at 1 while
+    snapshot.ticks climbs. Everything after this -- rcheevos above all -- depends on the
+    answer being yes.
+
+    Like the cardengine's .bss, this is never zeroed: the bootloader copies the loaded
+    image and there is no crt0. Hence the magic.
+*/
+static u32     stateMagic;
+static u32     frames;
+static u8      watchCount;
+static raWatch watches[RA_WATCH_MAX];
+
+/*
+    Where a pointer read out of the game is allowed to point. A game pointer is always a
+    main RAM address, so one that is not has been read out of a structure that no longer
+    exists -- which is the normal case between scenes, not an exceptional one.
+
+    Written as `addr <= END - len` rather than `addr + len <= END` so a base near the top
+    of the address space cannot wrap past the check.
+*/
+static bool ra_in_main_ram(u32 addr, u32 len) {
+	return addr >= RA_MAIN_RAM_START && addr <= RA_MAIN_RAM_END - len;
+}
+
+/*
+    Where the final read is allowed to land. Main RAM is where every real watch lands;
+    I/O is reachable only because the diagnostic watch reads a display register, and
+    nothing else is listed -- an address outside these is reported as unreadable rather
+    than dereferenced to find out what happens.
+
+    Note this does *not* include the window this code is running from. A watch has no
+    business reading DSi WRAM, and leaving it out means a chain that somehow produces an
+    address in here is reported rather than followed.
+*/
+static bool ra_readable(u32 addr, u32 len) {
+	return ra_in_main_ram(addr, len)
+	    || (addr >= 0x04000000 && addr <= 0x04001100 - len);
+}
+
+static u32 ra_read(u32 addr, u8 size) {
+	if (size == 1) {
+		return *(const vu8*)addr;
+	}
+	if (size == 2) {
+		return *(const vu16*)addr;
+	}
+	return *(const vu32*)addr;
+}
+
+/*
+    Add a watch, returning its index or -1 if the list is full or the request is
+    malformed. Nothing is trusted at add time -- addresses are validated on every tick,
+    not here -- because a chain that resolves now may not resolve next frame, and the
+    walker has to survive that either way.
+*/
+int ra_watch_add(u32 base, u8 size, u8 depth, const u32* offsets) {
+	raWatch* w;
+	u8 d;
+
+	if ((size != 1 && size != 2 && size != 4)
+	 || depth > RA_CHAIN_MAX
+	 || (depth && !offsets)
+	 || watchCount >= RA_WATCH_MAX) {
+		return -1;
+	}
+
+	w = &watches[watchCount];
+	w->base  = base;
+	w->size  = size;
+	w->depth = depth;
+	for (d = 0; d < RA_CHAIN_MAX; d++) {
+		w->offsets[d] = 0;
+	}
+	for (d = 0; d < depth; d++) {
+		w->offsets[d] = offsets[d];
+	}
+	w->address  = 0;
+	w->value    = 0;
+	w->reserved = 0;
+	w->status   = RA_WATCH_PENDING;
+
+	return watchCount++;
+}
+
+void ra_watch_clear(void) {
+	watchCount = 0;
+}
+
+/*
+    Walk one watch's chain from its base and read the value at the end. Every address is
+    checked in the moment it is about to be used; nothing is carried over from the
+    previous tick, because nothing from the previous tick is still known to be true.
+*/
+static void ra_watch_eval(raWatch* w) {
+	/*
+	    Clamped rather than trusted. ra_watch_add() validates depth, so this cannot fire
+	    today -- but the magic that makes this state trustworthy is only four bytes, and
+	    if garbage .bss ever matched it, an unclamped depth would read past offsets[] and
+	    walk arbitrarily many indirections inside an interrupt handler.
+	*/
+	const u8 depth = (w->depth > RA_CHAIN_MAX) ? RA_CHAIN_MAX : w->depth;
+	u32 addr = w->base;
+	u8 d;
+
+	w->address = 0;
+
+	for (d = 0; d < depth; d++) {
+		if ((addr & 3) || !ra_in_main_ram(addr, 4)) {
+			w->status = d ? RA_WATCH_BAD_POINTER : RA_WATCH_BAD_BASE;
+			return;
+		}
+		addr = *(const vu32*)addr + w->offsets[d];
+	}
+
+	/*
+	    An unaligned load does not fault on the ARM9, it silently returns rotated data --
+	    which would be worse than failing, because the value would look plausible.
+	*/
+	if (addr & (u32)(w->size - 1)) {
+		w->status = RA_WATCH_MISALIGNED;
+		return;
+	}
+	if (!ra_readable(addr, w->size)) {
+		w->status = depth ? RA_WATCH_BAD_TARGET : RA_WATCH_BAD_BASE;
+		return;
+	}
+
+	w->address = addr;
+	w->value   = ra_read(addr, w->size);
+	w->status  = RA_WATCH_OK;
+}
+
+/*
+    Something to look at on hardware before there is a game to watch: a live register
+    read directly, and a climbing counter reached through two indirections. Between them
+    they exercise every success path in ra_watch_eval().
+
+    The chain walks cells in the *snapshot*, not here. A pointer the walker follows has
+    to be a main RAM address, and this binary is at 0x0374xxxx -- relaxing that check to
+    accommodate our own cells would weaken it for the game addresses it exists to guard.
+    So the cells live in the snapshot, and this is the only side that can fill them in,
+    since it is the side handed the address.
+*/
+static void ra_install_defaults(raSnapshot* snapshot) {
+	u32 offsets[RA_CHAIN_MAX];
+
+	snapshot->selfCell    = (u32)snapshot;
+	snapshot->selfCellPtr = (u32)&snapshot->selfCell;
+
+	ra_watch_add(RA_DEFAULT_WATCH_ADDRESS, 2, 0, 0);
+
+	offsets[0] = 0;
+	offsets[1] = RA_TICKS_OFFSET;
+	ra_watch_add((u32)&snapshot->selfCellPtr, 4, 2, offsets);
+}
 
 /*
     Called once per frame from ra_tick() in the cardengine, with a pointer to the
-    snapshot buffer. The pointer is passed rather than assumed because the snapshot
-    lives in the cardengine's .bss and moves whenever that code changes -- this binary
-    cannot know its address at build time, and should not try.
+    snapshot. The pointer is passed rather than assumed because the snapshot lives in the
+    cardengine's .bss and moves whenever that code changes -- this binary cannot know its
+    address at build time, and should not try.
 
     Runs in the game's VCOUNT interrupt handler, so the same rules apply here as in the
-    reader: short, and no blocking.
+    cardengine: short, and no blocking.
 */
 void ra_wram_tick(raSnapshot* snapshot) {
-	/*
-	    Claimed the same way the snapshot itself is, and for the same reason: nothing in
-	    this window is initialised. The binary is copied in by the bootloader, so .text
-	    and .data arrive intact, but .bss does not, and neither does whatever the
-	    previous occupant of this memory left behind. The magic is what makes the counter
-	    below trustworthy rather than a number that happened to be there.
-	*/
-	if (snapshot->wramMagic != RA_WRAM_MAGIC) {
-		snapshot->wramMagic = RA_WRAM_MAGIC;
-		snapshot->wramTicks = 0;
+	u8 resolved = 0;
+	u8 i;
+
+	if (stateMagic != RA_WRAM_MAGIC) {
+		stateMagic = RA_WRAM_MAGIC;
+		frames     = 0;
+		watchCount = 0;
+		ra_install_defaults(snapshot);
 	}
 
-	snapshot->wramTicks++;
+	frames++;
+
+	for (i = 0; i < watchCount; i++) {
+		ra_watch_eval(&watches[i]);
+		if (watches[i].status == RA_WATCH_OK) {
+			resolved++;
+		}
+
+		/* Mirror the first few into the snapshot, which is a hex viewer's worth. */
+		if (i < RA_RESULT_MAX) {
+			snapshot->results[i].address  = watches[i].address;
+			snapshot->results[i].value    = watches[i].value;
+			snapshot->results[i].depth    = watches[i].depth;
+			snapshot->results[i].size     = watches[i].size;
+			snapshot->results[i].status   = watches[i].status;
+			snapshot->results[i].reserved = 0;
+		}
+	}
+
+	snapshot->watchCount = watchCount;
+	snapshot->resolved   = resolved;
+	snapshot->wramMagic  = RA_WRAM_MAGIC;
+	snapshot->wramTicks  = frames;
 }

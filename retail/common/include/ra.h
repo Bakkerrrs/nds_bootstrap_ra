@@ -3,7 +3,9 @@
 
     Layering (kept deliberately strict, see docs/retroachievements.md):
 
-      ra_reader  -- reads the running game's RAM. Knows nothing about RA.
+      ra_reader  -- the per-frame bridge in the cardengine, plus the snapshot that is
+                    this project's only debug channel. The watchlist it used to hold now
+                    lives in cardenginei_arm9_ra, where there is room for it.
       ra_overlay -- draws a notification over the game. Knows nothing about RA.
       ra_client  -- wraps rcheevos' rc_client. Decides what to watch. (not yet)
       ra_net     -- HTTP transport to the RA servers.                  (not yet)
@@ -50,30 +52,19 @@
     How many watches the reader evaluates per frame, and how many pointer
     indirections a single watch may walk.
 
-    Both are budget decisions, not design limits. The reader lives in the ARM9
-    cardengine's fixed window and the whole watchlist -- code, descriptors and results
-    -- has to fit in what is left of it, which on `cardenginei_arm9` is a margin best
-    described in tens of bytes. A watch costs 24 of them. Run
-    tools/ra_snapshot_addr.sh for the current figure and see the space budget in
-    docs/retroachievements.md for how little room there is; the linker scripts assert
-    .bss stays inside the window, so raising these too far fails the build rather than
-    producing a cardengine that does not fit.
+    These are no longer budget decisions. The watchlist lives in cardenginei_arm9_ra --
+    256K of DSi WRAM -- rather than in the ARM9 cardengine's 12K window, so a watch costs
+    24 bytes of somewhere that has room instead of 24 bytes of somewhere that has tens.
 
-    Two indirections cover the shape RetroAchievements actually uses on the DS --
-    a pointer to a player or save structure, then a field inside it -- and a third
-    can be added when a game needs one.
+    It was a budget decision until then, and the history is worth keeping: RA_WATCH_MAX
+    went 4 -> 2 to pay for the bridge into the separate binary, because the bridge is what
+    ended the competition. Now it is 16 because nothing argues for less.
 
-    RA_WATCH_MAX went from 4 to 2 to pay for the bridge into cardenginei_arm9_ra, which
-    needed 84 bytes against the 56 that were left. Two slots is exactly what the two
-    default watches use, so there is no spare one until the watchlist moves out of here.
-
-    That is the trade this budget note has been pointing at all along, and it is the
-    right way round: the bridge is worth more than a spare watch, because the bridge is
-    what stops the watchlist having to live in a 12K window at all. Once the separate
-    binary is proven on hardware, the reader moves into it and this constant stops being
-    a budget decision.
+    Two indirections cover the shape RetroAchievements actually uses on the DS -- a
+    pointer to a player or save structure, then a field inside it -- and a third can be
+    added when a game needs one.
 */
-#define RA_WATCH_MAX 2
+#define RA_WATCH_MAX 16
 #define RA_CHAIN_MAX 2
 
 /*
@@ -120,6 +111,26 @@ typedef struct raWatch {
 } raWatch;                      /*        0x18 bytes */
 
 /*
+    What the snapshot carries per watch, as opposed to what the watchlist keeps.
+
+    The descriptors live in the WRAM binary now, and there can be RA_WATCH_MAX of them;
+    the snapshot is a debug channel read through a hex viewer, so it mirrors only the
+    first RA_RESULT_MAX and only the fields that change. `base` and `offsets` are static
+    configuration -- if they were wrong the address would not resolve, which `status`
+    already says.
+*/
+typedef struct raResult {
+	u32 address;                /* +0x00  resolved this tick, 0 if unresolved */
+	u32 value;                  /* +0x04 */
+	u8  depth;                  /* +0x08  which of the defaults this is, in practice */
+	u8  size;                   /* +0x09 */
+	u8  status;                 /* +0x0A  RA_WATCH_* */
+	u8  reserved;               /* +0x0B */
+} raResult;                     /*        0x0C bytes */
+
+#define RA_RESULT_MAX 4
+
+/*
     Written into the snapshot by cardenginei_arm9_ra on its first call, so a counter
     coming from that binary can be told apart from whatever was in the buffer. Reads as
     "RAH1" in a byte-wise dump -- H for helper, since it is not the snapshot's own magic.
@@ -136,15 +147,16 @@ typedef struct raWatch {
 #define RA_WRAM_CALLED  2  /* called on the most recent tick */
 
 /*
-    Reads as the ASCII bytes "RA1S" in a byte-wise hex dump, which is how the
-    in-game menu's RAM viewer displays memory. Lets you confirm at a glance that
-    you are looking at the snapshot and not at unrelated memory -- and the digit is
-    the layout version, so a stale address from an older build announces itself as
-    "RA0S" instead of being read as garbage.
+    Reads as the ASCII bytes "RA2S" in a byte-wise hex dump, which is how the in-game
+    menu's RAM viewer displays memory. Lets you confirm at a glance that you are looking
+    at the snapshot and not at unrelated memory -- and the digit is the layout version,
+    so a stale address from an older build announces itself as "RA1S" or "RA0S" instead
+    of being read as garbage. It goes up whenever the layout below changes, which it did
+    when the watchlist moved into DSi WRAM.
 */
 #define RA_SNAPSHOT_MAGIC0 'R'
 #define RA_SNAPSHOT_MAGIC1 'A'
-#define RA_SNAPSHOT_MAGIC2 '1'
+#define RA_SNAPSHOT_MAGIC2 '2'
 #define RA_SNAPSHOT_MAGIC3 'S'
 
 /*
@@ -164,7 +176,7 @@ typedef struct raWatch {
     exactly on it.
 */
 typedef struct raSnapshot {
-	u8  magic[4];        /* +0x00  'R','A','1','S' */
+	u8  magic[4];        /* +0x00  'R','A','2','S' */
 	u32 ticks;           /* +0x04  frames captured -- the reader is alive */
 	/*
 	    How the overlay's negotiation for VRAM is going. The game moves its
@@ -193,14 +205,34 @@ typedef struct raSnapshot {
 	*/
 	u8  linesLast;       /* +0x1A  scanlines the last tick consumed */
 	u8  linesMax;        /* +0x1B  worst seen since the buffer was claimed */
-	raWatch watches[RA_WATCH_MAX];  /* +0x1C */
 	/*
-	    Filled in from the far side of the cardengine boundary. Appended after the
-	    watches so every offset quoted in docs/retroachievements.md keeps its address.
+	    Everything from here is written from the far side of the cardengine boundary, by
+	    cardenginei_arm9_ra.
 	*/
-	u32 wramMagic;       /* +0x7C  RA_WRAM_MAGIC, written by the binary itself */
-	u32 wramTicks;       /* +0x80  incremented by it once per frame */
-	u8  wramState;       /* +0x84  RA_WRAM_*, written by the cardengine */
-} raSnapshot;
+	u32 wramMagic;       /* +0x1C  RA_WRAM_MAGIC, written by the binary itself */
+	/*
+	    The WRAM binary's own frame counter, kept in *its* .bss and copied here each
+	    tick -- not incremented here. That is deliberate: nothing had ever stored state
+	    in that window between frames, and if it does not persist this counter sticks at
+	    1 while `ticks` climbs. It is the cheapest possible test of the thing everything
+	    after this depends on.
+	*/
+	u32 wramTicks;       /* +0x20 */
+	u8  wramState;       /* +0x24  RA_WRAM_*, written by the cardengine */
+	u8  reserved[3];     /* +0x25 */
+	/*
+	    The two cells the self-test chains walk. They live here, in main RAM, rather than
+	    in the WRAM binary alongside the watchlist -- because a pointer the chain walker
+	    follows has to be a main RAM address, and relaxing that check to accommodate our
+	    own cells would weaken it for the game addresses it exists to guard.
+
+	    selfCell holds this buffer's address and selfCellPtr holds selfCell's, so a
+	    two-step chain lands on `ticks`. Written by the WRAM binary, which is handed the
+	    snapshot pointer and so is the only side that knows the address.
+	*/
+	u32 selfCell;        /* +0x28 */
+	u32 selfCellPtr;     /* +0x2C */
+	raResult results[RA_RESULT_MAX];  /* +0x30 */
+} raSnapshot;            /*              0x60 bytes */
 
 #endif /* RA_H */
