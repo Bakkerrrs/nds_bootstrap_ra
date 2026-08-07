@@ -39,18 +39,23 @@ and every value predicted in advance has matched what the hardware showed.
 and confirmed on hardware**, with a working `malloc` over its arena. See
 *`cardenginei_arm9_ra` — running on hardware* below for the readings.
 
-**`rcheevos` is in, and it evaluates a real achievement definition.** Not on hardware yet:
-built, linked, and passing on the host, awaiting one flash cycle. That is the next thing to
-check, and *rcheevos in the window* below says exactly what to read.
+**`rcheevos` is in, and it evaluates a real achievement definition** — on the host. The
+first hardware reading failed with `rcStage = 01` (`RA_RC_NO_MEMORY`) and exposed a real
+bug: `ra_startup()` was reporting a dead heap as a working one on every frame after the
+first. That is fixed. **Why `malloc` failed on hardware is still open**, and the next
+reading is instrumented to say which of the two candidates it is — see *First hardware
+reading* below.
 
 The ARM9 cardengine has **436 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
 
-### The next task: read the rcheevos block on hardware
+### The next task: find out why `malloc` fails in the window
 
-Everything is built and packed. What is untested is whether rcheevos runs inside a DS
-game's interrupt handler at an acceptable cost — the two numbers that matter are
-`rcMeasured` climbing and `rcLines`.
+Read `mallocProbe` at `+0x90` and `sbrkProbe` at `+0x94`. They separate the two candidates:
+a working arena that newlib refuses to use, or arena bookkeeping that is wrong despite
+`heapSize` reading correctly. Everything else about rcheevos is blocked behind that answer,
+and only after it are `rcMeasured` and `rcLines` — whether rcheevos runs in a game's
+interrupt handler at acceptable cost — worth reading.
 
 1. ~~Move the watchlist into WRAM.~~ **Done and confirmed on hardware.** It took
    `cardenginei_arm9` from 28 bytes free to 476 and `RA_WATCH_MAX` from 2 to 16, and it
@@ -1631,10 +1636,76 @@ memref rather than of the frame counter.
 The one thing the host cannot check is the arena: glibc's `malloc` does not go through our
 `_sbrk`, so `heapUsed` is meaningless there. That is what hardware is for.
 
+### First hardware reading: `rcStage = 01`, and the bug it exposed
+
+The first read said `rcStage = 01` — `RA_RC_NO_MEMORY`, rcheevos unable to allocate **32
+bytes** (`sizeof(rc_memrefs_t)`, measured on the target) — next to `heapSize = 0x2F27C`,
+*exactly* the 193,148 bytes predicted. Two numbers that cannot both be true.
+
+`heapUsed` read `0`, and that is the tell. If `malloc` had ever gone through `_sbrk` it
+would have left at least the top chunk behind, so the break never moved: the `malloc(1024)`
+probe inside `ra_startup()` had **failed**. But `wramStage` read `04`, which requires that
+probe to have succeeded.
+
+Both readings are explained by one line. `ra_startup()` sets its "already ran" flag
+*before* running the probe, and then returned `RA_STAGE_ALLOC` unconditionally on every
+later call:
+
+```c
+if (startupState == RA_STARTUP_DONE) {
+    return RA_STAGE_ALLOC;      /* every frame after the first, regardless */
+}
+startupState = RA_STARTUP_DONE; /* set before the probe below */
+```
+
+So a probe that failed on frame 1 was reported as a working heap from frame 2 onward, and
+every stage above it read as healthy over a dead heap. It now remembers the stage it
+actually reached, in `.data` beside the flag for the same reason the flag is there: written
+once per boot, read on every call, must not depend on the `.bss` zeroing having happened.
+
+**That is the bug, and it is fixed. Why the probe fails is still open.** The two are
+separate: the lie is what made the failure unreadable, not what caused it.
+
+The lesson generalises past this instance. Every other stage in this project fails
+*forward* — `wramState`, the watch statuses, `rcStage` — and this one failed *backward*,
+reporting success it had not achieved. A staged report is only worth having if the stages
+cannot lie, and this one could, in the one direction that matters.
+
+So the next reading is built to be decisive rather than ambiguous. `ra_startup()` now asks
+`_sbrk()` directly before giving up, and the snapshot carries `_sbrk()`'s own two numbers
+plus both probe results:
+
+- **`sbrkProbe` non-zero beside `mallocProbe` zero** → the arena is fine and hands out
+  memory that `malloc` refuses. The fault is in newlib.
+- **both zero** → the arena bookkeeping is wrong, despite `heapSize` reading correctly.
+
+Two smaller things came out of the same reading. The arena base is now rounded up to 8:
+`__bss_end` is only guaranteed 4-aligned and landed on `0x03750D84`, so dlmalloc was
+correcting the misalignment by asking `_sbrk()` for the difference — which is where
+`heapUsed = 4` in an earlier session came from, a number that looked inexplicable at the
+time. And `RA_RC_NO_MEMORY` no longer covers two different failures: `rc_runtime_init()`'s
+own allocation failing is now `RA_RC_NO_MEMREFS`.
+
+The host test covers the regression, which it could not before. The runner links with
+`-Wl,--wrap=malloc`, so the probe can be made to fail on demand and the test asserts the
+*second* call still reports `RA_STAGE_HEAP`. Confirmed to fail against the old code and
+pass against the new — a regression test that was never run red is not yet a test.
+
 ### What to read on hardware
 
-Not yet run. `tools/ra_snapshot_addr.sh` for the current snapshot address; for the build in
-hand it is `0x027FED50`, so:
+`tools/ra_snapshot_addr.sh` for the current snapshot address; for the build in hand it is
+`0x027FED50`. The heap block first, since that is what is being diagnosed:
+
+| Address | Field | Healthy | If not |
+|---|---|---|---|
+| `0x027FEDB8` | `wramStage` | `03`+ | `02` = `RA_STAGE_HEAP`, the probe failed — and now says so |
+| `0x027FEDB0` | `heapSize` | `78 F1 02 00` (`0x2F178`) | |
+| `0x027FEDD8` | `heapBreak` | `88 0E 75 03` | |
+| `0x027FEDDC` | `heapTop` | `00 00 78 03` | |
+| `0x027FEDE0` | `mallocProbe` | non-zero | `0` = `malloc(1024)` refused |
+| `0x027FEDE4` | `sbrkProbe` | `0` (not needed) | non-zero = the arena works, newlib does not |
+
+Then the rcheevos block:
 
 | Address | Field | Expected |
 |---|---|---|
@@ -1650,9 +1721,10 @@ hand it is `0x027FED50`, so:
 | `0x027FEDD4` | `rcLines` | the steady-state per-frame cost |
 | `0x027FEDD5` | `rcLinesMax` | the ceiling, excluding the init frame |
 
-`heapSize` at `+0x60` should read **`0x2F27C`** (193,148 bytes, ~189 KB) — the window minus
-the 68 KB image and its `.bss`. `heapUsed` at `+0x64` is what rcheevos actually took, and
-is the first real answer to "how much of 256 KB does this eat".
+`heapSize` at `+0x60` should read **`0x2F178`** (192,888 bytes, ~188 KB) — the window minus
+the 68 KB image, its `.bss`, and the 8-byte alignment of the base. `heapUsed` at `+0x64` is
+what rcheevos actually took, and is the first real answer to "how much of 256 KB does this
+eat".
 
 **`rcInitLines` is reported separately from `rcLines` on purpose.** Activating an
 achievement mallocs, md5s the definition and parses it, all inside the game's VCOUNT
@@ -1680,7 +1752,8 @@ question of which one to believe.
       12K as the project's binding constraint.
 - [~] Phase 2: `rcheevos` — submodule pinned at v12.4.0, runtime compiled into
       `cardenginei_arm9_ra`, `peek()` routed through the watchlist's own validation, one
-      real achievement definition parsed and evaluated. **Passing on the host; not yet read
-      on hardware.** `rc_client` remains ruled out, see open question #4.
+      real achievement definition parsed and evaluated. **Passing on the host. Blocked on
+      hardware:** `malloc` fails inside the window and the next reading is instrumented to
+      say why. `rc_client` remains ruled out, see open question #4.
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status
