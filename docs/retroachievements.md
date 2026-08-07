@@ -49,9 +49,10 @@ The loader is **confirmed on hardware** — see the `cardenginei_arm9_ra` sectio
 reading. The 256K window is live, called every frame, and reporting back through the
 snapshot. What goes in it is now the open question rather than whether it works.
 
-1. ~~Move the watchlist into WRAM.~~ **Done**, pending hardware. It took
+1. ~~Move the watchlist into WRAM.~~ **Done and confirmed on hardware.** It took
    `cardenginei_arm9` from 28 bytes free to 476 and `RA_WATCH_MAX` from 2 to 16, and it
-   carries the `.bss`-persistence test described in the section on that binary.
+   answered the question it was chosen for: `.bss` in that window persists between frames,
+   so `rcheevos` can keep its runtime there.
 2. **A real font for the overlay**, which unblocks the overlay rewrite and the graphical
    limitations catalogued below.
 3. **`rcheevos`**, 48K linked, plus an allocator over the rest of the window. This is
@@ -1147,6 +1148,39 @@ but a pointer the walker follows must be a main RAM address and this binary runs
 the game addresses it exists to guard, so the cells moved into the snapshot instead —
 `selfCell` and `selfCellPtr` — and the WRAM binary fills them in, being the only side that
 knows the address.
+
+### Confirmed on hardware: the window holds state
+
+Two readings at different times, snapshot at `0x027FED50`:
+
+| Field | reading A | reading B |
+| --- | --- | --- |
+| `ticks` | 3,612 | 6,021 |
+| `wramTicks` | **3,612** | **6,021** |
+| `wramMagic` / `wramState` | `RAH1` / `02` | `RAH1` / `02` |
+| `watchCount` / `resolved` | 2 / 2 | 2 / 2 |
+| `selfCell` / `selfCellPtr` | `0x027FED50` / `0x027FED78` | same |
+| `results[1]` | `S+4` → 3,612 | `S+4` → 6,021 |
+
+**`wramTicks` tracks `ticks` exactly, twice.** That counter lives in the WRAM binary's own
+`.bss` and is only copied into the snapshot, so if the window did not retain state between
+frames it would sit at 1. It does retain it — `rcheevos` can keep its runtime there, which
+was the open question this step existed to close.
+
+The watchlist also survived the move intact: the two-step chain still resolves to `ticks`
+and reads its live value.
+
+### One number that changed, and why it is not a regression
+
+`linesMax` went from 1 to **6**. The measurement's *scope* changed with this commit: it used
+to time the reader alone, and now it wraps the overlay and the WRAM call as well. That is
+the honest figure — it is what the game pays per frame for all of this — but it is not
+comparable to the old one.
+
+`linesLast` was `00` in both readings, so a typical tick still costs under a scanline; 6 is
+a maximum, and 2.3% of a frame. What cannot be separated yet is how much of it is the wider
+scope and how much is that calling into WRAM costs more than running from the cardengine —
+cold code, different cache behaviour. That still needs the control measurement.
 
 ### What this changes
 
