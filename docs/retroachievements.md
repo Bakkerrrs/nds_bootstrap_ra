@@ -751,7 +751,7 @@ The layout, with the snapshot at `S`:
 | `+0x3C` | `results[1]` | the two-step chain |
 | `+0x48`, `+0x54` | `results[2]`, `results[3]` | unused, zero |
 | `+0x60` | `heapSize` | `78 B5 03 00` — 243,064, the arena in the WRAM window |
-| `+0x64` | `heapUsed` | non-zero: newlib takes the arena in chunks, so a few KB |
+| `+0x64` | `heapUsed` | `04 00 00 00` — 4 bytes, see below; not the few KB you would expect |
 | `+0x68` | `wramStage` | `04` — `RA_STAGE_WATCHES`, everything up |
 
 Each result is 0x0C bytes: `address` at +0x00, `value` at +0x04, then `depth`, `size`,
@@ -1229,6 +1229,38 @@ failure mode is a corrupted heap.
 across its whole length, read back at both ends and freed, and the stage only advances if
 that worked. `wramStage` reports how far it got: `01` .bss zeroed, `02` arena measured,
 `03` allocation verified, `04` watchlist running. A failure names its own stage.
+
+### Confirmed on hardware
+
+`wramStage` reads **`04`**, `heapSize` reads 243,064 exactly, and the watchlist still
+resolves — so newlib runs in that window and the arena is real.
+
+`heapUsed` came back as **4 bytes**, against a predicted few KB, and being wrong about it
+was more useful than being right. `_malloc_trim_r` was in the linked symbols: when the
+probe frees its 1 KB block, newlib hands the memory back through a *negative* `_sbrk`. So
+the sequence was `sbrk(+4)` to align, `sbrk(+1052)` for the block, `sbrk(-1052)` on free —
+leaving the alignment adjustment.
+
+Which means the allocator does not just allocate, it releases. And that only works because
+`_sbrk()` bounds-checks growth rather than any change:
+
+```c
+if (incr > 0 && heapBreak + incr > heapTop) {
+```
+
+The `incr > 0` was deliberate, with a comment saying newlib is allowed to hand space back.
+Had the check ignored the sign, `trim` would have failed and the heap would have
+fragmented quietly. It is the kind of thing that is invisible until a long session runs out
+of memory it should have had.
+
+Two smaller notes from the same reading. `wramTicks` was one behind `ticks`, which is
+benign: the cardengine increments `ticks` early in the tick and the WRAM binary writes
+`wramTicks` later, so a viewer reading a live buffer can land between them. Earlier
+readings matched exactly by timing luck; what matters is that they track, not that a single
+sample agrees.
+
+And `linesMax` stayed at 6. Adding newlib and a heap cost nothing per frame — the startup
+runs once and the per-frame path is unchanged.
 
 ### What this changes
 
