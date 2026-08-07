@@ -35,31 +35,33 @@ Phase 1 is done and confirmed on hardware across three sessions and two games. T
 reader evaluates a watchlist with pointer chains, re-resolved from scratch every frame,
 and every value predicted in advance has matched what the hardware showed.
 
-`cardenginei_arm9_ra` — the separate ARM9 binary in DSi WRAM — is **built, packed into
-the `.nds`, and called, but not loaded**. Nothing sets `b_raWramLoaded`, so `wramState`
-reads `00` on hardware and the window is never entered. That is verified, not assumed.
-The change is inert and cannot break a boot.
+`cardenginei_arm9_ra` — the separate ARM9 binary in DSi WRAM — is **built, loaded, called,
+and confirmed on hardware**, with a working `malloc` over its arena. See
+*`cardenginei_arm9_ra` — running on hardware* below for the readings.
 
-The ARM9 cardengine has **28 bytes** left. That is the constraint behind almost every
-decision in this document, and the reason the next task matters.
+**`rcheevos` is in, and it evaluates a real achievement definition.** Not on hardware yet:
+built, linked, and passing on the host, awaiting one flash cycle. That is the next thing to
+check, and *rcheevos in the window* below says exactly what to read.
 
-### The next task: put something real in the WRAM window
+The ARM9 cardengine has **436 bytes** left. It had 28 before the watchlist moved out, which
+is the constraint behind almost every decision in this document.
 
-The loader is **confirmed on hardware** — see the `cardenginei_arm9_ra` section for the
-reading. The 256K window is live, called every frame, and reporting back through the
-snapshot. What goes in it is now the open question rather than whether it works.
+### The next task: read the rcheevos block on hardware
+
+Everything is built and packed. What is untested is whether rcheevos runs inside a DS
+game's interrupt handler at an acceptable cost — the two numbers that matter are
+`rcMeasured` climbing and `rcLines`.
 
 1. ~~Move the watchlist into WRAM.~~ **Done and confirmed on hardware.** It took
    `cardenginei_arm9` from 28 bytes free to 476 and `RA_WATCH_MAX` from 2 to 16, and it
    answered the question it was chosen for: `.bss` in that window persists between frames,
    so `rcheevos` can keep its runtime there.
-2. **A real font for the overlay**, which unblocks the overlay rewrite and the graphical
-   limitations catalogued below.
-3. **`rcheevos`**, 48K linked. **Started**: the allocator it needs is in and verified —
-   see *A C library in the window* below. What remains is vendoring rcheevos itself,
-   compiling its runtime into this binary, and evaluating one real achievement definition
-   against the watchlist. The window now has a working `malloc` over a 237 KB arena, which
-   was the prerequisite.
+2. ~~`rcheevos`.~~ **In as a git submodule, runtime compiled, one real definition
+   evaluated.** Host-tested; not yet read on hardware.
+3. **A real font for the overlay**, which unblocks the overlay rewrite and the graphical
+   limitations catalogued below. This is now the largest remaining piece of phase 2: the
+   unlock notification cannot say *which* achievement unlocked until the overlay can draw
+   text it was not built with.
 
 For reference, the loader as built consists of:
 
@@ -83,24 +85,23 @@ copy landed, and the cardengine checks the window begins with a branch, which pr
 landed is code. A stale staging magic cannot survive either — the launcher clears it
 before loading and the bootloader clears it after copying.
 
-The residual risk is the one the mapping could not fully retire: if `0x02600000` turns out
-to be live after all, the image written there is 48 bytes. That is why this is being proven
-with the stub rather than with `rcheevos`.
-
 ### How you know it worked
 
 Run `tools/ra_snapshot_addr.sh` for the snapshot address, point the RAM viewer at it, and
-look at two fields:
+work down the chain. Each field names its own link, so a failure is located rather than
+inferred:
 
-- `wramState` at `+0x54` goes from `00` to **`02`**. Anything else names the failure:
-  `00` the bootloader never set the flag, `01` the flag was set but the window holds no
-  code, so the copy did not land.
-- `wramTicks` at `+0x50` starts climbing with its own counter, and `wramMagic` at `+0x4C`
-  reads `RAH1` (`52414831` byte-wise). That is the binary actually executing.
+| Offset | Field | Wanted | If not |
+|---|---|---|---|
+| `+0x1C` | `wramMagic` | `RAH1` (`52414831`) | the binary is not executing |
+| `+0x20` | `wramTicks` | climbing | `.bss` in the window does not persist |
+| `+0x24` | `wramState` | `02` | `00` the bootloader never set the flag; `01` the flag was set but the window holds no code, so the copy did not land |
+| `+0x68` | `wramStage` | `04` | `00`–`03` names where startup stopped — see `RA_STAGE_*` |
+| `+0x6C` | `rcStage` | `05` | see `RA_RC_*`, and `rcActivate` at `+0x6D` for a parse error |
 
-When that happens, everything queued behind it unblocks: `rcheevos` (48 KB linked,
-measured), a real font for the overlay, the overlay fixes catalogued below, and a control
-measurement for the per-frame cost.
+The offsets move whenever the struct changes, which is what the pinned
+`__builtin_offsetof` checks in `tools/ra_reader_test.c` are for: reorder `raSnapshot` and
+the test fails rather than this table going quietly stale.
 
 ### Things that will cost you time if you do not know them
 
@@ -110,9 +111,19 @@ measurement for the per-frame cost.
 - **`git clean -xfd` deletes untracked directories.** It ate
   `retail/cardenginei/arm9_ra/` once, mid-session. `git add` a new binary's directory
   before cleaning.
-- **`tools/ra_reader_test.sh`** runs the reader's logic on the host in seconds, with no
-  devkitARM and no hardware. Use it before every flash cycle; it has already caught a
-  wrong assumption that would have cost one.
+- **`rcheevos` is a git submodule.** A fresh clone needs
+  `git submodule update --init --recursive`, or `retail/cardenginei/arm9_ra/rcheevos` is
+  empty and the build fails on a missing header. `tools/ra_reader_test.sh` checks for this
+  and says so rather than producing a wall of compiler errors.
+- **`tools/ra_reader_test.sh`** runs the reader's logic *and rcheevos* on the host in
+  seconds, with no devkitARM and no hardware. Use it before every flash cycle; it has
+  already caught a wrong assumption that would have cost one.
+- **The `arm9_ra` Makefile fails the build if the image exceeds
+  `CARDENGINEI_ARM9_RA_IMAGE_MAX`.** That check exists because the loader copies a fixed
+  length, so an oversized image would be copied *incomplete* — booting correctly, then
+  failing inside code that is not there, with nothing at run time able to detect it. The
+  build prints the budget on every success: `built ... (68024 of 131072 bytes, 63048
+  spare)`.
 - **`tools/ra_snapshot_addr.sh`** prints the snapshot address *and* the remaining space
   per variant. The address moves whenever the code around it changes, so re-run it after
   every build rather than reusing the last one.
@@ -1047,6 +1058,15 @@ achievement from a definition string and evaluate it once per frame:
 **48 KB** of `.text` + `.rodata` + `.data`, and **492 bytes** of `.bss`, *including*
 everything newlib contributes to that path.
 
+> **The real number is 68 KB, not 48.** This estimate was made against a standalone probe;
+> the integration built into `cardenginei_arm9_ra` measures 68,024 bytes. The 20 KB
+> difference is newlib's `printf` and softfloat, reached through
+> `rc_update_richpresence()` — a call site that is statically reachable from
+> `rc_runtime_do_frame()` even though it never executes. See *`rcheevos` in the window*
+> below, which supersedes the figures in this section. The conclusion is unchanged: 68 KB
+> against 256 KB still fits comfortably, and the sizing argument below was never close
+> enough to the line for 20 KB to matter.
+
 ### Runtime state, also measured
 
 `rc_runtime_activate_achievement()` mallocs per achievement. Wrapping `malloc` and feeding
@@ -1212,6 +1232,9 @@ Measured: **5,836 bytes** for `malloc` alone in isolation, and the whole binary 
 `.data` is the surprise at 5,636 bytes — that is the reentrancy structure — but it is in
 the image, so it is paid for rather than a risk.
 
+(Those are the numbers *before* rcheevos. With it the image is 68,024 bytes and the arena
+is 193,148 — still ~189 KB, which was the point of measuring.)
+
 Two details worth keeping:
 
 **The "have we started" flag lives in `.data`, not `.bss`.** A `.bss` flag also works, but
@@ -1267,7 +1290,7 @@ runs once and the per-frame path is unchanged.
 The ARM9 cardengine's margin stops being the binding constraint on the project. Still
 queued for the 256K window:
 
-- `rcheevos`, measured at 48K linked, for phase 2
+- `rcheevos`, since measured at 68K linked, for phase 2
 - a real font for the overlay instead of eleven hand-drawn glyphs
 - the overlay rewrite, and with it the `surveyBlocks()` bug and the menu stand-down
 - a control measurement to separate the reader's own cost from machine contention
@@ -1364,7 +1387,8 @@ few hits are in another path".
 
 **And the requirement is smaller than it looked.** Only the loadable image passes through
 the buffer, not the 256K window: the heap is allocated in WRAM and never copied. rcheevos
-measures 48K linked, so 256K of cap is generous rather than tight.
+measures 68K linked (48K was the estimate; see the correction above), so 256K of cap is
+generous rather than tight.
 
 The staging strategy that follows from all of this: prove the load path with the 48-byte
 stub that exists now. If the address is wrong after all, the blast radius is 48 bytes and
@@ -1436,6 +1460,212 @@ blocks a release, and all of them belong with the overlay rewrite in
 `cardenginei_arm9_ra` — which the overlay needs anyway for a font it can fit, so
 patching them into a 104-byte margin first would be work done twice.
 
+## `rcheevos` in the window
+
+This is where the project stops being a memory reader. `rcheevos` is the library every
+official RetroAchievements integration uses; its runtime is what turns a definition string
+from the server into "this achievement just unlocked". Everything before it — the WRAM
+window, the hand-written crt0, the heap — existed to make it possible.
+
+It is in as a **git submodule** pinned to **v12.4.0**
+(`2ad0b8672f68a48148620164510b963039e49eb1`), not vendored. A fork that tracks upstream is
+worth the `--init` step: the definition syntax evolves on the server side, and a vendored
+copy would silently stop understanding definitions that the website happily produces.
+
+### Only the runtime is compiled
+
+`retail/cardenginei/arm9_ra/Makefile` builds a whitelist, not the library:
+
+```make
+RCHEEVOS_RUNTIME := $(filter-out rc_validate.c, \
+            $(notdir $(wildcard rcheevos/src/rcheevos/*.c))) \
+            rc_util.c rc_compat.c rc_version.c \
+            md5.c
+```
+
+A whitelist rather than a blacklist, because upstream's file set grows and a blacklist
+would quietly start pulling things in. `rc_api_*` (server request/response building),
+`rc_client` (the whole session-management layer, ruled out in open question #4), `rhash`
+beyond `md5.c`, and `rc_validate.c` are all left out.
+
+`-lm` is needed for exactly one symbol: `fmod()`, reached from `rc_typed_value_modulus()`.
+No DS achievement is likely to use a float modulus, but the reference is unconditional, so
+the library does not link without it.
+
+### What it costs: 68 KB, and 20 KB of that is `printf`
+
+The image went from 6.4 KB to **68,024 bytes**. The interesting part is where it went, and
+it is not where you would guess:
+
+| Symbol | Bytes | What it is |
+|---|---|---|
+| `_vfiprintf_r` | 8,860 | newlib's `printf` engine |
+| `handles` (`.data`) | 4,096 | newlib stdio |
+| `md5_process` | 2,660 | rcheevos md5s each definition |
+| `_malloc_r` | 1,992 | newlib allocator |
+| `rc_parse_condset` | 1,768 | rcheevos |
+| `get_arg` | 1,516 | `printf` |
+| `__ieee754_fmod` | 1,352 | `fmod`, plus ~3 KB of softfloat behind it |
+
+Roughly **20 KB is `printf` and double-precision softfloat**, for code that can never
+execute here. The chain that keeps it alive is worth writing down, because it is not
+obvious and `--gc-sections` does not cut it:
+
+```
+rc_runtime_do_frame  ->  rc_update_richpresence  ->  rc_format_typed_value  ->  snprintf
+```
+
+`rc_update_richpresence` is guarded at run time by `if (self->richpresence && …)`, which is
+never true for us — but the *call site* is statically reachable, so the linker keeps
+everything downstream of it.
+
+**It is being carried, not cut.** Cutting it means not compiling `richpresence.c` and
+`format.c` and supplying our own `rc_update_richpresence`, which is a link-time
+substitution of an upstream function that other upstream code calls — a real maintenance
+hazard, and not something to introduce in the same change as first-light integration. There
+is no pressure: the image is 68 KB inside a 128 KB budget inside a 256 KB window. If space
+ever gets tight this is a known, measured 20 KB, and rich presence is meaningless on an
+overlay that cannot yet draw arbitrary text anyway.
+
+Raising `CARDENGINEI_ARM9_RA_IMAGE_MAX` from 64 KB to 128 KB was needed for this, and it
+exposed a real gap: **nothing checked the image against the limit.** The loader copies a
+fixed length, so a 68 KB image would have been copied truncated at 64 KB — booting
+correctly, since the branch at +0 is intact, then failing inside code that simply is not
+there, with no way to detect it at run time. The Makefile now fails the build instead, and
+prints the budget on every success. That is the only place the two numbers can be compared.
+
+### The three things the DS makes different
+
+**1 — definitions come from the network.** An address in a definition is a number somebody
+else wrote, and dereferencing an address this console does not have is a Data Abort inside
+the game's interrupt handler. So `peek()` routes every read through the same
+`ra_readable()` the watchlist uses. There is deliberately **one** answer in this binary to
+"may this address be read": an address from the server does not get a weaker check than a
+hand-written watch. `ra_readable()` and `ra_read()` stopped being `static` for this and
+nothing else.
+
+`peek()` has no error channel — it returns a value — so a refused read returns **zero**.
+That is the safe direction: the condition compares against zero and is false, which means
+the achievement does not unlock. The refusal is counted in `rcPeeksRejected` rather than
+swallowed, so it cannot be confused with a genuine zero in memory.
+
+On top of that, `rc_runtime_validate_addresses()` is handed `ra_rc_validate_address()` once
+after activation, so an achievement referencing memory this console cannot supply is
+**disabled up front** rather than evaluated against zeros forever. Both layers are needed:
+per-read validation catches addresses a definition computes at run time through
+`AddAddress`, which the up-front pass cannot see.
+
+**2 — RetroAchievements addresses are console addresses.** The server's map puts DS system
+RAM at 0, and the frontend translates:
+
+```
+console 0x0000000-0x03FFFFF  ->  0x02000000   system RAM (4M)
+console 0x0400000-0x0FFFFFF  ->  unused, padding to align the DSi map
+console 0x1000000-0x1003FFF  ->  data TCM
+```
+
+Translated with our own three-line map rather than by calling
+`rc_console_memory_regions()`, because that function's `switch` references the table for
+every console rcheevos supports — forty-odd tables of regions and names — and calling it
+would drag all of them into the image to answer a question about one console.
+
+**Data TCM is deliberately not translated.** Its base is whatever the game programmed into
+CP15 `c9,c1`, so there is no constant to map it to. A guess would read real memory
+belonging to something else and produce values that look plausible, which is worse than
+refusing: an achievement that reads DTCM is reported unsupported instead.
+
+**3 — the ARM9 does not fault on an unaligned 32-bit load, it silently rotates.** A
+32-bit `LDR` one byte into `44 33 22 11 88 77 66 55` returns `0x44112233` — the aligned
+word, rotated — where the correct answer is `0x88112233`. Achievement authors write
+unaligned reads routinely and the server serves them, so `peek()` assembles multi-byte
+reads from bytes when they are unaligned. Refusing them would break real definitions;
+trusting the hardware would return plausible nonsense.
+
+### A real definition, and how it is observable
+
+The test definition is built against the snapshot's own tick counter:
+
+```
+M:0xX{ticks}!=d0xX{ticks}.600.
+```
+
+Read as: *measured*, the 32-bit value at `{ticks}` differs from its value last frame, six
+hundred times. True once per frame while the reader runs, so it unlocks after 600 frames —
+about ten seconds.
+
+This is a real definition in the server's syntax, not a stub. It exercises a 32-bit memref,
+a delta memref, a hit target and the measured flag, which between them are most of what an
+actual DS achievement uses. And it is checkable by eye for the same reason the chain
+self-tests were: **`rcMeasured` climbs one per frame toward `rcTarget`**, so a hex viewer
+shows rcheevos *evaluating* rather than merely having been initialised.
+
+The snapshot lives in the cardengine's `.bss` at `0x027Fxxxx`, inside DS system RAM, so it
+has a console address like any game variable — which is what lets a definition point at it
+at all. The string is assembled with a 12-line hex writer rather than `sprintf`, since
+`sprintf` would cost more than everything else in the file.
+
+`rc_runtime_init()` allocates the memref list and **does not check the result** before
+writing through it, so an exhausted arena would be a null dereference inside the library
+rather than a failure it reports. A `malloc(sizeof(rc_memrefs_t))` probe runs first and
+turns that into `RA_RC_NO_MEMORY`. The size comes from the library's private
+`rc_internal.h` rather than a guessed constant, so the check cannot drift when upstream
+changes the structure.
+
+### Tested on the host first
+
+`tools/ra_reader_test.sh` now compiles rcheevos too, and `ra_rcheevos.c` is `#include`d
+into the test like `cardengine.c` and `startup.c` — the translation and the peek path are
+`static`, and they are exactly the parts worth testing. The expensive failures here are a
+definition that does not parse and an address that translates wrongly, and both are pure
+logic. Catching either on the host costs seconds; catching it on hardware costs a flash
+cycle and a photograph of a hex viewer.
+
+It covers: the definition parses (`rcActivate == RC_OK`) and is not disabled by the
+validation pass; the translation is exact at both ends of system RAM and refuses DTCM, the
+byte past the end, a length that would run off the end, and an address that would wrap the
+check; unaligned reads assemble to `0x88112233` across a known two-word straddle; a refused
+peek returns zero and increments the counter; and `rcMeasured` climbs one per frame *and
+stops climbing when the value stops changing*, which is what makes it a test of the delta
+memref rather than of the frame counter.
+
+The one thing the host cannot check is the arena: glibc's `malloc` does not go through our
+`_sbrk`, so `heapUsed` is meaningless there. That is what hardware is for.
+
+### What to read on hardware
+
+Not yet run. `tools/ra_snapshot_addr.sh` for the current snapshot address; for the build in
+hand it is `0x027FED50`, so:
+
+| Address | Field | Expected |
+|---|---|---|
+| `0x027FEDBC` | `rcStage` | `05` — `RA_RC_FRAME` |
+| `0x027FEDBD` | `rcActivate` | `00` — `RC_OK` |
+| `0x027FEDBE` | `rcTriggerState` | `02`/`03` active, **not** `07` (disabled) |
+| `0x027FEDBF` | `rcInitLines` | the one-time parse cost, in scanlines |
+| `0x027FEDC0` | `rcTriggered` | `00` for the first ten seconds, then `01` |
+| `0x027FEDC4` | `rcMeasured` | climbing one per frame |
+| `0x027FEDC8` | `rcTarget` | `600` (`58 02 00 00`) |
+| `0x027FEDCC` | `rcPeeks` | small and non-zero; zero means `do_frame` never reached memory |
+| `0x027FEDD0` | `rcPeeksRejected` | **`00`** — anything else means the translation is wrong |
+| `0x027FEDD4` | `rcLines` | the steady-state per-frame cost |
+| `0x027FEDD5` | `rcLinesMax` | the ceiling, excluding the init frame |
+
+`heapSize` at `+0x60` should read **`0x2F27C`** (193,148 bytes, ~189 KB) — the window minus
+the 68 KB image and its `.bss`. `heapUsed` at `+0x64` is what rcheevos actually took, and
+is the first real answer to "how much of 256 KB does this eat".
+
+**`rcInitLines` is reported separately from `rcLines` on purpose.** Activating an
+achievement mallocs, md5s the definition and parses it, all inside the game's VCOUNT
+handler, so it is far more expensive than a frame of evaluation. Folded into `linesMax` it
+would make the steady-state cost look an order of magnitude worse than it is. The first
+frame will still show a large `linesMax` in the cardengine's own counter; `rcInitLines` is
+what explains it rather than leaving it mysterious.
+
+The watchlist keeps running alongside rcheevos rather than being replaced by it. The two
+are independent readers of the same memory: the watchlist is the part that can be debugged
+by eye, and keeping both means a disagreement between them is visible rather than a
+question of which one to believe.
+
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
@@ -1448,6 +1678,9 @@ patching them into a 104-byte margin first would be work done twice.
       hardware**. Staged, copied, recognised, called every frame, executing, and
       reporting back. 256K of window with code execution, which retires the cardengine's
       12K as the project's binding constraint.
-- [ ] Phase 2: `rcheevos` / `rc_client` with mocked network
+- [~] Phase 2: `rcheevos` — submodule pinned at v12.4.0, runtime compiled into
+      `cardenginei_arm9_ra`, `peek()` routed through the watchlist's own validation, one
+      real achievement definition parsed and evaluated. **Passing on the host; not yet read
+      on hardware.** `rc_client` remains ruled out, see open question #4.
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status

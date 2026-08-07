@@ -83,7 +83,7 @@
     middle of it, 512K clear of the donor ROM above.
 
     The cap is a cap, not a reservation: only the loadable image passes through here, not
-    the 256K window, and rcheevos measures 48K linked. Grow it if that changes, but
+    the 256K window, and rcheevos' runtime measures 68K linked. Grow it if that changes, but
     re-read the staging map first -- the neighbouring ranges are preserved for reasons
     that are not obvious from the addresses.
 */
@@ -103,10 +103,21 @@
     amount rather than a carried length, again like the colour LUT, since the destination
     window is 256K and copying past the image only touches .bss, which this binary does
     not assume is initialised anyway.
+
+    Copying a fixed amount is only safe in one direction, and that is worth being explicit
+    about: too much is harmless, too little is a truncated binary that starts correctly and
+    fails somewhere in the middle of code that is simply not there. Nothing in the loader
+    can detect that -- the branch at +0 still looks valid. So the Makefile for
+    cardenginei_arm9_ra fails the build if the image exceeds this, which is the only place
+    the two numbers can actually be compared.
+
+    128K, raised from 64K when rcheevos went in: the runtime links to 68K, of which about
+    20K is newlib's printf reached through rc_update_richpresence(). See
+    docs/retroachievements.md for why that is being carried rather than cut.
 */
 #define CARDENGINEI_ARM9_RA_STAGE_MAGIC              0x31415253
 #define CARDENGINEI_ARM9_RA_IMAGE_OFFSET             0x10
-#define CARDENGINEI_ARM9_RA_IMAGE_MAX                0x10000
+#define CARDENGINEI_ARM9_RA_IMAGE_MAX                0x20000
 
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
 #define COLOR_LUT_BUFFERED_LOCATION                  0x027D0000

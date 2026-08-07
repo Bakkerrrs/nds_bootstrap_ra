@@ -39,6 +39,9 @@ extern u8  ra_startup(char* bssStart, char* bssEnd, char* windowTop);
 extern u32 ra_heap_size(void);
 extern u32 ra_heap_used(void);
 
+/* retail/cardenginei/arm9_ra/source/ra_rcheevos.c -- the RetroAchievements runtime. */
+extern void ra_rc_tick(raSnapshot* snapshot);
+
 /* Placed by cardengine.ld: the .bss to clear, and the top of this binary's window. */
 extern char __bss_start[];
 extern char __bss_end[];
@@ -91,13 +94,18 @@ static bool ra_in_main_ram(u32 addr, u32 len) {
     Note this does *not* include the window this code is running from. A watch has no
     business reading DSi WRAM, and leaving it out means a chain that somehow produces an
     address in here is reported rather than followed.
+
+    Not static, because ra_rcheevos.c routes rcheevos' peek() through it. That is the
+    whole point: an address out of a definition the server sent gets checked by the same
+    function as an address out of a hand-written watch, so there is one answer in this
+    binary to "may this be read" rather than two that can drift apart.
 */
-static bool ra_readable(u32 addr, u32 len) {
+bool ra_readable(u32 addr, u32 len) {
 	return ra_in_main_ram(addr, len)
 	    || (addr >= 0x04000000 && addr <= 0x04001100 - len);
 }
 
-static u32 ra_read(u32 addr, u8 size) {
+u32 ra_read(u32 addr, u8 size) {
 	if (size == 1) {
 		return *(const vu8*)addr;
 	}
@@ -276,6 +284,16 @@ void ra_wram_tick(raSnapshot* snapshot) {
 	snapshot->resolved   = resolved;
 	snapshot->wramMagic  = RA_WRAM_MAGIC;
 	snapshot->wramTicks  = frames;
-	snapshot->heapUsed   = ra_heap_used();
 	snapshot->wramStage  = RA_STAGE_WATCHES;
+
+	/*
+	    rcheevos last, and after the watchlist rather than instead of it. The two are
+	    independent readers of the same memory: the watchlist is what this project can
+	    debug by eye, and keeping it running alongside means a disagreement between them
+	    is visible rather than a question of which one to believe.
+	*/
+	ra_rc_tick(snapshot);
+
+	/* After rcheevos, so its allocations are included rather than measured a frame late. */
+	snapshot->heapUsed = ra_heap_used();
 }

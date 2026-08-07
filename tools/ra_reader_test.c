@@ -41,6 +41,12 @@ char __bss_start[1], __bss_end[1], __vram_top[1];   /* referenced by cardengine.
 
 #include "../retail/cardenginei/arm9_ra/source/startup.c"
 #include "../retail/cardenginei/arm9_ra/source/cardengine.c"
+/*
+    Included rather than linked, for the same reason as the two above: the translation and
+    the peek path are static, and they are exactly the parts worth testing. rcheevos itself
+    is a normal library and is linked -- see tools/ra_reader_test.sh for the file list.
+*/
+#include "../retail/cardenginei/arm9_ra/source/ra_rcheevos.c"
 
 #define IO_BASE  0x04000000
 #define IO_SIZE  0x2000
@@ -116,7 +122,14 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, heapSize) == 0x60);
 	CHECK(__builtin_offsetof(raSnapshot, heapUsed) == 0x64);
 	CHECK(__builtin_offsetof(raSnapshot, wramStage) == 0x68);
-	CHECK(sizeof(raSnapshot) == 0x6C);
+	CHECK(__builtin_offsetof(raSnapshot, rcStage) == 0x6C);
+	CHECK(__builtin_offsetof(raSnapshot, rcTriggered) == 0x70);
+	CHECK(__builtin_offsetof(raSnapshot, rcMeasured) == 0x74);
+	CHECK(__builtin_offsetof(raSnapshot, rcTarget) == 0x78);
+	CHECK(__builtin_offsetof(raSnapshot, rcPeeks) == 0x7C);
+	CHECK(__builtin_offsetof(raSnapshot, rcPeeksRejected) == 0x80);
+	CHECK(__builtin_offsetof(raSnapshot, rcLines) == 0x84);
+	CHECK(sizeof(raSnapshot) == 0x88);
 
 	*DISPCNT = 0x1F40;
 
@@ -158,6 +171,87 @@ int main(void) {
 	CHECK(snapshot.wramTicks == 1);
 	CHECK(snapshot.wramStage == RA_STAGE_WATCHES);
 	CHECK(snapshot.heapSize == 0x3B000);
+
+	/*
+	    rcheevos, on the same tick. This is the first thing in the project that turns a
+	    server-side definition string into an evaluated condition, and all of it is logic
+	    a host can check: whether the definition parses, whether the console-to-DS
+	    address translation lands on the right word, and whether the peek path refuses
+	    anything it should not.
+	*/
+	printf("\nrcheevos parses the definition and evaluates it\n");
+	CHECK(snapshot.rcActivate == 0);                  /* RC_OK */
+	CHECK(snapshot.rcStage == RA_RC_FRAME);
+	CHECK(snapshot.rcTarget == 600);
+	/*
+	    The definition reads one address, so a peek count of zero would mean do_frame
+	    never reached memory -- which is the failure that would otherwise look like an
+	    achievement that simply never unlocks.
+	*/
+	CHECK(snapshot.rcPeeks > 0);
+	/*
+	    Zero refusals is the whole point of routing peek() through ra_readable(): the
+	    definition points at the snapshot, which is in main RAM, so nothing here should be
+	    turned away. A non-zero count means the translation is wrong, not that the check is
+	    too strict.
+	*/
+	CHECK(snapshot.rcPeeksRejected == 0);
+	/*
+	    Not disabled, which is what rc_runtime_validate_addresses() would have done had any
+	    address in the definition been one this console cannot supply. So this asserts the
+	    validation ran and passed, rather than that it was never wired up.
+	*/
+	CHECK(snapshot.rcTriggerState != RC_TRIGGER_STATE_DISABLED);
+	CHECK(snapshot.rcTriggerState != RC_TRIGGER_STATE_INACTIVE);
+
+	printf("\nthe definition's address translates to the snapshot's own ticks\n");
+	CHECK(ra_rc_translate(0, 4) == RA_DS_SYSTEM_RAM_BASE);
+	CHECK(ra_rc_translate((u32)&snapshot.ticks - RA_DS_SYSTEM_RAM_BASE, 4)
+	      == (u32)&snapshot.ticks);
+	/*
+	    Console addresses this console does not have. The DS's 4M of system RAM is the
+	    only region translated: the RetroAchievements map also lists data TCM at console
+	    0x1000000, which has no fixed address on hardware and so is deliberately refused
+	    rather than guessed at.
+	*/
+	CHECK(ra_rc_translate(RA_DS_SYSTEM_RAM_SIZE, 1) == 0);
+	CHECK(ra_rc_translate(RA_DS_SYSTEM_RAM_SIZE - 1, 4) == 0);   /* would run off the end */
+	CHECK(ra_rc_translate(RA_DS_SYSTEM_RAM_SIZE - 4, 4) != 0);   /* last aligned word fits */
+	CHECK(ra_rc_translate(0x1000000, 1) == 0);                   /* data TCM */
+	CHECK(ra_rc_translate(0xFFFFFFFC, 4) == 0);                  /* cannot wrap the check */
+
+	/*
+	    Unaligned multi-byte reads, assembled from bytes because the ARM9 would rotate the
+	    word instead of faulting. Achievement authors write these and the server serves
+	    them, so getting it wrong means plausible-looking wrong values rather than a crash.
+	*/
+	printf("\nunaligned reads are assembled little-endian, not rotated\n");
+	{
+		/*
+		    Two adjacent words, so a read straddling the boundary has a known answer in
+		    every byte. In memory that is 44 33 22 11 88 77 66 55, and a 32-bit read one
+		    byte in must therefore be 0x88112233. An ARM9 LDR at that address would return
+		    0x44112233 -- the aligned word, rotated -- which is why this is assembled from
+		    bytes rather than left to the hardware.
+		*/
+		static u32 straddle[2];
+		const u32 base = (u32)&straddle[0] - RA_DS_SYSTEM_RAM_BASE;
+		straddle[0] = 0x11223344;
+		straddle[1] = 0x55667788;
+
+		CHECK(ra_rc_peek(base, 4, 0) == 0x11223344);
+		CHECK(ra_rc_peek(base + 1, 2, 0) == 0x2233);
+		CHECK(ra_rc_peek(base + 1, 4, 0) == 0x88112233);
+		CHECK(ra_rc_peek(base + 3, 1, 0) == 0x11);
+		CHECK(ra_rc_peek(base + 4, 4, 0) == 0x55667788);
+	}
+
+	printf("\na refused peek reads as zero and is counted, not dereferenced\n");
+	{
+		const u32 before = peeksRejected;
+		CHECK(ra_rc_peek(0x1000000, 4, 0) == 0);   /* data TCM: unmapped here */
+		CHECK(peeksRejected == before + 1);
+	}
 
 	printf("\nthe self-test cells point where the chain needs them to\n");
 	CHECK(snapshot.selfCell == (u32)&snapshot);
@@ -340,6 +434,33 @@ int main(void) {
 		expect_status("offset applied", 0, RA_WATCH_OK);
 		CHECK(snapshot.results[0].address == (u32)&pair[1]);
 		CHECK(snapshot.results[0].value == 0x0BADF00D);
+	}
+
+	/*
+	    Last, because it advances snapshot.ticks and every assertion above about the
+	    counters depends on how many times ra_wram_tick() has run.
+	*/
+	printf("\nmeasured progress climbs one per frame while the value changes\n");
+	{
+		u32 startMeasured;
+		snapshot.ticks = 1;
+		ra_wram_tick(&snapshot);
+		startMeasured = snapshot.rcMeasured;
+		for (i = 0; i < 5; i++) {
+			snapshot.ticks++;
+			ra_wram_tick(&snapshot);
+		}
+		CHECK(snapshot.rcMeasured == startMeasured + 5);
+		CHECK(snapshot.rcTriggered == 0);          /* 600 frames away yet */
+		/*
+		    And stops climbing when the value stops changing, which is what makes this a
+		    test of the delta memref rather than of the frame counter.
+		*/
+		ra_wram_tick(&snapshot);
+		ra_wram_tick(&snapshot);
+		CHECK(snapshot.rcMeasured == startMeasured + 5);
+		/* Only the refusal forced by hand above; nothing in normal operation was denied. */
+		CHECK(snapshot.rcPeeksRejected == 1);
 	}
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",

@@ -263,6 +263,59 @@ typedef struct raSnapshot {
 	u32 heapUsed;        /* +0x64 */
 	u8  wramStage;       /* +0x68  RA_STAGE_*, how far it got */
 	u8  reserved2[3];    /* +0x69 */
-} raSnapshot;            /*              0x6C bytes */
+	/*
+	    rcheevos. Appended for the same reason the heap fields were -- every offset above
+	    keeps its address, so the hardware checklist in docs/retroachievements.md stays
+	    valid and the magic does not need another bump.
+
+	    This block answers three separate questions that would otherwise all look like
+	    "rcheevos does not work": did it come up (rcStage, rcActivate), is it evaluating
+	    (rcMeasured against rcTarget, climbing), and what does it cost (rcLines).
+	*/
+	u8  rcStage;         /* +0x6C  RA_RC_*, how far rcheevos got */
+	s8  rcActivate;      /* +0x6D  rc_runtime_activate_achievement(): 0 ok, RC_* if not */
+	u8  rcTriggerState;  /* +0x6E  RC_TRIGGER_STATE_* of the test achievement */
+	/*
+	    The one-time parse, measured on its own. Activating an achievement mallocs, md5s
+	    the definition and parses it, and that happens inside the game's VCOUNT handler --
+	    so it is much more expensive than a frame of evaluation. Reported separately
+	    because otherwise it lands in linesMax and makes the steady-state cost look
+	    twenty times worse than it is.
+	*/
+	u8  rcInitLines;     /* +0x6F */
+	u32 rcTriggered;     /* +0x70  ACHIEVEMENT_TRIGGERED events delivered */
+	/*
+	    Measured progress of the test achievement, which is what makes this observable
+	    rather than boolean: it climbs one per frame toward rcTarget, so a hex viewer shows
+	    rcheevos evaluating rather than merely having been initialised.
+	*/
+	u32 rcMeasured;      /* +0x74 */
+	u32 rcTarget;        /* +0x78 */
+	/*
+	    peek() traffic. rcPeeks is per frame -- it should equal the number of distinct
+	    addresses the active definitions read, and a zero here with an active trigger means
+	    do_frame is not reaching memory. rcPeeksRejected is cumulative and should stay 0:
+	    it counts addresses a definition asked for that this console cannot supply, which
+	    is the case that used to mean a Data Abort.
+	*/
+	u32 rcPeeks;         /* +0x7C */
+	u32 rcPeeksRejected; /* +0x80 */
+	u8  rcLines;         /* +0x84  scanlines rc_runtime_do_frame() cost, last tick */
+	u8  rcLinesMax;      /* +0x85  worst seen, excluding the init frame */
+	u8  rcEvents;        /* +0x86  events of any kind delivered, clamped at 255 */
+	u8  reserved3;       /* +0x87 */
+} raSnapshot;            /*              0x88 bytes */
+
+/*
+    How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail
+    for its own reason, and without this they all present as an achievement that does not
+    unlock.
+*/
+#define RA_RC_NONE       0  /* not reached -- the window did not come up */
+#define RA_RC_NO_MEMORY  1  /* the arena cannot supply rcheevos' first allocation */
+#define RA_RC_INIT       2  /* rc_runtime_init() returned */
+#define RA_RC_PARSE_BAD  3  /* the definition was rejected; see rcActivate */
+#define RA_RC_ACTIVE     4  /* one achievement activated and validated */
+#define RA_RC_FRAME      5  /* rc_runtime_do_frame() has run */
 
 #endif /* RA_H */
