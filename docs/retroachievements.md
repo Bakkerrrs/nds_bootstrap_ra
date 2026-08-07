@@ -55,9 +55,11 @@ snapshot. What goes in it is now the open question rather than whether it works.
    so `rcheevos` can keep its runtime there.
 2. **A real font for the overlay**, which unblocks the overlay rewrite and the graphical
    limitations catalogued below.
-3. **`rcheevos`**, 48K linked, plus an allocator over the rest of the window. This is
-   phase 2 and the biggest single step; the two above are worth doing first because they
-   exercise the window with things that are easy to verify.
+3. **`rcheevos`**, 48K linked. **Started**: the allocator it needs is in and verified —
+   see *A C library in the window* below. What remains is vendoring rcheevos itself,
+   compiling its runtime into this binary, and evaluating one real achievement definition
+   against the watchlist. The window now has a working `malloc` over a 237 KB arena, which
+   was the prerequisite.
 
 For reference, the loader as built consists of:
 
@@ -748,6 +750,9 @@ The layout, with the snapshot at `S`:
 | `+0x30` | `results[0]` | the direct watch |
 | `+0x3C` | `results[1]` | the two-step chain |
 | `+0x48`, `+0x54` | `results[2]`, `results[3]` | unused, zero |
+| `+0x60` | `heapSize` | `78 B5 03 00` — 243,064, the arena in the WRAM window |
+| `+0x64` | `heapUsed` | non-zero: newlib takes the arena in chunks, so a few KB |
+| `+0x68` | `wramStage` | `04` — `RA_STAGE_WATCHES`, everything up |
 
 Each result is 0x0C bytes: `address` at +0x00, `value` at +0x04, then `depth`, `size`,
 `status`. So:
@@ -1181,6 +1186,49 @@ comparable to the old one.
 a maximum, and 2.3% of a frame. What cannot be separated yet is how much of it is the wider
 scope and how much is that calling into WRAM costs more than running from the cardengine —
 cold code, different cache behaviour. That still needs the control measurement.
+
+### A C library in the window: the crt0 it does not have
+
+`rcheevos` calls `malloc`. That turned out to need a step nobody had had to take yet, and
+it is worth spelling out because it is the kind of thing that fails silently.
+
+There is no crt0 here. The bootloader copies the image and jumps in, and that is the whole
+of the startup this window gets. `.text`, `.rodata` and `.data` are inside the image and so
+arrive correct — which is why the binary's initialised data works. `.bss` is *not* in the
+image: it arrives as whatever the previous occupant left, and the bootloader's copy writes
+staging garbage over it besides, since it copies a fixed length rather than the exact image
+size.
+
+Everything written for this window so far coped by guarding on a magic and initialising by
+hand. newlib will not. Its allocator keeps state in `.bss` and assumes, like every C
+library, that it starts zeroed — and handing it garbage does not fail cleanly, it corrupts
+a heap, which would surface much later as `rcheevos` misbehaving for no visible reason.
+
+So `startup.c` is the crt0 this window lacks. It zeroes `.bss` once per boot, then gives
+newlib a heap over the rest of the window through `_sbrk()`.
+
+Measured: **5,836 bytes** for `malloc` alone in isolation, and the whole binary is now an
+18,212-byte image against the 64K the loader copies, leaving a **237 KB arena**. newlib's
+`.data` is the surprise at 5,636 bytes — that is the reentrancy structure — but it is in
+the image, so it is paid for rather than a risk.
+
+Two details worth keeping:
+
+**The "have we started" flag lives in `.data`, not `.bss`.** A `.bss` flag also works, but
+only if written *after* the zeroing clears it, and that is a subtle ordering dependency in
+code that runs once per boot inside an interrupt handler. Nobody would notice it breaking.
+Putting it in `.data` — which the image initialises on every boot — makes it the one claim
+in this project that is not a bet on garbage not coinciding with a magic.
+
+**`ra_startup()` takes the arena bounds as arguments** rather than reading `__bss_start` and
+friends itself. That is what lets the host test hand it a scratch buffer and exercise the
+real zeroing and the real arena arithmetic, instead of stubbing the one function whose
+failure mode is a corrupted heap.
+
+**And it proves the allocator rather than assuming it.** The first allocation is written
+across its whole length, read back at both ends and freed, and the stage only advances if
+that worked. `wramStage` reports how far it got: `01` .bss zeroed, `02` arena measured,
+`03` allocation verified, `04` watchlist running. A failure names its own stage.
 
 ### What this changes
 

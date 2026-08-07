@@ -30,6 +30,20 @@
 #include "ra.h"
 #include "locations.h"
 
+/*
+    retail/cardenginei/arm9_ra/source/startup.c -- the crt0 this window does not have. It
+    takes the arena bounds rather than reading the linker symbols itself, so the host test
+    can hand it a scratch buffer and exercise the real code.
+*/
+extern u8  ra_startup(char* bssStart, char* bssEnd, char* windowTop);
+extern u32 ra_heap_size(void);
+extern u32 ra_heap_used(void);
+
+/* Placed by cardengine.ld: the .bss to clear, and the top of this binary's window. */
+extern char __bss_start[];
+extern char __bss_end[];
+extern char __vram_top[];
+
 /* Main RAM as the game sees it, mirrors included. */
 #define RA_MAIN_RAM_START 0x02000000
 #define RA_MAIN_RAM_END   0x03000000
@@ -211,7 +225,26 @@ static void ra_install_defaults(raSnapshot* snapshot) {
 */
 void ra_wram_tick(raSnapshot* snapshot) {
 	u8 resolved = 0;
+	u8 stage;
 	u8 i;
+
+	/*
+	    Bring the window up before anything else touches .bss -- including the magic check
+	    below, whose variable lives there. ra_startup() zeroes .bss on its first call, so
+	    stateMagic is guaranteed to read 0 the first time this line is reached and the
+	    watchlist installs itself exactly once.
+	*/
+	stage = ra_startup(__bss_start, __bss_end, __vram_top);
+	snapshot->wramStage = stage;
+	snapshot->heapSize  = ra_heap_size();
+	snapshot->heapUsed  = ra_heap_used();
+	if (stage < RA_STAGE_ALLOC) {
+		/*
+		    The allocator did not come up. Stop here rather than run the watchlist anyway:
+		    it would work, and it would make a broken heap look like a working binary.
+		*/
+		return;
+	}
 
 	if (stateMagic != RA_WRAM_MAGIC) {
 		stateMagic = RA_WRAM_MAGIC;
@@ -243,4 +276,6 @@ void ra_wram_tick(raSnapshot* snapshot) {
 	snapshot->resolved   = resolved;
 	snapshot->wramMagic  = RA_WRAM_MAGIC;
 	snapshot->wramTicks  = frames;
+	snapshot->heapUsed   = ra_heap_used();
+	snapshot->wramStage  = RA_STAGE_WATCHES;
 }

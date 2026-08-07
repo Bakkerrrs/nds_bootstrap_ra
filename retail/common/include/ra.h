@@ -138,6 +138,22 @@ typedef struct raResult {
 #define RA_WRAM_MAGIC 0x31484152
 
 /*
+    How far the WRAM binary got in bringing itself up, reported so a failure names its own
+    stage instead of showing up as silence. It only ever moves forward, and each value is
+    reached exactly once per boot.
+
+    The stages exist because the ones before rcheevos cannot be taken for granted. Nothing
+    had ever run a library in this window: .bss arrives as whatever the previous occupant
+    left, so it has to be zeroed by hand before newlib -- which assumes zeroed .bss like
+    every other C library -- is allowed near it, and there is no crt0 here to do that.
+*/
+#define RA_STAGE_NONE     0  /* .bss still garbage, or the binary never ran */
+#define RA_STAGE_BSS      1  /* .bss zeroed by hand; a C library may now be trusted */
+#define RA_STAGE_HEAP     2  /* the arena is measured and _sbrk() will hand it out */
+#define RA_STAGE_ALLOC    3  /* an allocation was made, written to and read back */
+#define RA_STAGE_WATCHES  4  /* the watchlist is installed and evaluating */
+
+/*
     What the cardengine made of the separate binary on the most recent tick. Reported so
     each link in the chain -- built, packed, loaded, copied, recognised, called -- fails
     visibly and separately rather than as one silent absence.
@@ -233,6 +249,20 @@ typedef struct raSnapshot {
 	u32 selfCell;        /* +0x28 */
 	u32 selfCellPtr;     /* +0x2C */
 	raResult results[RA_RESULT_MAX];  /* +0x30 */
-} raSnapshot;            /*              0x60 bytes */
+	/*
+	    The WRAM binary bringing itself up. Appended after the results rather than
+	    inserted, so every offset above keeps its address and the hardware checklist in
+	    docs/retroachievements.md stays valid -- which is also why the magic did not need
+	    another bump for this.
+
+	    heapSize is the arena between the end of the binary's .bss and the top of its
+	    window; heapUsed is what has been handed out. Both stay useful once rcheevos is in
+	    there and you want to know how much of 256K it ate.
+	*/
+	u32 heapSize;        /* +0x60 */
+	u32 heapUsed;        /* +0x64 */
+	u8  wramStage;       /* +0x68  RA_STAGE_*, how far it got */
+	u8  reserved2[3];    /* +0x69 */
+} raSnapshot;            /*              0x6C bytes */
 
 #endif /* RA_H */

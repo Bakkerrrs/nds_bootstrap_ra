@@ -28,6 +28,18 @@
 #include <string.h>
 #include <sys/mman.h>
 
+/*
+    The linker script supplies these on the target. Here they span a scratch buffer, so the
+    .bss zeroing and the arena arithmetic are exercised for real rather than stubbed. The
+    allocator probe inside ra_startup() runs against the host's malloc -- our _sbrk() is
+    never reached, so heapUsed stays 0 here -- but the staging logic around it is the same
+    code the hardware runs.
+*/
+static char fakeBss[4096];
+static char fakeArena[0x3B000];
+char __bss_start[1], __bss_end[1], __vram_top[1];   /* referenced by cardengine.c */
+
+#include "../retail/cardenginei/arm9_ra/source/startup.c"
 #include "../retail/cardenginei/arm9_ra/source/cardengine.c"
 
 #define IO_BASE  0x04000000
@@ -101,20 +113,51 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, selfCell) == 0x28);
 	CHECK(__builtin_offsetof(raSnapshot, selfCellPtr) == 0x2C);
 	CHECK(__builtin_offsetof(raSnapshot, results) == 0x30);
-	CHECK(sizeof(raSnapshot) == 0x60);
+	CHECK(__builtin_offsetof(raSnapshot, heapSize) == 0x60);
+	CHECK(__builtin_offsetof(raSnapshot, heapUsed) == 0x64);
+	CHECK(__builtin_offsetof(raSnapshot, wramStage) == 0x68);
+	CHECK(sizeof(raSnapshot) == 0x6C);
 
 	*DISPCNT = 0x1F40;
+
+	printf("\nstartup zeroes .bss once and measures the arena\n");
+	memset(fakeBss, 0xA5, sizeof(fakeBss));
+	CHECK(ra_startup(fakeBss, fakeBss + sizeof(fakeBss),
+	                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_ALLOC);
+	CHECK(fakeBss[0] == 0 && fakeBss[sizeof(fakeBss) - 1] == 0);
+	CHECK(ra_heap_size() == 0x3B000);
+	/*
+	    Second call must be a no-op. The flag that says so lives in .data, so the zeroing
+	    cannot clear it -- which is the point of putting it there.
+	*/
+	fakeBss[0] = 0x42;
+	CHECK(ra_startup(fakeBss, fakeBss + sizeof(fakeBss),
+	                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_ALLOC);
+	CHECK(fakeBss[0] == 0x42);
+
+	printf("\n_sbrk hands out the arena and refuses to overrun it\n");
+	{
+		void* a = _sbrk(16);
+		void* b = _sbrk(16);
+		CHECK(a == (void*)(fakeBss + sizeof(fakeBss)));
+		CHECK(b == (char*)a + 16);
+		CHECK(ra_heap_used() == 32);
+		CHECK(_sbrk(0x3B000) == (void*)-1);   /* would pass __vram_top */
+		CHECK(ra_heap_used() == 32);          /* and did not move the break */
+	}
 
 	printf("\nthe first tick claims .bss and installs the defaults\n");
 	/* Neither side's .bss is ever zeroed on the target, so start from garbage. */
 	memset(&snapshot, 0xA5, sizeof(snapshot));
-	stateMagic = 0xA5A5A5A5;
+	stateMagic = 0;   /* startup zeroed .bss on the target; do the same here */
 	snapshot.ticks = 7;
 	ra_wram_tick(&snapshot);
 	CHECK(snapshot.watchCount == 2);
 	CHECK(snapshot.resolved == 2);
 	CHECK(snapshot.wramMagic == RA_WRAM_MAGIC);
 	CHECK(snapshot.wramTicks == 1);
+	CHECK(snapshot.wramStage == RA_STAGE_WATCHES);
+	CHECK(snapshot.heapSize == 0x3B000);
 
 	printf("\nthe self-test cells point where the chain needs them to\n");
 	CHECK(snapshot.selfCell == (u32)&snapshot);
