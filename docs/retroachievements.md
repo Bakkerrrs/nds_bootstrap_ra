@@ -39,23 +39,43 @@ and every value predicted in advance has matched what the hardware showed.
 and confirmed on hardware**, with a working `malloc` over its arena. See
 *`cardenginei_arm9_ra` — running on hardware* below for the readings.
 
-**`rcheevos` is in, and it evaluates a real achievement definition** — on the host. The
-first hardware reading failed with `rcStage = 01` (`RA_RC_NO_MEMORY`) and exposed a real
-bug: `ra_startup()` was reporting a dead heap as a working one on every frame after the
-first. That is fixed. **Why `malloc` failed on hardware is still open**, and the next
-reading is instrumented to say which of the two candidates it is — see *First hardware
-reading* below.
+**`rcheevos` is in, and it evaluates a real achievement definition** — on the host. Two
+hardware readings went into getting there. The first exposed a bug of mine: `ra_startup()`
+reported a dead heap as a working one on every frame after the first. The second, once the
+staging could no longer lie, established that **newlib's `malloc` does not work in this
+window** while `_sbrk()` demonstrably does.
+
+So the allocator is ours now — `ra_alloc.c`, ~200 lines, host-tested. **That is what is
+waiting to be read on hardware.** See *First hardware reading* and *The allocator* below.
 
 The ARM9 cardengine has **436 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
 
-### The next task: find out why `malloc` fails in the window
+### The next task: flash it and read the heap block
 
-Read `mallocProbe` at `+0x90` and `sbrkProbe` at `+0x94`. They separate the two candidates:
-a working arena that newlib refuses to use, or arena bookkeeping that is wrong despite
-`heapSize` reading correctly. Everything else about rcheevos is blocked behind that answer,
-and only after it are `rcMeasured` and `rcLines` — whether rcheevos runs in a game's
-interrupt handler at acceptable cost — worth reading.
+**Answered:** newlib's `malloc` is the fault, not the arena. The second reading showed
+`sbrkProbe = 0x03750E88` — `_sbrk()` returning exactly the predicted base — beside
+`mallocProbe = 0`, with `heapBreak - heapBase = 64`, i.e. only the probe's own bytes. So
+newlib's allocator refused without ever calling `_sbrk()` successfully.
+
+**Done in response:** the allocator is ours now, `retail/cardenginei/arm9_ra/source/ra_alloc.c`.
+Not yet run on hardware — that is the one thing waiting.
+
+Read these, in this order:
+
+| Address | Field | Expected |
+|---|---|---|
+| `0x027FEDB8` | `wramStage` | **`03`** — the allocation was made, written and read back |
+| `0x027FEDB0` | `heapSize` | `78 EF 02 00` (`0x2EF78` = 192,376) |
+| `0x027FEDB4` | `heapUsed` | small and non-zero once rcheevos loads |
+| `0x027FEDE0` | `mallocProbe` | non-zero, and inside `0x0375xxxx` |
+| `0x027FEDBC` | `rcStage` | **`05`** = `RA_RC_FRAME` |
+| `0x027FEDC4` | `rcMeasured` | climbing one per frame toward `600` at `+0x78` |
+
+`wramStage = 02` would mean our allocator refuses too, which would point at the window
+rather than at any allocator — and `sbrkProbe` at `+0x94` now carries
+`ra_alloc_largest()`, so `0` there says the arena was never taken while non-zero says it
+was and the request was still refused.
 
 1. ~~Move the watchlist into WRAM.~~ **Done and confirmed on hardware.** It took
    `cardenginei_arm9` from 28 bytes free to 476 and `RA_WATCH_MAX` from 2 to 16, and it
@@ -1691,6 +1711,46 @@ The host test covers the regression, which it could not before. The runner links
 *second* call still reports `RA_STAGE_HEAP`. Confirmed to fail against the old code and
 pass against the new — a regression test that was never run red is not yet a test.
 
+### The allocator: ours, not newlib's
+
+The second reading settled it. `_sbrk()` returned exactly the predicted base address and
+`heapSize` matched the prediction to the byte, and `malloc(1024)` refused anyway without
+ever calling `_sbrk()` successfully. Whatever newlib is unhappy about is inside newlib.
+
+`retail/cardenginei/arm9_ra/source/ra_alloc.c` replaces it: a first-fit list with forward
+coalescing over the whole arena, 8-byte aligned payloads because rcheevos stores 64-bit
+values in its typed-value union. Four reasons that hold independently of the bug:
+
+1. **It is testable.** newlib's allocator cannot be exercised by
+   `tools/ra_reader_test.sh` — on the host, glibc's malloc is what runs. That is precisely
+   why this failure cost two flash cycles to characterise. `ra_alloc.c` is tested on the
+   host like everything else in this binary: allocation, alignment, non-overlap, coalescing,
+   splitting, exhaustion, double free, out-of-arena pointers, `realloc` growth and
+   preservation of the original on failure, `calloc` zeroing and overflow refusal.
+2. **It is deterministic.** This runs in the game's VCOUNT handler, where a variable-time
+   path is a dropped frame. dlmalloc trims and consolidates on its own schedule.
+3. **It needs no crt0.** newlib's allocator keeps initialised state in `.data` and expects
+   a startup this window does not have. Ours needs one call with two pointers.
+4. **What rcheevos asks for is modest** — roughly 1 KB per achievement at load time, and
+   nothing per frame. So the O(n) first-fit walk never happens inside the per-frame path.
+
+`_sbrk()` now **refuses everything**, which matters: the arena has exactly one owner, and
+two allocators sharing one range is how you get corruption that only appears under load. It
+cannot simply be deleted, because newlib's `snprintf` is still linked — statically reachable
+from rich presence — and through it newlib's `_malloc_r`, which references `_sbrk_r`.
+
+**It did not save the 20 KB.** The image went 68,272 → 68,776 bytes. `_malloc_r`, `_free_r`
+and `_vfiprintf_r` are all still in there, unreachable, pulled in by that same `snprintf`
+reference. Cutting them is still one job — not compiling `richpresence.c` and `format.c` —
+and it was never the allocator's to do. `malloc` is now a 4-byte thunk to
+`ra_alloc_malloc`.
+
+The probe in `ra_startup()` calls `ra_alloc_malloc()` directly rather than `malloc`, so the
+host test exercises the same code the hardware runs. And the failure path is now reachable
+without mocking anything: hand `ra_startup()` a window with no room past `.bss` and
+`ra_alloc_init()` cannot take an arena, which is how the regression test for the lying
+stage is driven now that `--wrap=malloc` is gone.
+
 ### What to read on hardware
 
 `tools/ra_snapshot_addr.sh` for the current snapshot address; for the build in hand it is
@@ -1752,8 +1812,8 @@ question of which one to believe.
       12K as the project's binding constraint.
 - [~] Phase 2: `rcheevos` — submodule pinned at v12.4.0, runtime compiled into
       `cardenginei_arm9_ra`, `peek()` routed through the watchlist's own validation, one
-      real achievement definition parsed and evaluated. **Passing on the host. Blocked on
-      hardware:** `malloc` fails inside the window and the next reading is instrumented to
-      say why. `rc_client` remains ruled out, see open question #4.
+      real achievement definition parsed and evaluated, running on our own allocator.
+      **Passing on the host; awaiting one hardware reading.** `rc_client` remains ruled
+      out, see open question #4.
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status

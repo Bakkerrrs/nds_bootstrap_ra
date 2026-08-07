@@ -28,6 +28,18 @@
 #include "ra.h"
 
 /*
+    retail/cardenginei/arm9_ra/source/ra_alloc.c -- the allocator this window runs on, ours
+    rather than newlib's. See the comment at the top of that file for why.
+*/
+extern void  ra_alloc_init(char* start, char* end);
+extern void* ra_alloc_malloc(size_t want);
+extern void  ra_alloc_free(void* p);
+extern u32  ra_alloc_size(void);
+extern u32  ra_alloc_used(void);
+extern u32  ra_alloc_largest(void);
+extern u32  ra_alloc_failures(void);
+
+/*
     "Have we run yet" deliberately lives in .data rather than .bss, and the non-zero
     initialiser is what puts it there.
 
@@ -73,33 +85,24 @@ static u32 mallocProbeResult;
 static u32 sbrkProbeResult;
 
 /*
-    newlib's malloc grows the heap through this. The arena is everything between the end of
-    .bss and the top of the window -- about 240K of the 256K, since the binary and newlib's
-    initialised data take a few.
+    Refuses everything, on purpose.
 
-    A null break means ra_startup() has not run, which is a refusal rather than something
-    to paper over: allocating before .bss was zeroed is exactly the failure this file
-    exists to prevent.
+    This used to hand out the arena, back when newlib's malloc was the allocator. It is not
+    anymore -- ra_alloc.c owns that memory in one piece -- and two allocators sharing one
+    range is how you get a corruption that only shows up under load. So the arena has
+    exactly one owner and this says no.
+
+    It cannot simply be deleted. newlib's snprintf is still linked (reached statically from
+    rcheevos' rich presence, see docs/retroachievements.md), and through it newlib's own
+    _malloc_r, which references _sbrk_r and therefore this. Nothing reachable calls that
+    path, but the link needs the symbol -- and if some future change ever does reach it, a
+    refusal is the outcome to want.
 */
 void* _sbrk(int incr) {
-	char* previous;
-
-	if (heapBreak == 0) {
-		return (void*)-1;
-	}
-	/* Signed, because newlib is allowed to hand space back with a negative increment. */
-	if (incr > 0 && heapBreak + incr > heapTop) {
-		return (void*)-1;
-	}
-	previous   = heapBreak;
-	heapBreak += incr;
-	return previous;
+	(void)incr;
+	return (void*)-1;
 }
 
-/*
-    Bring the window up, once. Returns the stage reached, so the caller can report it even
-    when it did not get all the way.
-*/
 u8 ra_startup(char* bssStart, char* bssEnd, char* windowTop) {
 	if (startupState == RA_STARTUP_DONE) {
 		return startupStage;
@@ -126,6 +129,9 @@ u8 ra_startup(char* bssStart, char* bssEnd, char* windowTop) {
 	heapBase  = (char*)(((u32)bssEnd + 7) & ~(u32)7);
 	heapBreak = heapBase;
 	heapTop   = windowTop;
+
+	/* Hand the whole arena to our allocator. Nothing may allocate before this line. */
+	ra_alloc_init(heapBase, heapTop);
 	startupStage = RA_STAGE_HEAP;
 
 	/*
@@ -139,7 +145,7 @@ u8 ra_startup(char* bssStart, char* bssEnd, char* windowTop) {
 	    "the memory it returned is real".
 	*/
 	{
-		volatile unsigned char* block = (volatile unsigned char*)malloc(1024);
+		volatile unsigned char* block = (volatile unsigned char*)ra_alloc_malloc(1024);
 		u32 i;
 		bool ok = (block != 0);
 
@@ -150,21 +156,20 @@ u8 ra_startup(char* bssStart, char* bssEnd, char* windowTop) {
 				block[i] = (unsigned char)(i & 0xFF);
 			}
 			ok = (block[0] == 0 && block[1023] == (unsigned char)(1023 & 0xFF));
-			free((void*)block);
+			ra_alloc_free((void*)block);
 		}
 		if (!ok) {
 			/*
-			    Ask _sbrk() directly before giving up, because "no memory" on its own does
-			    not say whose fault it is. If the arena hands out 64 bytes here while
-			    malloc() refused 1024, the window is fine and newlib is the problem; if
-			    both refuse, the arena bookkeeping above is wrong.
+			    Record the arena's own view before giving up, so the failure names itself.
+			    A largest-free-block of zero means ra_alloc_init() never took the arena;
+			    anything else means it did and the request was still refused, which would
+			    be a bug in the allocator rather than in the window.
 
 			    Done here rather than in the caller because the caller stops as soon as it
 			    sees a failed stage, and this has to be recorded before that.
 			*/
-			void* p = _sbrk(64);
-			sbrkProbeResult = (p == (void*)-1) ? 0 : (u32)p;
-			return startupStage;   /* RA_STAGE_HEAP: arena measured, malloc not usable */
+			sbrkProbeResult = ra_alloc_largest();
+			return startupStage;   /* RA_STAGE_HEAP: arena taken, allocation refused */
 		}
 	}
 
@@ -197,16 +202,15 @@ u32 ra_sbrk_probe(void) {
 }
 
 /* Reported through the snapshot so the arena is visible rather than inferred. */
+/*
+    Reported through the snapshot so the arena is visible rather than inferred. Both come
+    from the allocator now rather than from _sbrk()'s break: the break no longer moves,
+    since ra_alloc_init() takes the arena in one piece.
+*/
 u32 ra_heap_size(void) {
-	if (heapBase == 0) {
-		return 0;
-	}
-	return (u32)(heapTop - heapBase);
+	return ra_alloc_size();
 }
 
 u32 ra_heap_used(void) {
-	if (heapBase == 0) {
-		return 0;
-	}
-	return (u32)(heapBreak - heapBase);
+	return ra_alloc_used();
 }

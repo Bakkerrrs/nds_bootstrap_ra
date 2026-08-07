@@ -39,6 +39,13 @@ static char fakeBss[4096];
 static char fakeArena[0x3B000];
 char __bss_start[1], __bss_end[1], __vram_top[1];   /* referenced by cardengine.c */
 
+/*
+    RA_ALLOC_NO_LIBC_NAMES keeps our malloc from replacing glibc's underneath printf and the
+    test harness itself -- see the note above ra_alloc_malloc(). The allocator is exercised
+    through its ra_ names instead, which is the same code.
+*/
+#define RA_ALLOC_NO_LIBC_NAMES
+#include "../retail/cardenginei/arm9_ra/source/ra_alloc.c"
 #include "../retail/cardenginei/arm9_ra/source/startup.c"
 #include "../retail/cardenginei/arm9_ra/source/cardengine.c"
 /*
@@ -77,25 +84,6 @@ static void expect_status(const char* what, int index, u8 want) {
 		printf("  FAIL  %s: status %u, wanted %u\n", what, got, want);
 		failures++;
 	}
-}
-
-/*
-    A failable malloc, so the probe inside ra_startup() can be made to fail on the host.
-
-    This exists for one specific bug, which cost a flash cycle to find and was invisible
-    here: ra_startup() set its "already ran" flag *before* the allocator probe and then
-    returned RA_STAGE_ALLOC unconditionally on every later call. A probe that failed on the
-    first frame was therefore reported as a working heap from the second frame onward, and
-    the snapshot showed wramStage 04 over a dead heap.
-
-    The runner links with -Wl,--wrap=malloc, so every malloc in the code under test comes
-    through here. Passing through by default keeps every other test unaffected.
-*/
-static int failMalloc;
-extern void* __real_malloc(size_t n);
-
-void* __wrap_malloc(size_t n) {
-	return failMalloc ? 0 : __real_malloc(n);
 }
 
 /* Words inside main RAM the test can point chains at. */
@@ -160,24 +148,155 @@ int main(void) {
 	    Run before the real startup, because ra_startup() only does its work once per boot
 	    and this needs to be that once.
 	*/
+	printf("\nthe allocator hands out the arena, and reclaims it\n");
+	{
+		static char pool[4096];
+		void* a;
+		void* bb;
+		void* c;
+
+		ra_alloc_init(pool, pool + sizeof(pool));
+		CHECK(ra_alloc_size() == sizeof(pool));
+		CHECK(ra_alloc_used() == 0);
+		CHECK(ra_alloc_failures() == 0);
+
+		a  = ra_alloc_malloc(100);
+		bb = ra_alloc_malloc(100);
+		CHECK(a != 0 && bb != 0);
+		/* 100 rounds up to 104, plus an 8-byte header each. */
+		CHECK(ra_alloc_used() == 2 * (104 + 8));
+		/* Payloads 8-aligned, which rcheevos' 64-bit typed values require. */
+		CHECK(((u32)a & 7) == 0 && ((u32)bb & 7) == 0);
+		/* And they do not overlap. */
+		CHECK((char*)bb >= (char*)a + 104);
+
+		memset(a, 0xAA, 100);
+		memset(bb, 0x55, 100);
+		CHECK(((unsigned char*)a)[99] == 0xAA);   /* neither wrote into the other */
+		CHECK(((unsigned char*)bb)[0] == 0x55);
+
+		ra_alloc_free(a);
+		CHECK(ra_alloc_used() == 104 + 8);
+		ra_alloc_free(bb);
+		CHECK(ra_alloc_used() == 0);
+		/* Coalesced back into one block, or the next big request would fail. */
+		CHECK(ra_alloc_largest() == sizeof(pool) - 8);
+
+		c = ra_alloc_malloc(sizeof(pool) - 8);
+		CHECK(c != 0);
+		CHECK(ra_alloc_largest() == 0);
+		ra_alloc_free(c);
+		CHECK(ra_alloc_largest() == sizeof(pool) - 8);
+	}
+
+	printf("\nthe allocator refuses rather than overruns\n");
+	{
+		static char pool[512];
+		void* a;
+
+		ra_alloc_init(pool, pool + sizeof(pool));
+		CHECK(ra_alloc_malloc(sizeof(pool)) == 0);          /* no room for the header */
+		CHECK(ra_alloc_malloc(0xFFFFFFF0u) == 0);           /* would wrap the alignment */
+		CHECK(ra_alloc_failures() == 2);
+
+		a = ra_alloc_malloc(0);                             /* legal, and not a failure */
+		CHECK(a != 0);
+		ra_alloc_free(a);
+
+		ra_alloc_free(0);                                   /* all no-ops, not corruption */
+		ra_alloc_free(pool - 64);
+		ra_alloc_free(pool + sizeof(pool) + 64);
+		a = ra_alloc_malloc(64);
+		ra_alloc_free(a);
+		ra_alloc_free(a);                                    /* double free */
+		CHECK(ra_alloc_used() == 0);
+		CHECK(ra_alloc_largest() == sizeof(pool) - 8);        /* arena still whole */
+	}
+
+	printf("\nrealloc grows, copies, and leaves the original alone on failure\n");
+	{
+		static char pool[4096];
+		void* a;
+		void* grown;
+
+		ra_alloc_init(pool, pool + sizeof(pool));
+		a = ra_alloc_malloc(32);
+		memset(a, 0x5A, 32);
+
+		grown = ra_alloc_realloc(a, 64);
+		CHECK(grown != 0);
+		CHECK(((unsigned char*)grown)[0] == 0x5A && ((unsigned char*)grown)[31] == 0x5A);
+
+		/* Already big enough: kept in place rather than moved. */
+		CHECK(ra_alloc_realloc(grown, 40) == grown);
+
+		/* Cannot be satisfied, so the original must survive. */
+		CHECK(ra_alloc_realloc(grown, sizeof(pool) * 2) == 0);
+		CHECK(((unsigned char*)grown)[0] == 0x5A);
+
+		CHECK(ra_alloc_realloc(0, 16) != 0);        /* realloc(0, n) is malloc */
+		CHECK(ra_alloc_realloc(grown, 0) == 0);     /* realloc(p, 0) is free */
+	}
+
+	printf("\ncalloc zeroes, and refuses an overflowing product\n");
+	{
+		static char pool[4096];
+		unsigned char* a;
+
+		ra_alloc_init(pool, pool + sizeof(pool));
+		a = (unsigned char*)ra_alloc_malloc(64);
+		memset(a, 0xFF, 64);
+		ra_alloc_free(a);
+
+		a = (unsigned char*)ra_alloc_calloc(8, 8);   /* same block back, previously 0xFF */
+		CHECK(a != 0);
+		CHECK(a[0] == 0 && a[63] == 0);
+		CHECK(ra_alloc_calloc(0x10000000u, 0x40u) == 0);   /* product overflows 32 bits */
+	}
+
+	printf("\nan exhausted arena is a refusal, not a wild write\n");
+	{
+		static char pool[1024];
+		int taken = 0;
+		void* p;
+
+		ra_alloc_init(pool, pool + sizeof(pool));
+		while ((p = ra_alloc_malloc(64)) != 0) {
+			memset(p, 0xC3, 64);   /* would corrupt the arena if it handed out too much */
+			taken++;
+			if (taken > 100) {
+				break;             /* it should have refused long before here */
+			}
+		}
+		CHECK(taken > 0 && taken <= sizeof(pool) / (64 + 8));
+		CHECK(ra_alloc_failures() > 0);
+		CHECK(ra_alloc_used() <= sizeof(pool));
+	}
+
 	printf("\na failed allocator stays failed, on every call\n");
 	{
-		failMalloc = 1;
-		CHECK(ra_startup(fakeBss, fakeBss + sizeof(fakeBss),
-		                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_HEAP);
+		/*
+		    A window with no room past .bss, which is the one way the probe can fail without
+		    mocking anything: ra_alloc_init() cannot take an arena, so the probe's
+		    allocation is refused and ra_startup() must say RA_STAGE_HEAP -- and keep saying
+		    it.
+
+		    Run before the real startup, because ra_startup() only does its work once per
+		    boot and this needs to be that once.
+		*/
+		char* const bssEnd = fakeBss + sizeof(fakeBss);
+
+		CHECK(ra_startup(fakeBss, bssEnd, bssEnd) == RA_STAGE_HEAP);
 		/*
 		    The regression. This second call used to return RA_STAGE_ALLOC and claim a
 		    working heap, because the "already ran" flag is set before the probe.
 		*/
-		CHECK(ra_startup(fakeBss, fakeBss + sizeof(fakeBss),
-		                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_HEAP);
+		CHECK(ra_startup(fakeBss, bssEnd, bssEnd) == RA_STAGE_HEAP);
 		CHECK(ra_malloc_probe() == 0);
-		/* And the arena is still shown to be fine, which is what names newlib as the fault. */
-		CHECK(ra_sbrk_probe() != 0);
-		CHECK(ra_heap_top() == (u32)(fakeBss + sizeof(fakeBss) + 0x3B000));
+		CHECK(ra_sbrk_probe() == 0);   /* no arena was taken, which is why it failed */
+		CHECK(ra_heap_size() == 0);
 
 		/* Back to a fresh boot for the tests below. */
-		failMalloc   = 0;
 		startupState = RA_STARTUP_FRESH;
 		startupStage = RA_STAGE_NONE;
 	}
@@ -188,6 +307,9 @@ int main(void) {
 	                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_ALLOC);
 	CHECK(fakeBss[0] == 0 && fakeBss[sizeof(fakeBss) - 1] == 0);
 	CHECK(ra_heap_size() == 0x3B000);
+	/* The probe allocated, wrote, read back and freed, so the arena is whole again. */
+	CHECK(ra_heap_used() == 0);
+	CHECK(ra_malloc_probe() != 0);
 	/*
 	    Second call must be a no-op. The flag that says so lives in .data, so the zeroing
 	    cannot clear it -- which is the point of putting it there.
@@ -197,15 +319,17 @@ int main(void) {
 	                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_ALLOC);
 	CHECK(fakeBss[0] == 0x42);
 
-	printf("\n_sbrk hands out the arena and refuses to overrun it\n");
+	printf("\n_sbrk refuses everything, so the arena has one owner\n");
 	{
-		void* a = _sbrk(16);
-		void* b = _sbrk(16);
-		CHECK(a == (void*)(fakeBss + sizeof(fakeBss)));
-		CHECK(b == (char*)a + 16);
-		CHECK(ra_heap_used() == 32);
-		CHECK(_sbrk(0x3B000) == (void*)-1);   /* would pass __vram_top */
-		CHECK(ra_heap_used() == 32);          /* and did not move the break */
+		/*
+		    ra_alloc.c owns the arena in one piece now. If _sbrk() still handed it out,
+		    newlib's allocator and ours would be writing over each other -- which is the
+		    kind of corruption that only appears under load.
+		*/
+		CHECK(_sbrk(16) == (void*)-1);
+		CHECK(_sbrk(0) == (void*)-1);
+		CHECK(_sbrk(-16) == (void*)-1);
+		CHECK(ra_heap_used() == 0);   /* and nothing was handed out behind our back */
 	}
 
 	printf("\nthe first tick claims .bss and installs the defaults\n");
