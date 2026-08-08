@@ -155,13 +155,15 @@ the test fails rather than this table going quietly stale.
 
 ### Still open, and one of them is now the critical path
 
-- **Open question #1, the network transport** — this is no longer "not on the critical
-  path", it *is* the critical path, and desk research has narrowed it to one unknown: is the
-  DSi's Atheros WiFi chip reachable from nds-bootstrap's ARM7 while a DS-mode game runs?
-  Everything around it is settled — DS mode is WEP-or-open in hardware, WPA in a DS title is
-  an open unassigned nds-bootstrap issue, and the deferred fallback turns out to be a
-  supported RetroAchievements flow rather than a workaround. See the open questions
-  section.
+- **Open question #1, the network transport** — the critical path now, and down to a single
+  unknown: **is the DSi's Atheros WiFi chip reachable from nds-bootstrap's ARM7 while a
+  DS-mode game runs?** Everything around it got answered by reading and measuring rather
+  than asking. TLS is *not* required — plain HTTP against `dorequest.php` returns identical
+  JSON to HTTPS, and `rcheevos` has a first-class non-SSL host for exactly this. DS mode is
+  WEP-or-open in hardware. WPA in a DS title is an open, unassigned nds-bootstrap issue.
+  Every one of odelot's real-hardware adapters puts networking on a separate processor. And
+  being 3DS-only does not help: a 3DS running a DS game is in DS mode, so its own WiFi stack
+  is not running. See the open questions section.
 - **CI has never run on this repository.** The workflow exists and the build is verified
   to pass on the pinned toolchain, but Actions appears disabled for the fork, so the host
   test and the space-budget report added to it have never executed. Enabling it is a repo
@@ -433,27 +435,87 @@ Everything follows from it. If the answer is yes, phase 3 is live server contact
 no, the fallback is deferred sync — and that fallback is in much better shape than it
 looked, see below.
 
-### #1a — the fallback is supported, not a hack
+### #1a — TLS is not required. Measured, not asked.
 
-RetroAchievements documents a **standalone integration** path for non-emulator clients,
-which is exactly what this is, and two details in it de-risk the deferred design:
+The question that would have decided everything on its own — is HTTPS mandatory for
+`dorequest.php`? — did not need asking. It is testable, and the answer is **no**:
 
-- **There is a bulk unlock endpoint.** The Connect API can "unlock multiple achievements at
-  once or resync all the user's unlocks in your system to RetroAchievements". That is
-  precisely the primitive a queue-on-console, submit-later design needs — it is not
-  something we would be smuggling past the API.
+```
+$ curl -A "..." "http://retroachievements.org/dorequest.php?r=login&u=...&p=x"
+{"Success":false,"Status":401,"Code":"invalid_credentials","Error":"Invalid user/password..."}
+```
+
+Plain HTTP, port 80, no redirect, byte-identical JSON to the HTTPS request. The API answers
+over cleartext today.
+
+`rcheevos` anticipates this. `src/rapi/rc_api_common.c` defines
+`RETROACHIEVEMENTS_HOST_NONSSL "http://retroachievements.org"` as a first-class host, and
+`rc_api_set_host()` recognises it specifically — switching the image host to its non-SSL
+counterpart so a client pointed at cleartext does not end up mixing schemes. That is an
+affordance built deliberately for constrained clients, not an accident.
+
+Two honest caveats. This is true *today*; RA could require HTTPS at any point, and a design
+that cannot fall back would break. And cleartext means **credentials cross the network in
+the clear** — the Connect API takes a username and password on `r=login` and returns a
+token. That is a real cost to weigh, not a footnote, and it is the user's call to make
+knowingly.
+
+The rest of the RA side, from the standalone integration guide:
+
+- **A bulk unlock endpoint exists** — "unlock multiple achievements at once or resync all
+  the user's unlocks". Deferred sync would be a supported flow, not something smuggled past
+  the API.
 - **Softcore is a first-class parameter**, `h=0`, not a degraded mode.
+- A user agent header is **mandatory** on every Connect call.
+- Game pages for standalones are set up by the admin team on request (DM `RAdmin`).
+- `rcheevos` ships no networking at all, so the transport is ours to write regardless.
 
-Also worth recording: `rcheevos` ships no networking at all — clients fetch from RA and hand
-the response down — so the transport is ours to write whichever way this goes. A user agent
-header is mandatory on every Connect call, and game pages for standalones are set up by the
-admin team on request.
+### #1b — what the prior art actually does
 
-What desk research did *not* settle on the RA side: whether plain HTTP still works against
-`dorequest.php` or whether HTTPS is now mandatory. Every documented example uses HTTPS and
-the docs never say plainly. This matters because a TLS stack is not going to fit here, so if
-HTTPS is required, live contact is off the table even if the WiFi question comes back yes —
-and the deferred path becomes the only one.
+odelot's adapters are this project's blueprint, and the thing to copy is not their transport
+but their **split**:
+
+| Project | Evaluation runs on | Networking runs on |
+| --- | --- | --- |
+| `nes-ra-adapter` | Raspberry Pi Pico on the cartridge bus | a separate **ESP32** |
+| `wii-ra-adapter` | ESP32 memory card | the same ESP32's WiFi |
+| MiSTer cores | the FPGA host | the MiSTer's Linux side |
+
+Not one of them does networking from the constrained side. The evaluator watches memory and
+hands results to something else that owns the network. odelot needs an ESP32 because a NES
+has no second computer to borrow.
+
+**We do.** That is what being 3DS-only actually buys — not DS-mode networking, but a second
+environment on the same device. See below.
+
+### #1c — being 3DS-only does not relax the WiFi constraint
+
+Worth stating plainly, because it is an easy assumption to get backwards: a 3DS running a DS
+game is in DS/TWL mode. Its own operating system, its ARM11 and its WiFi stack are **not
+running**. In that state the console is, for our purposes, a DSi. Scoping the project to the
+3DS family buys SCFG access and DSi WRAM — which this project already spends — and it does
+**not** buy the 3DS's networking.
+
+So the WiFi question is unchanged by the scope decision. What the scope decision does change
+is the fallback: the companion that owns the network can be a **3DS-mode homebrew app on the
+same console**, with WPA2 and TLS from the 3DS's own stack. No extra hardware, unlike every
+adapter above.
+
+### #1d — the one question left, and why it is now worth asking
+
+Before this research, live server contact needed two things to go right: reachable WiFi
+*and* a way around TLS. TLS turned out not to be in the way. So exactly one unknown decides
+it:
+
+> **Is the DSi's Atheros WiFi chip reachable from nds-bootstrap's ARM7 while an NTR game
+> runs, and is there room and CPU time there for a stack?**
+
+If yes, achievements unlock live, on the console, over plain HTTP, with no companion app. If
+no, the legacy Mitsumi core means WEP-only, which in practice means the deferred 3DS-mode
+companion — which is a good design anyway, and the one the prior art validates.
+
+That question is worth putting to the DS-Homebrew Discord. It is the only one left that
+cannot be answered by reading or measuring.
 
 ## Phase 1 — the watchlist and pointer chains
 
