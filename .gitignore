@@ -138,3 +138,10 @@ retail/arm9/include/version.h
 !retail/nitrofiles/bootloader_images.lz77
 !retail/nitrofiles/dstwo.dldi
 !retail/nitrofiles/esrbOnlineNotice.lz77
+
+# Built by tools/wifiprobe (a diagnostic, not a deliverable)
+tools/wifiprobe/wifiprobe.nds
+tools/wifiprobe/arm7/build/
+tools/wifiprobe/arm9/build/
+tools/wifiprobe/arm7/wifiprobe.elf
+tools/wifiprobe/arm9/wifiprobe.elf

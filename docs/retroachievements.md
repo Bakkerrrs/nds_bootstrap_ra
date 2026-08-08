@@ -156,10 +156,10 @@ the test fails rather than this table going quietly stale.
 ### Still open, and one of them is now the critical path
 
 - **Open question #1, the network transport** — the critical path now, and answered as far
-  as reading and measuring can take it. The next move is **not** to build the client: it is
-  a plain DSi-mode homebrew that proves `dsiwifi` can associate and POST on this actual 3DS,
-  followed by checking whether the Atheros firmware is even loaded under our boot path. The
-  risk is concentrated there, and that is the cheapest thing on the list to test. See the open questions section.
+  as reading and measuring can take it. The next move is **not** the client: `tools/wifiprobe/`
+  is a standalone DSi-mode homebrew that answers whether WiFi works on this console *at all*,
+  before any of it is nds-bootstrap's problem. Built and ready to flash; see its README for
+  how to read the stage number it comes back with. See the open questions section.
 - **CI has never run on this repository.** The workflow exists and the build is verified
   to pass on the pinned toolchain, but Actions appears disabled for the fork, so the host
   test and the space-budget report added to it have never executed. Enabling it is a repo
@@ -566,10 +566,13 @@ knew we would care about it.
 The risk is concentrated in the firmware-state question, and that is also among the cheapest
 things to test. So the order is not "build the client":
 
-1. **Outside the game entirely.** A plain DSi-mode homebrew `.nds`, launched by ntrboot, no
-   cardengine involved: does `dsiwifi` associate and complete a plain HTTP POST on *this*
-   3DS's actual WiFi board? If that fails, the answer is in without touching nds-bootstrap
-   at all.
+1. ~~**Outside the game entirely.**~~ **Built: `tools/wifiprobe/`.** A plain DSi-mode
+   homebrew `.nds` — no cardengine, no injected code, no game — that brings `dsiwifi` up,
+   associates, and fetches from `retroachievements.org` over plain HTTP, reporting a stage
+   number and writing `/wifiprobe.log` to the SD card. `dsiwifi` is a submodule and builds
+   clean against the pinned toolchain, which was the first thing that could have stopped
+   this. Not yet run on hardware. See `tools/wifiprobe/README.md` for how to read the
+   result.
 2. **The chip's state under our boot path.** Coming in through nds-bootstrap, is `WLANFIRM`
    already uploaded? A WMI init that succeeds versus one that needs BMI plus an upload
    distinguishes them.
