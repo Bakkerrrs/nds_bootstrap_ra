@@ -1,0 +1,70 @@
+# Achievement definitions, one per line, in RetroAchievements' own memaddr syntax.
+# Copy to sd:/_nds/nds-bootstrap/ra_achievements.txt
+#
+# Lines starting with '#' and blank lines are ignored, so notes travel with the file --
+# which matters when the result comes back hours later as a photograph of a hex viewer.
+# Up to 8 definitions are activated, numbered from achievement id 1 in file order.
+#
+# These are written from the *code notes* published for Space Invaders Extreme (Nintendo
+# DS), not copied from its achievement set: the set's logic is not public without
+# credentials, and the notes are. That is fine for what this tests. What matters is that
+# the syntax is real and the memory is real -- whether the string came from the server or
+# from us changes nothing about what rcheevos has to do with it.
+#
+# Addresses are console addresses. RetroAchievements maps DS system RAM at 0, so 0x159164
+# here is 0x02159164 on the console.
+
+
+# ---------------------------------------------------------------------------------------
+# 1. The simplest thing that can work: a direct 32-bit read against a documented address.
+#
+#    0x1593d0 is [32-Bit] Current Stage, and 0x00 is Stage 1. True from the moment a normal
+#    run starts. It proves the file was read, parsed and evaluated -- nothing more, which
+#    is the point of having it first: if this does not fire, nothing below it will either
+#    and the problem is not the definition.
+# ---------------------------------------------------------------------------------------
+0xX1593d0=0
+
+
+# ---------------------------------------------------------------------------------------
+# 2. A delta memref: the value changed this frame, rather than merely holds a value.
+#
+#    0x159992 is [16-Bit] Number of times Red -> Red Round completed this run. `d0x` is the
+#    same address one frame ago, so this fires the instant the counter goes up.
+#
+#    This is the path the built-in self-test deliberately does not cover, because it needs
+#    a value that changes and therefore a game address nobody can name in advance. Now one
+#    can be named.
+# ---------------------------------------------------------------------------------------
+0x159992>d0x159992
+
+
+# ---------------------------------------------------------------------------------------
+# 3. The one that matters: a pointer chain, which RetroAchievements writes as AddAddress.
+#
+#    This is "It's Fever Time!" -- clear a Round and enter Fever Time -- built from:
+#
+#      0x159164  [24-Bit Pointer] Game state pointer
+#        +0x9c   [32-Bit] Game state, where 0x02 = Fever
+#
+#    `I:` reads a value and adds it to the *next* condition's address, so:
+#
+#      I:0xW159164          read the 24-bit pointer at 0x159164
+#      _0xX00009c=2         and check the 32-bit value at (pointer + 0x9c) is 2
+#
+#    24-bit is what the notes call these pointers, and it is not a detail: the console
+#    stores 0x0215xxxx, and dropping the top byte is exactly what turns a DS address into
+#    the console address RetroAchievements addresses are written in.
+#
+#    AddAddress applies to one condition only, so the second half repeats the read. The
+#    pair says "state is Fever now, and was not Fever last frame" -- the standard shape for
+#    an achievement that fires on a transition rather than on a state.
+#
+#    Two things about this exercise code no other test reaches. The computed address is not
+#    a memref, so rc_runtime_validate_addresses() never sees it -- which is precisely why
+#    peek() validates every read as well. And if the pointer is null or garbage between
+#    scenes, the computed address will be refused and counted in rcPeeksRejected rather
+#    than dereferenced, which on this platform is the difference between a false negative
+#    and a crash inside the game's interrupt handler.
+# ---------------------------------------------------------------------------------------
+I:0xW159164_0xX00009c=2_I:0xW159164_d0xX00009c!=2

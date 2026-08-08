@@ -329,9 +329,16 @@ typedef struct raSnapshot {
 	    depending on whether the file was picked up at all.
 	*/
 	u8  rcFromFile;      /* +0x98  1 if the staged file was used, 0 for the built-in */
-	u8  reserved4;       /* +0x99 */
-	u16 rcDefLength;     /* +0x9A  length of the staged definition, after trimming */
-} raSnapshot;            /*              0x9C bytes */
+	/*
+	    How many definitions in the file parsed, and which line was the first not to.
+	    Reported together because "two of three worked" is a completely different situation
+	    from "none did", and a photograph of a hex viewer cannot show a parser message.
+	*/
+	u8  rcActivated;     /* +0x99  definitions successfully activated */
+	u16 rcDefLength;     /* +0x9A  length of the staged text */
+	u8  rcBadLine;       /* +0x9C  1-based line of the first parse failure, 0 if none */
+	u8  reserved4[3];    /* +0x9D */
+} raSnapshot;            /*              0xA0 bytes */
 
 /*
     How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail

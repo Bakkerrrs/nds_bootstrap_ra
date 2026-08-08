@@ -130,6 +130,39 @@ trimmed because a text editor adds a newline and rcheevos would reject it as syn
 the result goes to the same parser that will one day receive strings from the server. It
 gets no more faith than those will.
 
+### The definitions to try, and where they came from
+
+The achievement set's logic is not public: `dorequest.php?r=patch` needs credentials and the
+Web API needs a key. The game's **code notes** are, and they are better for this purpose —
+documented addresses with their meanings, published by the people who wrote the set.
+
+`tools/ra_achievements.example.txt` carries three definitions built from the notes for
+*Space Invaders Extreme*, in increasing order of what they can prove. Whether the string
+came from the server or from us changes nothing about what rcheevos has to do with it; what
+matters is that the syntax is real and the memory is real.
+
+```
+0xX1593d0=0                                        current stage is 1
+0x159992>d0x159992                                 a Red->Red round was just completed
+I:0xW159164_0xX00009c=2_I:0xW159164_d0xX00009c!=2  entered Fever Time
+```
+
+The third is the one worth the session. `I:` is AddAddress — RetroAchievements' pointer
+chain — and it reads the 24-bit game-state pointer at `0x159164`, then the 32-bit state at
+`pointer + 0x9c`, where `0x02` is Fever. The pair says "Fever now, not Fever last frame",
+which is the standard shape for an achievement that fires on a transition.
+
+Two things in it reach code nothing else does. **The computed address is not a memref**, so
+`rc_runtime_validate_addresses()` never sees it — which is exactly why `peek()` validates
+every read as well, and this is the first test of that. And when the pointer is null or
+garbage between scenes, the computed address gets refused and counted in `rcPeeksRejected`
+rather than dereferenced, which on this platform is the difference between a false negative
+and a Data Abort inside the game's interrupt handler.
+
+24-bit is not a detail either. The console stores `0x0215xxxx`; dropping the top byte is
+what turns a DS address into the console address RetroAchievements definitions are written
+in, which is why the notes call these "24-Bit Pointers".
+
 ### The next task: a real achievement, from a real game
 
 Everything below the client is now proven on hardware. What is missing is the client: the

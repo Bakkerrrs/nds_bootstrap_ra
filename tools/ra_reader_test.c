@@ -194,8 +194,10 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, mallocProbe) == 0x90);
 	CHECK(__builtin_offsetof(raSnapshot, sbrkProbe) == 0x94);
 	CHECK(__builtin_offsetof(raSnapshot, rcFromFile) == 0x98);
+	CHECK(__builtin_offsetof(raSnapshot, rcActivated) == 0x99);
 	CHECK(__builtin_offsetof(raSnapshot, rcDefLength) == 0x9A);
-	CHECK(sizeof(raSnapshot) == 0x9C);
+	CHECK(__builtin_offsetof(raSnapshot, rcBadLine) == 0x9C);
+	CHECK(sizeof(raSnapshot) == 0xA0);
 
 	*DISPCNT = 0x1F40;
 
@@ -488,6 +490,44 @@ int main(void) {
 		CHECK(probe.rcFromFile == 0);
 		*(u32*)(block + 4) = CARDENGINEI_ARM9_RA_DEFS_MAX;
 		CHECK(strcmp(ra_definition(&probe), RA_TEST_DEFINITION) == 0);
+
+		/*
+		    Several definitions in one file, because a hardware session is the scarce
+		    resource and testing one per session wastes it. Comments and blank lines are
+		    skipped so the file can say what each line is meant to do.
+		*/
+		{
+			char*      lines[RA_DEFS_MAX_LINES];
+			const char file[] =
+				"# what this is for\n"
+				"0xH0012a4=1\n"
+				"\n"
+				"  I:0xW159164_0xX00009c=2  \r\n"
+				"0x159992>d0x159992\n";
+			u8 count;
+
+			memcpy(text, file, sizeof(file));
+			count = ra_split_definitions(text, sizeof(file) - 1, lines);
+			CHECK(count == 3);
+			CHECK(strcmp(lines[0], "0xH0012a4=1") == 0);
+			/* Leading and trailing whitespace and the CR all gone. */
+			CHECK(strcmp(lines[1], "I:0xW159164_0xX00009c=2") == 0);
+			CHECK(strcmp(lines[2], "0x159992>d0x159992") == 0);
+		}
+
+		/* A file with more lines than there are slots stops rather than overruns. */
+		{
+			char*  lines[RA_DEFS_MAX_LINES];
+			char   many[256];
+			int    n;
+			u32    len = 0;
+
+			for (n = 0; n < RA_DEFS_MAX_LINES + 4; n++) {
+				len += sprintf(many + len, "0xH00%04x=1\n", n);
+			}
+			memcpy(text, many, len + 1);
+			CHECK(ra_split_definitions(text, len, lines) == RA_DEFS_MAX_LINES);
+		}
 
 		/* Back to no file, so the tests after this see the built-in. */
 		*(u32*)block = 0;

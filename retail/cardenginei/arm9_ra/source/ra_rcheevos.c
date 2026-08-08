@@ -213,6 +213,56 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
     misbehaving. A definition from a text file gets no more faith than one from the server,
     because eventually it *is* one from the server.
 */
+#define RA_DEFS_MAX_LINES 8
+
+/*
+    Split the staged text into lines, in place.
+
+    One definition per line, because a hardware session is the scarce resource in this
+    project and testing one definition per session wastes it. Several can be tried at once
+    and the snapshot says how many parsed and how many fired.
+
+    Blank lines and lines beginning with '#' are skipped, so the file can carry a note about
+    what each definition is meant to do -- which matters when the answer arrives hours later
+    as a photograph.
+*/
+static u8 ra_split_definitions(char* text, u32 length, char** lines) {
+	u8  count = 0;
+	u32 i     = 0;
+
+	while (i < length && count < RA_DEFS_MAX_LINES) {
+		char* start;
+
+		while (i < length && (text[i] == '\n' || text[i] == '\r'
+		                   || text[i] == ' '  || text[i] == '\t')) {
+			i++;
+		}
+		if (i >= length) {
+			break;
+		}
+		start = &text[i];
+		while (i < length && text[i] != '\n' && text[i] != '\r') {
+			i++;
+		}
+		text[i++] = 0;
+
+		/* Trailing whitespace, because an editor leaves it and rcheevos rejects it. */
+		{
+			char* end = start;
+			while (*end) {
+				end++;
+			}
+			while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+				*--end = 0;
+			}
+		}
+		if (*start && *start != '#') {
+			lines[count++] = start;
+		}
+	}
+	return count;
+}
+
 static const char* ra_definition(raSnapshot* snapshot) {
 	const u32* block = (const u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION;
 
@@ -275,12 +325,40 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 		return RA_RC_NO_MEMREFS;
 	}
 
-	activate = rc_runtime_activate_achievement(
-		&runtime, RA_TEST_ACHIEVEMENT_ID, ra_definition(snapshot), 0, 0);
+	{
+		char* text = (char*)ra_definition(snapshot);
+		char* lines[RA_DEFS_MAX_LINES];
+		u8    count = 1;
+		u8    i;
 
-	snapshot->rcActivate = (s8)activate;
-	if (activate != RC_OK) {
-		return RA_RC_PARSE_BAD;
+		lines[0] = text;
+		if (snapshot->rcFromFile) {
+			count = ra_split_definitions(text, snapshot->rcDefLength, lines);
+		}
+
+		/*
+		    Every line gets its own achievement id, numbered from RA_TEST_ACHIEVEMENT_ID, so
+		    the first one keeps the id the measured-progress fields report on and the rest
+		    still count toward rcTriggered. rcActivate carries the first *failure* rather
+		    than the last result -- a file with one bad line among three should say so
+		    instead of being reported by whichever happened to be last.
+		*/
+		activate = RC_OK;
+		snapshot->rcActivated = 0;
+		for (i = 0; i < count; i++) {
+			const int one = rc_runtime_activate_achievement(
+				&runtime, RA_TEST_ACHIEVEMENT_ID + i, lines[i], 0, 0);
+			if (one == RC_OK) {
+				snapshot->rcActivated++;
+			} else if (activate == RC_OK) {
+				activate = one;
+				snapshot->rcBadLine = i + 1;
+			}
+		}
+		snapshot->rcActivate = (s8)activate;
+		if (snapshot->rcActivated == 0) {
+			return RA_RC_PARSE_BAD;
+		}
 	}
 
 	/*
