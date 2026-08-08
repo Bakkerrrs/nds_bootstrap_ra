@@ -47,6 +47,22 @@ CFLAGS	:=	-g -Wall -O2\
 			$(ARCH)
 
 CFLAGS	+=	$(INCLUDE) -DARM9 -DNO_CARDID -DDEFAULT_CARD_READ_DMA
+
+#---------------------------------------------------------------------------------
+# Step two of the RA network ladder -- see retail/arm9/source/ra_wifi.c. This side links no
+# library: dsiwifi's ARM9 half is lwip, and everything step two asks about happens on the
+# ARM7. Only the IPC header is needed, which is why this adds an include path and nothing
+# else. Off by default, and a build with it on stops on a summary instead of booting a game.
+#---------------------------------------------------------------------------------
+# -iquote and not -I, deliberately. libs/dsiwifi/include also holds netdb.h, sys/socket.h,
+# arpa/inet.h and netinet/ for its lwip, and this ARM9 builds mbedtls and polarssl next
+# door. On the -I path those would shadow newlib's; -iquote applies to #include "..." only,
+# so <sys/socket.h> still means newlib's. Same choice tools/wifiprobe/arm7 makes.
+ifeq ($(RA_LAUNCHER_WIFI),1)
+CFLAGS	+=	-DRA_LAUNCHER_WIFI=1 \
+			-iquote $(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../../libs/dsiwifi/include)
+endif
+
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 
 ASFLAGS	:=	-g $(ARCH) $(INCLUDE)

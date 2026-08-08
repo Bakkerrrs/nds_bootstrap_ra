@@ -71,4 +71,46 @@ $CC -std=gnu99 -Wall -Wno-unused-function -Wno-pointer-to-int-cast -Wno-int-to-p
 	"$RC"/src/rhash/md5.c \
 	-lm -o "$out/ra_reader_test"
 
+set +e
 "$out/ra_reader_test"
+status=$?
+set -e
+
+# The other half of pinning step two's log classifier.
+#
+# ra_wifi_verdict.c decides how the Atheros chip arrived by matching dsiwifi's printf text,
+# because the driver exposes none of those facts any other way. The C test above proves it
+# reads the log a real console produced; this proves those strings are still the ones the
+# submodule prints. Between them, bumping libs/dsiwifi fails here in seconds instead of
+# reporting the wrong world after a play session.
+#
+# Skipped rather than failed when the submodule is absent: dsiwifi is only needed for the
+# step-two diagnostic build, so a clone without it is a normal state to be in, unlike a
+# clone without rcheevos.
+DSIWIFI=libs/dsiwifi
+if [ -f "$DSIWIFI/arm_iop/source/wifi_card.twl.c" ]; then
+	echo
+	echo "dsiwifi still prints what the classifier looks for"
+	for say in \
+		'Mfg %08lx' \
+		'needs firmware upload' \
+		'BMI version:' \
+		'Launching!' \
+		'ready, handshaking' \
+		'fully initialized!' \
+		'bad mbox alloc'
+	do
+		if grep -qF -- "$say" "$DSIWIFI/arm_iop/source/wifi_card.twl.c"; then
+			echo "  ok    $say"
+		else
+			echo "  FAIL  $say -- libs/dsiwifi does not print this any more"
+			status=1
+		fi
+	done
+else
+	echo
+	echo "libs/dsiwifi absent -- skipping the classifier's string pins"
+	echo "  (git submodule update --init, if you are building RA_LAUNCHER_WIFI=1)"
+fi
+
+exit $status

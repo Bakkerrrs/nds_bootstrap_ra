@@ -56,6 +56,13 @@ network, so **open question #1 (transport) is now the critical path with nothing
 it** — and its first rung has already passed in isolation. What is untested is whether any
 of it survives inside nds-bootstrap, where the ARM7 belongs to the game.
 
+**Written but not yet run: step 2 of the ladder.** dsiwifi's ARM7 half now links into
+nds-bootstrap's own launcher behind `RA_LAUNCHER_WIFI`, so the chip can be brought up in the
+one context where no game is competing for the ARM7. It is **unbuilt and untried** — there
+was no devkitARM in the session that wrote it — so the next thing anyone does with it is
+build it and run it once. See *Step two, wired* below for what it measures, what it
+deliberately leaves to step 3, and the three things writing it turned up.
+
 The ARM9 cardengine has **412 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
 
@@ -65,11 +72,12 @@ The five things a new session needs that are not obvious from the source:
 
 | | |
 |---|---|
-| Branch | `claude/fase-1-avance-965hk5` |
+| Branch | `claude/fase-1-retroachievements-1phq4i` (was `claude/fase-1-avance-965hk5`) |
 | Snapshot address | `tools/ra_snapshot_addr.sh` — currently `0x027FED50` for `cardenginei_arm9`, which is the variant a retail DS game loads on a 3DS. **Re-run it after every build**; it moves. |
 | Magic to look for | ASCII `RA2S` (`52 41 32 53`). `RA1S`/`RA0S` means a stale address from an older build. |
 | Host test | `./tools/ra_reader_test.sh` — no toolchain, no hardware, seconds. Run it before anything. |
 | Full build | `make` from the top level, **serially**, with `lzss` on `PATH`. See *Building*. |
+| Step-2 build | `make RA_LAUNCHER_WIFI=1` — the WiFi diagnostic. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
 
 Two working habits this document was largely written by, both of which were learned by
 paying for them:
@@ -79,9 +87,10 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is *#1f — the rest of the ladder*: move the probe's working network
-path out of standalone DSi-mode homebrew and into nds-bootstrap's launcher, which is a third
-network context and the one that makes `r=patch` and `r=awardachievement` reachable.
+The immediate next step is one hardware run: build `RA_LAUNCHER_WIFI=1`, launch it, and send
+back `/ra_wifi_launcher.log`. That is step 2 of *#1f — the rest of the ladder*, the code for
+it is written, and the reading it produces is a diff against the probe's own
+`/wifiprobe.log`.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -440,6 +449,151 @@ The WiFi probe already reached RetroAchievements over plain HTTP from this exact
 nds-bootstrap's launcher, and deciding how a definition set travels from `r=patch` to the
 definitions block that this round proved works.
 
+### Step two, wired: the chip's bring-up moved into the launcher
+
+`RA_LAUNCHER_WIFI=1` builds nds-bootstrap with dsiwifi's **ARM7 half** linked into the
+launcher. The ARM9 sends one IPC message before the game boots, dsiwifi resets the Atheros
+chip, launches its firmware, brings WMI up, associates and does the WPA2 handshake, and every
+line it narrates is written verbatim to `/ra_wifi_launcher.log` next to the probe's
+`/wifiprobe.log`. Then it stops.
+
+**None of this has been built or run.** It was written in a session with no devkitARM and no
+console, so treat every claim below as a design decision with its reasoning attached rather
+than as a result. The first hardware run is the result.
+
+When you do run it: **send `/ra_wifi_launcher.log`, not a photograph of it.** The screen shows
+the same text, but the line that explains a failure is never the last one, and the file is
+meant to be diffed against `/wifiprobe.log` from the step-1 run. That diff *is* the reading —
+two runs of the same driver, and any difference between them is nds-bootstrap.
+
+#### What it actually asks, which is not quite what the plan said
+
+The plan's step 2 was *"coming in through nds-bootstrap, is `WLANFIRM` already uploaded?"* —
+and writing it made clear that the probe had already answered that, in a way that dissolves
+the question: dsiwifi resets the chip into its BMI bootloader and relaunches the firmware
+**every time, warm or cold**, and its firmware-upload path is `#if 0` besides. So `Reset
+cause`, `BMI version` and `Launching!` prove nothing about how the chip arrived. Exactly one
+line does — `%s needs firmware upload %lx`, printed only when the host-interest word at
+`+0x58` reads zero — and on this console it was printed.
+
+What is genuinely untested, and what this build measures, is whether the same driver comes up
+as a **guest of nds-bootstrap's ARM7** rather than of the libnds template. The launcher is
+context A, but its ARM7 is not an ordinary one, and the differences all bear on the WiFi SDIO
+block:
+
+| | The probe's ARM7 | nds-bootstrap's launcher ARM7 |
+| --- | --- | --- |
+| SCFG | sets `REG_SCFG_EXT = 0x93FFFB06` itself | **inherits whatever launched it**; writes SCFG nowhere |
+| SD/eMMC | untouched | already driving `my_sdmmc` at `0x04004800`, one instance below the WiFi SDIO at `0x04004A00` |
+| NDMA | free | slot 0 taken by `driveInitialize()` |
+| Timer 3 | free | free, but dsiwifi claims it on both CPUs |
+| Idle loop | a normal `while` loop | `swiIntrWait(0, IRQ_FIFO_NOT_EMPTY)` |
+
+The SCFG row is the one that can decide the run on its own, so the log opens with
+`SCFG_EXT` from both CPUs before anything touches the chip. **It reports and does not
+correct.** Opening SCFG here would make this a measurement of a boot path nds-bootstrap does
+not have; if the bit is closed, that *is* the finding, and it is a finding with an obvious
+next move rather than a puzzle.
+
+#### The ladder stops at the handshake, and that is where the question ends
+
+Five rungs against the probe's six:
+
+| Stage | Reached | What proves it |
+|---|---|---|
+| 0 | nothing | the ARM7 never narrated — see `SCFG_EXT` above it |
+| 1 | chip | the SDIO manufacturer/chip-ID read answered (`Mfg ...`) |
+| 2 | firmware | `Firmware ... ready, handshaking` — the Xtensa core is running |
+| 3 | WMI | `... fully initialized!` — there is a working command channel |
+| 4 | associated | `WIFI_IPCINT_CONNECT`, from `WMI_CONNECT_EVENT` |
+| 5 | **link ready** | `WIFI_IPCINT_READY` — 4-way handshake done, GTK installed |
+
+DNS, TCP and HTTP — the probe's stages 3 to 6 — are absent on purpose. Everything up to and
+including the WPA2 handshake happens **on the ARM7 inside dsiwifi**; sockets are lwip on the
+ARM9, and lwip is step 3. So the ARM9 side of this probe links no library at all, only
+dsiwifi's IPC header — the whole thing is four of our own files and a Makefile switch.
+
+**That split is not tidiness, and here is the number behind it.** dsiwifi configures lwip
+with `PBUF_POOL_SIZE 512` and `MEMP_MEM_MALLOC 0`, so the pools are static arrays: at lwip's
+default `PBUF_POOL_BUFSIZE` for a 1460-byte MSS that is 512 × 1,516 ≈ **760 KB in the pbuf
+pool alone**, before the other `MEMP_NUM_*` arrays. The launcher's ARM9 is linked by
+`retail/arm9/ds_arm9_ndsbs.mem` into `0x02280000`–`0x02338000` — **736 KB total**, code and
+heap included, and it cannot simply grow: `IPS_LOCATION` and `IMAGES_LOCATION` sit at
+`0x02337000` and `0x02338000`. So lwip as
+dsiwifi ships it **does not fit in the launcher today**, and step 3 has to answer that before
+it can fetch anything. Three options, in order of appeal: shrink `PBUF_POOL_SIZE` (a 1500-byte
+MTU and one HTTP GET at a time do not need 512 buffers); move the launcher's link region into
+the 2.5 MB preserved block at `0x02400000` that the RA staging buffer already lives in; or
+put the fetch in the bootloader instead. That is a real piece of step 3, discovered by
+writing step 2, and it is why step 2 was worth building separately rather than as the first
+half of step 3.
+
+#### Why the diagnostic build does not boot games
+
+`wifi_card_wlan_init()` contains two **untimed** loops — `while (1)` waiting for the
+firmware-ready flag, and `while (!wmi_is_ready())` — and they run inside a FIFO datamsg
+handler on the ARM7. If the chip does not come up, that ARM7 is wedged, with a timer IRQ and
+an AUX IRQ live. Handing that to the bootloader, which is about to overwrite the ARM7's code,
+is not a thing to do for a measurement.
+
+So the probe stops on its summary and `RA_LAUNCHER_WIFI` is off in every shipped build. That
+also makes the reading unambiguous, which is the habit this document keeps paying for: a run
+that halts on `reached stage N of 5` is a reading, not something to photograph before the
+game covers it.
+
+Two smaller decisions in the same spirit. `installWifiFIFO()` is called **after** the
+launcher's own FIFO handshake completes, because installing it earlier would have let the
+probe's own IPC message satisfy the `swiIntrWait()` that handshake waits on — and the ARM7
+would then have run `SCFGFifoCheck()` before the ARM9 had sent `FIFO_USER_06`, silently
+dropping the CPU-clock request. In a build that never boots a game that would not have been
+visible; it would just have been wrong. And inbound IP packets are dropped **without**
+acknowledging them: `wifi_host.c` stamps a free-marker six bytes below the buffer it is
+handed, which is correct only for a buffer the ARM9 supplied through `INITBUFS`, and this
+probe supplies none — so stamping would corrupt the ARM7's own mbox header. Nothing is lost,
+because the WPA2 handshake is EAPOL and never comes that way.
+
+#### The one part a host can check, and it is checked
+
+`raWifiVerdict` reads how the chip arrived out of dsiwifi's **printf text**, because the chip
+string, the host-interest flag and the BMI version are all statics inside the ARM7 half and
+none of them crosses the FIFO any other way. That is a coupling to a third-party library's
+log strings, and its failure mode is the worst kind this project has: a renamed string does
+not break a build, it reports the wrong world after a play session.
+
+So it is pinned twice, and `./tools/ra_reader_test.sh` runs both in seconds:
+
+- the classifier is fed **the log this console actually produced** — the lines quoted under
+  *#1e* above, and only those, which is why the expected stage there is 2 and not 3;
+  `fully initialized!` certainly happened on that console but is not among the lines the
+  document kept, and a fixture that invents evidence is worse than a short one;
+- and the runner **greps `libs/dsiwifi` for every format string** the classifier matches, so
+  bumping the submodule fails here rather than on hardware.
+
+The test that matters most is neither of those. dsiwifi ships its log over the FIFO in
+**59-byte chunks**, so a single line arrives split — and the strings being matched are up to
+21 characters, so a cut in the wrong place hides one completely. The reassembly is checked by
+feeding the same log at chunk sizes 59 and 7 and asserting the verdict is identical to the
+line-at-a-time feed. A per-chunk matcher would have passed every other test in the file and
+reported "the chip did not come up".
+
+#### Two things the ladder does not repeat, and one latent break it fixed
+
+The probe reports the console's configured WiFi slots, to tell "no network configured" apart
+from "the chip failed". This does not, deliberately: the probe already established that this
+console has a WPA2-PSK DSi slot, and the log explains a failure without it. One fewer FIFO
+channel and one fewer struct for a fact already in hand.
+
+And `libs/dsiwifi` moved out of `tools/wifiprobe/`, because two builds consume it now. That
+does not weaken the probe as a control — what a control must not share is *nds-bootstrap's*
+code, so that a failure in it cannot be nds-bootstrap's fault. The driver being the same
+driver is the entire point: if the two runs disagree, the difference is nds-bootstrap.
+
+Moving it turned up a break that was already there. `make -C libs/dsiwifi release` does not
+generate `include/dswifi_version.h` — only the submodule's `all` target does, and every
+source that includes `dsiwifi7.h` needs it. A fresh clone therefore failed the probe's build
+too, from inside a third-party Makefile, on a missing header. Both entry points now ask for
+that file by name first.
+
 ### How you know it worked
 
 Run `tools/ra_snapshot_addr.sh` for the snapshot address, point the RAM viewer at it, and
@@ -466,10 +620,15 @@ the test fails rather than this table going quietly stale.
 - **`git clean -xfd` deletes untracked directories.** It ate
   `retail/cardenginei/arm9_ra/` once, mid-session. `git add` a new binary's directory
   before cleaning.
-- **`rcheevos` is a git submodule.** A fresh clone needs
+- **`rcheevos` is a git submodule**, and so is `libs/dsiwifi`. A fresh clone needs
   `git submodule update --init --recursive`, or `retail/cardenginei/arm9_ra/rcheevos` is
   empty and the build fails on a missing header. `tools/ra_reader_test.sh` checks for this
-  and says so rather than producing a wall of compiler errors.
+  and says so rather than producing a wall of compiler errors. `libs/dsiwifi` is only needed
+  for `RA_LAUNCHER_WIFI=1` and for `tools/wifiprobe/`, so the host test reports it missing
+  and carries on rather than failing.
+- **`RA_LAUNCHER_WIFI=1` builds something that is not a loader.** It stops on a WiFi
+  diagnostic summary instead of booting the game, on purpose — see *Step two, wired*. Do not
+  ship one, and do not spend a session wondering why the game will not start.
 - **`tools/ra_reader_test.sh`** runs the reader's logic *and rcheevos* on the host in
   seconds, with no devkitARM and no hardware. Use it before every flash cycle; it has
   already caught a wrong assumption that would have cost one.
@@ -493,6 +652,14 @@ the test fails rather than this table going quietly stale.
   needed, and the Atheros comes up on this console. What is untested is whether any of that
   survives inside nds-bootstrap, where the ARM7 belongs to the game. See *#1f — the rest of
   the ladder*.
+- **Step 2 is written and has never been compiled.** `RA_LAUNCHER_WIFI=1` was authored in a
+  session with no devkitARM and no console, so the first thing it needs is a build — the ARM7
+  IWRAM budget in particular is a hard wall that only the linker can settle, since dsiwifi's
+  ARM7 half carries ~13,000 lines including a slice of mbedTLS for the WPA2 handshake. The
+  probe fits it alongside the libnds template; whether it fits alongside nds-bootstrap's
+  ARM7 is not something this session could check.
+- **Where the IP stack lives is undecided**, and step 3 cannot start without deciding it.
+  dsiwifi's lwip is ~800 KB of static pools; the launcher's ARM9 has a 736 KB link region.
 - **Reporting an unlock has never been attempted.** Evaluation is done; `r=awardachievement`
   is not written, and neither is `r=patch`. Both wait on the transport above.
 - **Game identification.** Nothing yet computes the RetroAchievements hash for a DS ROM, so
@@ -538,6 +705,30 @@ Three things that are easy to trip over:
   building one variant in isolation, which is worth doing to read its `.map`.
 
 Output is `retail/bin/nds-bootstrap.nds` and `hb/bin/nds-bootstrap.nds`.
+
+### The step-2 WiFi diagnostic
+
+```sh
+git submodule update --init --recursive   # libs/dsiwifi
+make RA_LAUNCHER_WIFI=1                   # still serial, still needs lzss
+```
+
+`RA_LAUNCHER_WIFI` is a make variable, not a header switch, because it decides what gets
+*linked* and not only what gets compiled: the retail ARM7 gains `libs/dsiwifi/lib/libdsiwifi7.a`
+and both CPUs gain `-DRA_LAUNCHER_WIFI=1`. Set on the command line it reaches every sub-make
+on its own. Only the **retail** launcher grows the probe; `hb/` ignores the variable.
+
+Two details worth knowing before the first build:
+
+- The submodule's include directory carries its own `netdb.h`, `sys/socket.h` and
+  `netinet/`, and this ARM9 builds mbedtls and polarssl next door. Both Makefiles add it
+  with **`-iquote`**, not `-I`, so `<sys/socket.h>` still means newlib's. That is the same
+  choice `tools/wifiprobe/arm7/Makefile` makes.
+- The ARM7 IWRAM budget is the risk nobody has measured. dsiwifi's ARM7 half is ~13,000
+  lines, a good part of it mbedTLS for the WPA2 handshake, and the launcher's ARM7 links with
+  the stock `ds_arm7.specs`. If it does not fit, the linker says so — which is the good
+  failure. The bad one would have been fitting and being silently truncated, and the ARM7 is
+  not copied by hand the way `cardenginei_arm9_ra` is, so that cannot happen here.
 
 ## Phase 0 — reading the game's RAM every frame
 
@@ -611,7 +802,12 @@ encoding) and it looked as though nothing was being read. Liveness is proved by
 | `retail/common/include/ra_overlay.h` | Notification API |
 | `retail/cardenginei/arm9/source/ra_overlay.c` | Notification implementation |
 | `tools/ra_snapshot_addr.sh` | Prints the snapshot address and the space left, from the link maps |
-| `tools/ra_reader_test.c` / `.sh` | Host-side test for the watchlist and the chain walker |
+| `tools/ra_reader_test.c` / `.sh` | Host-side test for the watchlist, the chain walker, the example file and step two's log classifier |
+| `retail/common/include/ra_wifi.h` | Step two: the `RA_LAUNCHER_WIFI` switch, the stage ladder, the verdict struct |
+| `retail/arm9/source/ra_wifi.c` | Step two on the ARM9: one IPC message, the log, the summary |
+| `retail/arm9/source/ra_wifi_verdict.c` | Reads how the chip arrived out of dsiwifi's log text. Host-tested |
+| `retail/arm7/source/ra_wifi7.c` | Step two on the ARM7: `installWifiFIFO()`, and where it goes |
+| `libs/dsiwifi` | The driver, a submodule, shared with `tools/wifiprobe/` |
 
 `RA_READER_ENABLED` in `ra.h` is the kill switch. Set it to `0` and the cardengine
 behaves exactly like upstream: no per-frame work, and no `IRQ_VCOUNT` forced on for
@@ -1044,14 +1240,20 @@ things to test. So the order is not "build the client":
 
 1. ~~**Outside the game entirely.**~~ **Done, and it passed — `tools/wifiprobe/`, stage 6
    of 6 on hardware.** See *The probe's answer* below.
-2. **The chip's state under our boot path.** Coming in through nds-bootstrap, is `WLANFIRM`
-   already uploaded? A WMI init that succeeds versus one that needs BMI plus an upload
-   distinguishes them. This is context **A**, the launcher — the same context the probe
-   already succeeded in, reached by a different boot path.
+2. **The chip's bring-up under our boot path** — **written, not yet run.**
+   `make RA_LAUNCHER_WIFI=1` links dsiwifi's ARM7 half into the launcher and brings the chip
+   up to the WPA2 handshake before any game exists. The question turned out not to be
+   `WLANFIRM` — the probe had already answered that, and dsiwifi relaunches the firmware
+   every time regardless — but whether the driver works as a guest of *nds-bootstrap's* ARM7,
+   which inherits SCFG rather than opening it and is already driving the SD controller one
+   instance below the WiFi SDIO block. See *Step two, wired* above.
 3. **The definitions block, filled from the network instead of by hand.** Once 2 passes, the
    launcher fetches a set and writes it where `ra_achievements.txt` is written today. That
    destination is already proven end to end on hardware: three real definitions came through
-   it and fired. So this step is transport plus `r=patch` parsing, and nothing new below it.
+   it and fired. So this step is transport plus `r=patch` parsing, and nothing new below it —
+   **except one thing step 2 turned up**: dsiwifi's lwip carries ~800 KB of static packet
+   pools and the launcher's ARM9 is linked into a 736 KB region, so this step starts by
+   deciding where the IP stack lives. Three options are listed under *Step two, wired*.
 4. **Only after those**, live submission from inside the game — context **B**, behind the
    VBlank hook as a non-blocking state machine, watching for ARM7 contention with the SD
    path. Queue-and-flush from the launcher (see #1g) makes this an optimisation rather than

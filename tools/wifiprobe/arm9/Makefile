@@ -17,7 +17,7 @@ include $(DEVKITARM)/ds_rules
 #---------------------------------------------------------------------------------
 BUILD    := build
 SOURCES  := source
-INCLUDES := include build ../include ../dsiwifi/include
+INCLUDES := include build ../include ../../../libs/dsiwifi/include
 DATA     := data
 GRAPHICS :=
 
@@ -35,13 +35,13 @@ LDFLAGS   = -specs=ds_arm9.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 #---------------------------------------------------------------------------------
 # any extra libraries we wish to link with the project
 #---------------------------------------------------------------------------------
-LIBS := $(CURDIR)/../../dsiwifi/lib/libdsiwifi9.a -lfat -lnds9
+LIBS := $(CURDIR)/../../../../libs/dsiwifi/lib/libdsiwifi9.a -lfat -lnds9
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS := $(LIBNDS) $(PORTLIBS) $(CURDIR)/../dsiwifi/lib
+LIBDIRS := $(LIBNDS) $(PORTLIBS) $(CURDIR)/../../../libs/dsiwifi/lib
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional
@@ -119,7 +119,7 @@ $(ARM9ELF) : $(OFILES) libs
 # implicit archive rule and fail as a confusing `ar` error instead of a missing
 # submodule.
 libs:
-	@[ -f $(CURDIR)/../../dsiwifi/lib/libdsiwifi9.a ] || { \
+	@[ -f $(CURDIR)/../../../../libs/dsiwifi/lib/libdsiwifi9.a ] || { \
 		echo "libdsiwifi9.a not built -- run make from tools/wifiprobe" >&2; \
 		exit 1; \
 	}

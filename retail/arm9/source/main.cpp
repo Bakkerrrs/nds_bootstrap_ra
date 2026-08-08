@@ -18,6 +18,7 @@
 #include "configuration.h"
 #include "nds_loader_arm9.h"
 #include "conf_sd.h"
+#include "ra_wifi.h"
 #include "version.h"
 
 #define REG_SCFG_EXT7 *(u32*)0x02FFFDF0
@@ -590,6 +591,17 @@ int main(int argc, char** argv) {
 	int status = loadFromSD(conf, argv[0]);
 	sdFound = (conf->sdFound && !conf->b4dsMode);
 	bootstrapOnFlashcard = conf->bootstrapOnFlashcard;
+
+#if RA_LAUNCHER_WIFI
+	/*
+	    Step two of the RA network ladder, and it never comes back -- a build with
+	    RA_LAUNCHER_WIFI on is a measurement, not a loader. Here rather than earlier because
+	    the log needs the card mounted, and here rather than later because the point is to
+	    run in the launcher, before a game exists to contend for the ARM7.
+	*/
+	myConsoleDemoInit();
+	raWifiProbe(sdFound);
+#endif
 
 	if (status == 0) {
 		status = runNdsFile(conf);

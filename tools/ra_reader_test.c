@@ -108,6 +108,214 @@ static u32 target = 0xDEADBEEF;
 static u32 targetPtr;
 static u32 targetPtrPtr;
 
+/*
+    ------------------------------------------------------------------------------------
+    Step two's log classifier.
+
+    Different subject from everything above -- the launcher rather than the cardengine --
+    and here rather than in a second runner for a plain reason: this file is the thing
+    docs/retroachievements.md tells you to run before anything else, and a check nobody
+    runs is not a check.
+
+    It earns its place the same way the example-file test does. raWifiVerdict reads how the
+    Atheros chip arrived out of dsiwifi's printf text, because the driver exposes none of
+    those facts any other way, and its failure mode is silent: a renamed string does not
+    break a build, it reports the wrong world after a play session. So the strings are
+    pinned here against the log a real console produced, and the runner greps the submodule
+    for the format strings besides.
+    ------------------------------------------------------------------------------------
+*/
+#define RA_LAUNCHER_WIFI 1
+#include "../retail/arm9/source/ra_wifi_verdict.c"
+
+/*
+    The recorded log, and only what was recorded.
+
+    Every line here is quoted verbatim from the first hardware run of tools/wifiprobe/ as
+    written down in docs/retroachievements.md. Nothing has been added to round it out --
+    which is why the expected stage below is FIRMWARE and not WMI: "fully initialized!"
+    certainly happened on that console, but it is not among the lines the document kept, and
+    a fixture that invents evidence is worse than a shorter one.
+*/
+static const char* const wifiLogCold[] = {
+	"Mfg 02010271 Cid 0d000001 (AR6014)",
+	"AR6014 needs firmware upload 0.",
+	"Reset cause: 00000002",
+	"BMI version: 2300006f",
+	"BMI finishing...",
+	"Launching!",
+	"Firmware 609c0202 ready, handshaking...",
+	"WPA2 Handshake 1/4:",
+	"WPA2 Handshake 3/4:",
+	"Added GTK 1",
+	"Done auth",
+	"Dev 04:03:d6:f9:36:52",
+	"AP 00:5f:67:e9:f5:70",
+	"IP 192.168.0.111",
+	"WMI_BSSINFO MuMiMo24 (WPA2-PSK)",
+	NULL,
+};
+
+static void wifi_feed_lines(raWifiVerdict* v, const char* const* lines) {
+	int i;
+
+	raWifiVerdictReset(v);
+	for (i = 0; lines[i]; i++) {
+		raWifiVerdictLine(v, lines[i]);
+	}
+}
+
+/*
+    Feed the same log the way the hardware delivers it: joined with newlines and cut into
+    59-character pieces, which is what wifi_ipcSendStringAlt() puts in a FIFO message.
+
+    This is the case the reassembly in raWifiVerdictChunk() exists for, and the one a
+    per-chunk matcher would fail: "Firmware 609c0202 ready, handshaking..." is 38
+    characters and the strings being matched are up to 21, so a cut in the wrong place
+    hides them. Asserting that the split feed and the line feed agree is the only way to
+    know the boundary is handled, and it is exactly the kind of bug that would otherwise
+    have been read as "the chip did not come up".
+*/
+static void wifi_feed_chunked(raWifiVerdict* v, const char* const* lines, int chunk) {
+	char joined[2048];
+	int  i;
+	size_t total = 0;
+
+	for (i = 0; lines[i]; i++) {
+		total += snprintf(joined + total, sizeof(joined) - total, "%s\n", lines[i]);
+	}
+
+	raWifiVerdictReset(v);
+	for (i = 0; (size_t)i < total; i += chunk) {
+		char piece[64];
+		int  n = (int)total - i < chunk ? (int)total - i : chunk;
+
+		memcpy(piece, joined + i, n);
+		piece[n] = 0;
+		raWifiVerdictChunk(v, piece);
+	}
+	raWifiVerdictFlush(v);
+}
+
+static void test_wifi_verdict(void) {
+	raWifiVerdict v;
+
+	printf("\nthe recorded hardware log reads as a cold start\n");
+	wifi_feed_lines(&v, wifiLogCold);
+	CHECK(v.chipSeen == 1);
+	CHECK(strcmp(v.chip, "AR6014") == 0);
+	CHECK(v.coldStart == 1);
+	CHECK(v.bmiSeen == 1);
+	CHECK(v.firmwareLaunched == 1);
+	CHECK(v.firmwareReady == 1);
+	CHECK(v.mboxAllocFailed == 0);
+	CHECK(strcmp(raWifiVerdictArrival(&v), "cold") == 0);
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_FIRMWARE);
+
+	/*
+	    Two chunk sizes, because an off-by-one in the reassembly would survive one of them.
+	    59 is what dsiwifi actually sends; 7 is small enough to cut every string in the
+	    fixture at least once.
+	*/
+	printf("\nthe same log split into FIFO chunks reads identically\n");
+	{
+		raWifiVerdict whole, split;
+		int           chunk;
+
+		wifi_feed_lines(&whole, wifiLogCold);
+
+		for (chunk = 59; chunk >= 7; chunk -= 52) {
+			wifi_feed_chunked(&split, wifiLogCold, chunk);
+			printf("  chunk %d\n", chunk);
+			CHECK(split.chipSeen         == whole.chipSeen);
+			CHECK(split.coldStart        == whole.coldStart);
+			CHECK(split.bmiSeen          == whole.bmiSeen);
+			CHECK(split.firmwareLaunched == whole.firmwareLaunched);
+			CHECK(split.firmwareReady    == whole.firmwareReady);
+			CHECK(split.wmiReady         == whole.wmiReady);
+			CHECK(split.mboxAllocFailed  == whole.mboxAllocFailed);
+			CHECK(split.lines            == whole.lines);
+			CHECK(strcmp(split.chip, whole.chip) == 0);
+			CHECK(raWifiVerdictStage(&split) == raWifiVerdictStage(&whole));
+		}
+	}
+
+	/*
+	    A warm arrival is the same log without one line, and it has to come out differently
+	    or the classifier is not distinguishing anything. Constructed rather than recorded --
+	    this console has never produced it -- and it is the reading step two exists to look
+	    for, since a warm chip under our boot path would be the one real difference from the
+	    control.
+	*/
+	printf("\nwarm and cold are told apart by the one line that says so\n");
+	{
+		const char* const warm[] = {
+			"Mfg 02010271 Cid 0d000001 (AR6014)",
+			"Reset cause: 00000002",
+			"BMI version: 2300006f",
+			"Launching!",
+			"Firmware 609c0202 ready, handshaking...",
+			"AR6014 fully initialized!",
+			NULL,
+		};
+
+		wifi_feed_lines(&v, warm);
+		CHECK(v.coldStart == 0);
+		CHECK(strcmp(raWifiVerdictArrival(&v), "warm") == 0);
+		/*
+		    And this is the line that lets the ladder reach WMI. Taken from
+		    libs/dsiwifi/arm_iop/source/wifi_card.twl.c, where it is printed as
+		    "%s fully initialized!" once wmi_is_ready() returns.
+		*/
+		CHECK(v.wmiReady == 1);
+		CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_WMI);
+	}
+
+	/*
+	    Silence has to be distinguishable from failure, which is the whole reason the ladder
+	    starts at zero rather than at one. An ARM7 that never answered and an ARM7 whose chip
+	    refused look identical from the ARM9 unless stage 0 means something.
+	*/
+	printf("\nsilence is stage 0, not a failed chip\n");
+	raWifiVerdictReset(&v);
+	raWifiVerdictFlush(&v);
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_START);
+	CHECK(strcmp(raWifiVerdictArrival(&v), "never answered") == 0);
+	CHECK(v.lines == 0);
+
+	/*
+	    The two rungs the ARM7 reports over IPC rather than in text, so the ladder's top is
+	    not decided by string matching at all.
+	*/
+	printf("\nassociation and link-ready come from IPC, not from the log\n");
+	wifi_feed_lines(&v, wifiLogCold);
+	v.wmiReady = 1;
+	v.associated = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_ASSOCIATED);
+	v.linkReady = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_READY);
+
+	/*
+	    A chip name it cannot parse must leave the field empty rather than half-filled: the
+	    summary line on screen is the only place this value is used, and one that says
+	    nothing is better than one that says something wrong.
+	*/
+	printf("\nan unparseable chip line reports no chip, not a wrong one\n");
+	{
+		const char* const odd[] = {
+			"Mfg 02010271 Cid 0d000001 AR6014",     /* no parentheses */
+			"Mfg 02010271 Cid 0d000001 (",          /* no closing one */
+			"Mfg ()",                               /* empty */
+			NULL,
+		};
+
+		wifi_feed_lines(&v, odd);
+		CHECK(v.chipSeen == 1);
+		CHECK(v.chip[0] == 0);
+		CHECK(strcmp(raWifiVerdictArrival(&v), "warm") == 0);
+	}
+}
+
 int main(void) {
 	u32 offsets[RA_CHAIN_MAX];
 	int i, slot;
@@ -965,6 +1173,7 @@ int main(void) {
 		}
 	}
 
+	test_wifi_verdict();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",
 	       failures, failures == 1 ? "" : "s");

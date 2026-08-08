@@ -15,11 +15,17 @@ git submodule update --init --recursive
 make -C tools/wifiprobe
 ```
 
-Produces `tools/wifiprobe/wifiprobe.nds`. It builds `dsiwifi` from the submodule into its
-own tree, so nothing has to be installed into `$DEVKITPRO` first.
+Produces `tools/wifiprobe/wifiprobe.nds`. It builds `dsiwifi` from the submodule in
+`libs/dsiwifi` into that tree, so nothing has to be installed into `$DEVKITPRO` first.
 
 The top-level `make package-nightly` does not touch this, and this does not touch
 nds-bootstrap. A control that shares code with the thing it is controlling is not one.
+
+The one thing they now share is `libs/dsiwifi`, because step two of the ladder links its
+ARM7 half into nds-bootstrap's launcher. That costs the control nothing: what must not be
+shared is *nds-bootstrap's* code, so that a failure here cannot be caused by it. The driver
+being the same driver is the point — if the two runs disagree, the difference is
+nds-bootstrap, which is the whole question step two asks.
 
 ## Running it
 

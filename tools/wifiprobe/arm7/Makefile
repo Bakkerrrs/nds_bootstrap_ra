@@ -16,8 +16,8 @@ include $(DEVKITARM)/ds_rules
 #---------------------------------------------------------------------------------
 BUILD    := build
 SOURCES  := source
-INCLUDES := include build ../include ../dsiwifi/include \
-            ../dsiwifi/arm_iop/source ../dsiwifi/common/source
+INCLUDES := include build ../include ../../../libs/dsiwifi/include \
+            ../../../libs/dsiwifi/arm_iop/source ../../../libs/dsiwifi/common/source
 DATA     :=
 
 #---------------------------------------------------------------------------------
@@ -31,13 +31,13 @@ CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS  := -g $(ARCH)
 LDFLAGS   = -specs=ds_arm7.specs -g $(ARCH) -Wl,--nmagic -Wl,-Map,$(notdir $*).map
 
-LIBS := $(CURDIR)/../../dsiwifi/lib/libdsiwifi7.a -lnds7
+LIBS := $(CURDIR)/../../../../libs/dsiwifi/lib/libdsiwifi7.a -lnds7
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(LIBNDS) $(CURDIR)/../dsiwifi/lib/
+LIBDIRS	:= $(LIBNDS) $(CURDIR)/../../../libs/dsiwifi/lib/
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional
@@ -114,7 +114,7 @@ $(ARM7ELF) : $(OFILES) libs
 # implicit archive rule and fail as a confusing `ar` error instead of a missing
 # submodule.
 libs:
-	@[ -f $(CURDIR)/../../dsiwifi/lib/libdsiwifi7.a ] || { \
+	@[ -f $(CURDIR)/../../../../libs/dsiwifi/lib/libdsiwifi7.a ] || { \
 		echo "libdsiwifi7.a not built -- run make from tools/wifiprobe" >&2; \
 		exit 1; \
 	}
