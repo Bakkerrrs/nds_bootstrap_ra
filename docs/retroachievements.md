@@ -824,17 +824,19 @@ Without this the launcher cannot ask the server *which* set to fetch. It is the 
 step 3 that needs no password, and the only one whose correctness is a single number that can
 be checked against RetroAchievements' own site rather than by playing.
 
-**Built, host-verified, and not yet run on hardware.** The probe now logs the hash of the ROM
-it was pointed at, before it touches the network.
+**Done, and verified against the server's own database.** The probe logs the hash of the ROM it
+was pointed at, before it touches the network, and for Super Mario 64 DS it matches what
+RetroAchievements has.
 
 #### rcheevos defines it; we had to implement it anyway
 
 `rc_hash_nintendo_ds()` is already in the vendored submodule, and the first version of this
 simply called it. Then it got measured. It allocates `max(0xA00, arm9_size, arm7_size)` in
-**one block** so it can hash each region from memory — **353,164 bytes** for nds-bootstrap's
-own `.nds`, and a real DS game is commonly larger. The launcher's ARM9 has about **352 K of
-heap before lwip and 184 K after**. It does not fit even in the best case, and no reordering
-of the probe would have saved it.
+**one block** so it can hash each region from memory — 353,164 bytes for nds-bootstrap's own
+`.nds`, 382,212 for a real game. That allocation succeeds and is exactly the problem: the
+launcher's heap is not bounded by anything useful, so a block that size walks straight over the
+boot images it has already written. See *The heap took three attempts to report* below, which is
+where that was finally understood.
 
 So `ra_hash.c` streams the same four ranges — 352 bytes of header, the ARM9 code, the ARM7
 code, 2,560 bytes of zero-padded icon block, plus the 512-byte SuperCard skip — through one
@@ -870,28 +872,25 @@ arm9 / arm7      382212 / 150308 bytes
 would malloc     382212 bytes
 ```
 
-Which settles the design decision with a measurement rather than an inference. **382,212 bytes
-in one block, against 352,352 free before lwip and 184,528 after** — it does not fit even at
-the most favourable moment in the launcher's life, by 30 K. nds-bootstrap's own `.nds` needed
-353,164 and was already over; a real game is 30 K worse. Calling `rc_hash_nintendo_ds()` here
-was never going to work, and the streaming implementation is a requirement rather than a
-precaution.
+**382,212 bytes in one block** — and what that number means took two further attempts to get
+right, which is its own section below. The short version: it would have allocated fine, because
+there are 12.8 MB behind `fake_heap_end`, and then overwritten the launcher's own boot images by
+294 K. Streaming is a requirement; the mechanism is not the one first written here.
 
-**And the ROM is the wrong dump, which is a finding about the test setup and not the code.** The
-file is `... Super Mario 64 DS (Europe) ... (patched).nds`. An AP patch rewrites the ARM9
-binary, and the ARM9 binary is most of what the hash covers — so this hash is almost certainly
-not the one RetroAchievements has, and `r=patch` would answer "unknown game" for a reason that
-has nothing to do with 3b being correct.
+**And the hash is the one RetroAchievements has**, confirmed against the set's page.
 
-That matters because it is exactly the trap this game was chosen to avoid: the set's notes say
-*"This Real Set has ONLY one ROM. It's EU ROM"*, and the whole point was that the right dump can
-be settled by hash before the console is switched on. Three rounds were spent on *Extreme 2*
-learning that lesson.
+Worth recording that this was doubted on the wrong grounds. The file is named
+`... Super Mario 64 DS (Europe) ... (patched).nds`, and the reasoning was that an AP patch
+rewrites the ARM9 binary while the ARM9 binary is most of what the hash covers — so the hash
+would not match, and `r=patch` would answer "unknown game" for a reason unrelated to 3b. That
+inference was wrong: this dump is patched *outside* the four hashed ranges, so it boots patched
+and still hashes as the supported ROM.
 
-The fix is not a different game, it is a different file: **nds-bootstrap applies AP patches at
-run time**, which is what `apPatchPath` and the whole `apfix` tree are for. So the clean EU dump
-is the one to point it at — it boots identically and it is the file the set is keyed to. Worth
-knowing before 3d rather than during it.
+The general caution survives — a patch that touched the ARM9 binary would change the hash, and
+nds-bootstrap applies AP patches at run time anyway, so a pre-patched file is never required.
+But for this ROM the question is settled, and **3b is verified against the server's own database
+rather than only against rcheevos.** That is the one check no amount of local testing could have
+produced.
 
 #### The heap took three attempts to report, and the truth is a hazard rather than a number
 
