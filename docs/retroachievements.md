@@ -52,9 +52,10 @@ Confirmed on hardware, in order of when each was settled:
    over plain HTTP from this exact 3DS, stage 6 of 6.
 
 6. **WiFi inside nds-bootstrap's launcher** — step 2 of the ladder, `reached stage 5 of 5` on
-   a 3DS. Chip, firmware, WMI, association and the WPA2 handshake, with nds-bootstrap's own
-   ARM7 rather than the libnds template. Read off the screen: the log was lost to a bug of
-   ours, so the detail still has to be re-run. See *Step two passed on hardware* below.
+   a 3DS: chip, firmware, WMI, association and the WPA2 handshake, on nds-bootstrap's own
+   ARM7 rather than the libnds template. The bring-up is **identical to the standalone
+   control, value for value**, and the SCFG the launcher inherits is the exact word the probe
+   writes by hand. Log at `docs/logs/ra_wifi_launcher-3ds.log`.
 
 Everything from the game's RAM up to a fired trigger is done, and the network now comes up in
 the launcher too. **So open question #1 no longer has an unknown in front of it — only work.**
@@ -91,9 +92,8 @@ reaches a usable link — so what is in front of step 3 is a decision, not an un
 lwip does not fit the launcher's link region as configured, and *Step two, wired* has the
 number and the three options.
 
-One cheap thing is owed first: re-run `RA_LAUNCHER_WIFI=1` and send `/ra_wifi_launcher.log`.
-The first two runs reached stage 5 but wrote a zero-byte log, so *how* the chip came up — warm
-or cold, and identically to the control or not — is still unread.
+Nothing is owed on step 2 any more: the log is in at `docs/logs/ra_wifi_launcher-3ds.log`, and
+`tools/ra_reader_test.sh` reads that file rather than a transcription of it.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -463,26 +463,68 @@ line it narrates is written verbatim to `/ra_wifi_launcher.log` next to the prob
 Built on the pinned toolchain — devkitARM r65 / gcc 14.2.0 / libnds 1.8.0, from
 `devkitpro/devkitarm:20241104`, the same pin upstream CI uses.
 
-### Step two passed on hardware, and the log of it was lost to a bug in the logging
+### Step two passed on hardware, and the log says the boot path changes nothing
 
-**`reached stage 5 of 5`, read off the screen on a 3DS, twice.** All five rungs: the chip
-answered on SDIO, the firmware launched, WMI came up, it associated to the AP, and the WPA2
-four-way handshake completed with the GTK installed — **inside nds-bootstrap's launcher, with
-nds-bootstrap's own ARM7**. Two things follow immediately, and they were the two open
-questions of step 2:
+**`reached stage 5 of 5` on a 3DS.** All five rungs: the chip answered on SDIO, the firmware
+launched, WMI came up, it associated to the AP, and the WPA2 four-way handshake completed with
+the GTK installed — **inside nds-bootstrap's launcher, on nds-bootstrap's own ARM7**. The full
+log is committed at `docs/logs/ra_wifi_launcher-3ds.log`.
 
-- **The SCFG state nds-bootstrap inherits does expose the WiFi SDIO block.** The launcher
-  writes SCFG nowhere, and the concern was that the extended TWL I/O might not be open on the
-  path the loader arrives by. It is.
-- **Sharing the ARM7 with `my_sdmmc` and NDMA slot 0 does not stop the driver.** The
-  neighbouring-controller contention argued about under *#1d* did not bite in the launcher.
+**The register that the whole question hung on:**
+
+```
+SCFG_EXT  ARM7   93FFFB06
+SCFG_EXT7 BIT(18) set
+```
+
+`0x93FFFB06` is the **exact value `tools/wifiprobe/` writes into `REG_SCFG_EXT` itself**. The
+launcher writes SCFG nowhere and inherits whatever launched it, and the concern was that the
+extended TWL I/O might not be open on that path — so the WiFi SDIO block might not be on the
+bus at all. It is open, to the bit, in both contexts. That concern is not mitigated; it is
+gone, and by measurement rather than by inference.
+
+**And the bring-up is identical to the control, value for value.** Every number the probe's
+run recorded appears unchanged in the launcher's:
+
+| | Control (`wifiprobe`) | Launcher (`RA_LAUNCHER_WIFI=1`) |
+| --- | --- | --- |
+| chip | `Mfg 02010271 Cid 0d000001 (AR6014)` | identical |
+| arrival | `AR6014 needs firmware upload 0.` | identical — **cold** |
+| reset cause | `00000002` | identical |
+| BMI version | `2300006f` | identical |
+| firmware | `609c0202 ready, handshaking...` | identical |
+| device MAC | `04:03:d6:f9:36:52` | identical |
+| AP | `MuMiMo24` / `00:5f:67:e9:f5:70` / `G TKIP P AES A PSK` | identical |
+| handshake | `1/4` … `3/4` … `Added GTK 1` … `Done auth` | identical |
+
+So the answer to the question step 2 was posed to ask — *does the chip arrive in a different
+state under nds-bootstrap's boot path* — is **no, in every observable respect**. It arrives
+cold both times, and `needs firmware upload 0` is the one line that says so.
+
+Two honest limits on that comparison. The control column is the **excerpt recorded in this
+document**, not a fresh full log — the probe was re-run but its log never made it back, so the
+diff is one-sided: every value present in both matches, and lines the excerpt never captured
+cannot be compared. And the launcher's log carries detail the excerpt does not (`Resetting
+SDIO...`, `Rev: 11`, `HTC_MSG_READY`, `WMI_REG_DOMAIN_EVENT 80000188`, a 13-channel list).
+Those are not differences in behaviour; they are lines nobody wrote down the first time.
+
+**There is no IP address in the log, and that is correct.** DHCP is lwip's, lwip is the ARM9's,
+and this side links no lwip — the ladder stopped exactly where it was designed to. The probe's
+`IP 192.168.0.111` has no counterpart here by construction, not by failure.
+
+`log lines 36`, and no dropped-characters warning, so the 16 K capture buffer and the FIFO
+reassembly both held on a real run.
+
+**Sharing the ARM7 also turned out not to matter.** The driver ran alongside `my_sdmmc` on the
+neighbouring controller with NDMA slot 0 already taken, and reached a usable WPA2 link. The
+contention argued about under *#1d* does not bite in the launcher.
 
 That is the whole of what the ARM7 can do, working as a guest. **Live unlocks are reachable
 from context A**, and open question #1 no longer has an unknown in front of it — only work.
 
-**And the run still has to be repeated, because the log came back zero bytes.** Both times.
-The cause is entirely ours and it is worth writing down because the reasoning that produced
-it looked careful:
+#### The first two runs of this reached stage 5 and wrote a zero-byte log
+
+Worth keeping, because the reasoning that produced it looked careful:
 
 > `fflush()` does not make a file real on libfat. It pushes newlib's stdio buffer down into
 > libfat's `write()`, which does write the data clusters — but a FAT file's **length lives in
@@ -504,11 +546,11 @@ that moment running a WiFi stack. It got away with it twice. The handler is now 
 into a 16 K buffer and the main loop does all the I/O, which is both safer and the right
 shape for step 4, where the same code runs next to a game.
 
-So the reading to send is still `/ra_wifi_launcher.log`, and now there will be one:
-**send the file, not a photograph.** The screen shows the same text, but the line that
-explains a failure is never the last one, and the file is meant to be diffed against
-`/wifiprobe.log` from the step-1 run. That diff is what turns "stage 5" into an account of
-*how* the chip came up — warm or cold, and identically to the control or not.
+With both fixed, the third run produced the log at the top of this section — 36 lines and a
+summary, which is what turned "stage 5" from a screen reading into an account of *how* the
+chip came up. Two hardware runs were spent on a bug in the instrument rather than in the
+thing being measured, which is the cost of writing the log path as an afterthought to the
+probe it serves.
 
 #### What it actually asks, which is not quite what the plan said
 
@@ -520,10 +562,11 @@ cause`, `BMI version` and `Launching!` prove nothing about how the chip arrived.
 line does — `%s needs firmware upload %lx`, printed only when the host-interest word at
 `+0x58` reads zero — and on this console it was printed.
 
-What is genuinely untested, and what this build measures, is whether the same driver comes up
-as a **guest of nds-bootstrap's ARM7** rather than of the libnds template. The launcher is
-context A, but its ARM7 is not an ordinary one, and the differences all bear on the WiFi SDIO
-block:
+What was genuinely untested, and what this build was built to measure, is whether the same
+driver comes up as a **guest of nds-bootstrap's ARM7** rather than of the libnds template. The
+launcher is context A, but its ARM7 is not an ordinary one, and the differences all bear on the
+WiFi SDIO block. Each row is why the build exists; the log above is the answer to all of them,
+which is **none of them mattered**:
 
 | | The probe's ARM7 | nds-bootstrap's launcher ARM7 |
 | --- | --- | --- |
@@ -533,11 +576,12 @@ block:
 | Timer 3 | free | free, but dsiwifi claims it on both CPUs |
 | Idle loop | a normal `while` loop | `swiIntrWait(0, IRQ_FIFO_NOT_EMPTY)` |
 
-The SCFG row is the one that can decide the run on its own, so the log opens with
+The SCFG row is the one that could decide the run on its own, so the log opens with
 `SCFG_EXT` from both CPUs before anything touches the chip. **It reports and does not
-correct.** Opening SCFG here would make this a measurement of a boot path nds-bootstrap does
-not have; if the bit is closed, that *is* the finding, and it is a finding with an obvious
-next move rather than a puzzle.
+correct.** Opening SCFG here would have made this a measurement of a boot path nds-bootstrap
+does not have; a closed bit would have *been* the finding. It came back `93FFFB06` — the value
+the probe writes by hand — which is a better answer than any repair would have been, because
+it means there is nothing to repair.
 
 #### The ladder stops at the handshake, and that is where the question ends
 
@@ -557,12 +601,12 @@ including the WPA2 handshake happens **on the ARM7 inside dsiwifi**; sockets are
 ARM9, and lwip is step 3. So the ARM9 side of this probe links no library at all, only
 dsiwifi's IPC header — the whole thing is four of our own files and a Makefile switch.
 
-**That split is not tidiness, and here is the number behind it.** dsiwifi configures lwip
-with `PBUF_POOL_SIZE 512` and `MEMP_MEM_MALLOC 0`, so the pools are static arrays: at lwip's
-default `PBUF_POOL_BUFSIZE` for a 1460-byte MSS that is 512 × 1,516 ≈ **760 KB in the pbuf
-pool alone**, before the other `MEMP_NUM_*` arrays. The launcher's ARM9 is linked by
-`retail/arm9/ds_arm9_ndsbs.mem` into `0x02280000`–`0x02338000` — **736 KB total**, code and
-heap included, and it cannot simply grow: `IPS_LOCATION` and `IMAGES_LOCATION` sit at
+**That split is not tidiness, and here is the number behind it** — measured from the linked
+archive two sections down, not estimated. dsiwifi configures lwip with `PBUF_POOL_SIZE 512`
+and `MEMP_MEM_MALLOC 0`, so the pools are static arrays, and the pbuf pool alone is **784,387
+bytes** of `.bss`. The launcher's ARM9 is linked by
+`retail/arm9/ds_arm9_ndsbs.mem` into `0x02280000`–`0x02338000` — **753,664 bytes total**, code
+and heap included, and it cannot simply grow: `IPS_LOCATION` and `IMAGES_LOCATION` sit at
 `0x02337000` and `0x02338000`. So lwip as
 dsiwifi ships it **does not fit in the launcher today**, and step 3 has to answer that before
 it can fetch anything. Three options, in order of appeal: shrink `PBUF_POOL_SIZE` (a 1500-byte
@@ -745,9 +789,11 @@ the test fails rather than this table going quietly stale.
   a usable WPA2 link *inside nds-bootstrap's launcher*, stage 5 of 5. What is untested is
   context **B**, inside the game, where the ARM7 belongs to the game — and #1g is the argument
   for why the plan does not need it. See *#1f — the rest of the ladder*.
-- **Step 2 passed, but its log has never been read.** Stage 5 of 5 twice, off the screen; the
-  file was zero bytes both times. Everything the summary would have said about *how* the chip
-  arrived is still unknown, and that is one flash away.
+- **The control has never been re-run in full.** Step 2's log is complete and matches every
+  value the probe's *recorded excerpt* holds, but the probe's own log from a fresh run never
+  came back, so the diff is one-sided. Cheap to close if it ever matters: run
+  `tools/wifiprobe/` and keep `/wifiprobe.log` next to
+  `docs/logs/ra_wifi_launcher-3ds.log`.
 - **Where the IP stack lives is undecided**, and step 3 cannot start without deciding it.
   Measured: lwip's pbuf pool is 784,387 bytes of `.bss` and the launcher's ARM9 link region is
   753,664 bytes in total. Shrinking `PBUF_POOL_SIZE` is the first thing to try.
@@ -904,6 +950,7 @@ encoding) and it looked as though nothing was being read. Liveness is proved by
 | `retail/arm9/source/ra_wifi.c` | Step two on the ARM9: one IPC message, the log, the summary |
 | `retail/arm9/source/ra_wifi_verdict.c` | Reads how the chip arrived out of dsiwifi's log text. Host-tested |
 | `retail/arm7/source/ra_wifi7.c` | Step two on the ARM7: `installWifiFIFO()`, and where it goes |
+| `docs/logs/ra_wifi_launcher-3ds.log` | The step-two run that passed. Evidence, and the host test's fixture |
 | `libs/dsiwifi` | The driver, a submodule, shared with `tools/wifiprobe/` |
 
 `RA_READER_ENABLED` in `ra.h` is the kill switch. Set it to `0` and the cardengine
@@ -1339,7 +1386,8 @@ things to test. So the order is not "build the client":
 
 1. ~~**Outside the game entirely.**~~ **Done, and it passed — `tools/wifiprobe/`, stage 6
    of 6 on hardware.** See *The probe's answer* below.
-2. **The chip's bring-up under our boot path** — **passed, stage 5 of 5 on hardware.**
+2. **The chip's bring-up under our boot path** — **passed, stage 5 of 5, and identical to the
+   control.**
    `make RA_LAUNCHER_WIFI=1` links dsiwifi's ARM7 half into the launcher and brings the chip
    up to the WPA2 handshake before any game exists. The question turned out not to be
    `WLANFIRM` — the probe had already answered that, and dsiwifi relaunches the firmware

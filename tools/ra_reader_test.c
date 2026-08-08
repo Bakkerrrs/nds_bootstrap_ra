@@ -129,32 +129,65 @@ static u32 targetPtrPtr;
 #include "../retail/arm9/source/ra_wifi_verdict.c"
 
 /*
-    The recorded log, and only what was recorded.
+    The log a 3DS produced, read off disk rather than transcribed.
 
-    Every line here is quoted verbatim from the first hardware run of tools/wifiprobe/ as
-    written down in docs/retroachievements.md. Nothing has been added to round it out --
-    which is why the expected stage below is FIRMWARE and not WMI: "fully initialized!"
-    certainly happened on that console, but it is not among the lines the document kept, and
-    a fixture that invents evidence is worse than a shorter one.
+    docs/logs/ra_wifi_launcher-3ds.log is the real artifact from the run that reached stage 5
+    of 5 -- dsiwifi's narration verbatim, plus the summary the console itself printed at the
+    bottom. Reading the file is the point: a fixture typed into this file could drift from the
+    evidence it claims to be, and the same argument already applies to
+    tools/ra_achievements.example.txt further down.
+
+    It also means the test can check something a synthetic fixture cannot: that this
+    classifier, run on the host, reproduces the verdict the console printed from the same
+    bytes. The summary block in the file says `arrived cold` and `chip AR6014`, and the
+    assertions below derive exactly that from the narration above it.
 */
-static const char* const wifiLogCold[] = {
-	"Mfg 02010271 Cid 0d000001 (AR6014)",
-	"AR6014 needs firmware upload 0.",
-	"Reset cause: 00000002",
-	"BMI version: 2300006f",
-	"BMI finishing...",
-	"Launching!",
-	"Firmware 609c0202 ready, handshaking...",
-	"WPA2 Handshake 1/4:",
-	"WPA2 Handshake 3/4:",
-	"Added GTK 1",
-	"Done auth",
-	"Dev 04:03:d6:f9:36:52",
-	"AP 00:5f:67:e9:f5:70",
-	"IP 192.168.0.111",
-	"WMI_BSSINFO MuMiMo24 (WPA2-PSK)",
-	NULL,
-};
+#define WIFI_LOG_PATH "docs/logs/ra_wifi_launcher-3ds.log"
+
+static char  wifiLogText[8192];
+static size_t wifiLogLength;
+
+static int wifi_load_log(void) {
+	FILE* f = fopen(WIFI_LOG_PATH, "rb");
+
+	if (!f) {
+		printf("  cannot open %s -- run from the repository root\n", WIFI_LOG_PATH);
+		failures++;
+		return 0;
+	}
+	wifiLogLength = fread(wifiLogText, 1, sizeof(wifiLogText) - 1, f);
+	fclose(f);
+	wifiLogText[wifiLogLength] = 0;
+	return wifiLogLength > 0;
+}
+
+/*
+    Feed the log the way the hardware delivers it: cut into 59-character pieces, which is
+    what wifi_ipcSendStringAlt() puts in a single FIFO message.
+
+    This is the case the reassembly in raWifiVerdictChunk() exists for, and the one a
+    per-chunk matcher would fail: "Firmware 609c0202 ready, handshaking..." is 38 characters
+    and the strings being matched are up to 21, so a cut in the wrong place hides them
+    completely. A matcher without reassembly passes every other test in this file and then
+    reports that the chip never came up.
+*/
+static void wifi_feed_chunked(raWifiVerdict* v, int chunk) {
+	size_t i;
+
+	raWifiVerdictReset(v);
+	for (i = 0; i < wifiLogLength; i += chunk) {
+		char   piece[128];
+		size_t n = wifiLogLength - i;
+
+		if (n > (size_t)chunk) {
+			n = (size_t)chunk;
+		}
+		memcpy(piece, wifiLogText + i, n);
+		piece[n] = 0;
+		raWifiVerdictChunk(v, piece);
+	}
+	raWifiVerdictFlush(v);
+}
 
 static void wifi_feed_lines(raWifiVerdict* v, const char* const* lines) {
 	int i;
@@ -165,68 +198,56 @@ static void wifi_feed_lines(raWifiVerdict* v, const char* const* lines) {
 	}
 }
 
-/*
-    Feed the same log the way the hardware delivers it: joined with newlines and cut into
-    59-character pieces, which is what wifi_ipcSendStringAlt() puts in a FIFO message.
-
-    This is the case the reassembly in raWifiVerdictChunk() exists for, and the one a
-    per-chunk matcher would fail: "Firmware 609c0202 ready, handshaking..." is 38
-    characters and the strings being matched are up to 21, so a cut in the wrong place
-    hides them. Asserting that the split feed and the line feed agree is the only way to
-    know the boundary is handled, and it is exactly the kind of bug that would otherwise
-    have been read as "the chip did not come up".
-*/
-static void wifi_feed_chunked(raWifiVerdict* v, const char* const* lines, int chunk) {
-	char joined[2048];
-	int  i;
-	size_t total = 0;
-
-	for (i = 0; lines[i]; i++) {
-		total += snprintf(joined + total, sizeof(joined) - total, "%s\n", lines[i]);
-	}
-
-	raWifiVerdictReset(v);
-	for (i = 0; (size_t)i < total; i += chunk) {
-		char piece[64];
-		int  n = (int)total - i < chunk ? (int)total - i : chunk;
-
-		memcpy(piece, joined + i, n);
-		piece[n] = 0;
-		raWifiVerdictChunk(v, piece);
-	}
-	raWifiVerdictFlush(v);
-}
-
 static void test_wifi_verdict(void) {
 	raWifiVerdict v;
 
-	printf("\nthe recorded hardware log reads as a cold start\n");
-	wifi_feed_lines(&v, wifiLogCold);
+	if (!wifi_load_log()) {
+		return;
+	}
+
+	/*
+	    The 3DS log, classified on the host, must come out the way the console said it did.
+
+	    The stage stops at WMI rather than at 5 because rungs 4 and 5 -- associated, and link
+	    ready -- arrive as IPC messages and never appear in the text at all. That split is
+	    deliberate: the top of the ladder is not decided by string matching.
+	*/
+	printf("\nthe 3DS log classifies as the console reported it\n");
+	wifi_feed_chunked(&v, 59);
 	CHECK(v.chipSeen == 1);
 	CHECK(strcmp(v.chip, "AR6014") == 0);
 	CHECK(v.coldStart == 1);
 	CHECK(v.bmiSeen == 1);
 	CHECK(v.firmwareLaunched == 1);
 	CHECK(v.firmwareReady == 1);
+	CHECK(v.wmiReady == 1);
 	CHECK(v.mboxAllocFailed == 0);
 	CHECK(strcmp(raWifiVerdictArrival(&v), "cold") == 0);
-	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_FIRMWARE);
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_WMI);
+
+	/* And the summary the console printed is in the file, saying the same two things. */
+	CHECK(strstr(wifiLogText, "arrived          cold") != NULL);
+	CHECK(strstr(wifiLogText, "chip             AR6014") != NULL);
+	CHECK(strstr(wifiLogText, "reached stage 5 of 5") != NULL);
 
 	/*
-	    Two chunk sizes, because an off-by-one in the reassembly would survive one of them.
-	    59 is what dsiwifi actually sends; 7 is small enough to cut every string in the
-	    fixture at least once.
+	    Several chunk sizes, because an off-by-one in the reassembly would survive one of
+	    them. 59 is what dsiwifi actually sends; the small ones cut every matched string at
+	    least once, and 1 is the degenerate case where no chunk can ever contain a match.
 	*/
 	printf("\nthe same log split into FIFO chunks reads identically\n");
 	{
 		raWifiVerdict whole, split;
-		int           chunk;
+		const int     sizes[] = { 59, 23, 7, 1 };
+		unsigned      i;
 
-		wifi_feed_lines(&whole, wifiLogCold);
+		raWifiVerdictReset(&whole);
+		raWifiVerdictChunk(&whole, wifiLogText);
+		raWifiVerdictFlush(&whole);
 
-		for (chunk = 59; chunk >= 7; chunk -= 52) {
-			wifi_feed_chunked(&split, wifiLogCold, chunk);
-			printf("  chunk %d\n", chunk);
+		for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+			wifi_feed_chunked(&split, sizes[i]);
+			printf("  chunk %d\n", sizes[i]);
 			CHECK(split.chipSeen         == whole.chipSeen);
 			CHECK(split.coldStart        == whole.coldStart);
 			CHECK(split.bmiSeen          == whole.bmiSeen);
@@ -288,8 +309,8 @@ static void test_wifi_verdict(void) {
 	    not decided by string matching at all.
 	*/
 	printf("\nassociation and link-ready come from IPC, not from the log\n");
-	wifi_feed_lines(&v, wifiLogCold);
-	v.wmiReady = 1;
+	wifi_feed_chunked(&v, 59);
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_WMI);
 	v.associated = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_ASSOCIATED);
 	v.linkReady = 1;
