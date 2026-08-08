@@ -1,8 +1,8 @@
 # Definitions and watches, one per line. Copy to
 #   sd:/_nds/nds-bootstrap/ra_achievements.txt
 #
-# '#' comments and blank lines are ignored. Up to 8 lines are used, and only the first four
-# watches reach the snapshot's results[] at +0x30.
+# '#' comments and blank lines are ignored. Only the first four watches reach the
+# snapshot's results[] at +0x30.
 #
 #   an achievement:  RetroAchievements memaddr syntax, activated in the runtime
 #   a watch:         W:<address>:<size>[:<offset>...]     pointers are DS addresses
@@ -12,48 +12,46 @@
 # here is 0x02159164 on the console.
 #
 # ---------------------------------------------------------------------------------------
-# These are written from the published code notes for SPACE INVADERS EXTREME 2 (Nintendo
-# DS), game 1741. The first game has no achievement set, and running these against it is
-# what produced the previous result: four documented addresses reading zero during active
-# play, including a word the notes describe as a pointer. Three zeros can be an uneventful
-# moment; a null pointer during gameplay cannot. It was the right memory map for the wrong
-# cartridge.
+# A CANARY THAT ACTUALLY ANSWERS, THIS TIME
 #
-# The masking fix that came out of that round stays and was independently correct: the
-# chain's status went BAD_TARGET -> OK, and it resolved to 0x0200009C, main RAM's base plus
-# the offset, which is exactly where a null pointer lands. The walker was right; the data
-# was somewhere else.
+# The previous round used Extreme Mode Unlocked as the canary and it read zero -- which
+# proved nothing, because that value comes from saved data and the reading was taken on a
+# freshly downloaded ROM with no save, on the title screen. A test that returns the same
+# answer whether the hypothesis is true or false is not a test. That was a design mistake,
+# not a result.
+#
+# 0x13c9c4 has none of that problem. It is documented as "In Title Screen/Records Loop",
+# 0x01 in the loop and 0x00 outside it -- runtime state, no save involved, and a state you
+# can put the console into deliberately. Two readings, one on the title screen and one in
+# game, and the pair is unambiguous:
+#
+#   1 then 0   the addresses describe this cartridge; the game-state offset is the problem
+#   0 then 0   nothing is there
+#   the same nonsense both times, or values that never change: a systematic offset between
+#              RetroAchievements' addressing and ours
 # ---------------------------------------------------------------------------------------
 
 
-# results[0] -- THE CANARY, and the first thing to read. [8-Bit] Extreme Mode Unlocked,
-# documented as 0x55 (locked) or 0xFF (unlocked). It comes from saved data, so it is one of
-# the few bytes in this game that is essentially never zero.
-#
-# 0x55 or 0xFF means the addresses describe the cartridge actually running, and everything
-# below is worth reading. Zero means they do not, and nothing below matters -- most likely
-# a region mismatch between this dump and the one the notes were written against.
-W:155624:1
+# results[0] -- THE CANARY. [32-Bit] In Title Screen/Records Loop.
+# Expect 1 on the title screen and 0 during play. This one value decides the round.
+W:13c9c4:4
 
-# results[1] -- the game state, through the pointer, with 24-bit masking:
-#   0x159164  [24-Bit Pointer] Game state pointer
-#     +0x9c   [32-Bit] Game state, 0x02 = Fever
-#
-# The one that matters. Watch `value` at +0x40 while entering Fever Time: it should read 2.
-W24:159164:4:9c
+# results[1] -- [24-Bit Pointer] Main Menu information. A second, independent check on the
+# same state from a different address: non-zero on the menu is what a live menu structure
+# looks like. Read raw rather than followed, because its value is the evidence.
+W:155288:4
 
-# results[2] -- the raw word behind that pointer, so a failure above explains itself rather
-# than needing another session. A plausible 0x02xxxxxx or a small non-zero value means the
-# pointer is live; zero means it is not, and the offset is not the problem.
+# results[2] -- the raw word at the game state pointer. Last round it read 0x02159158,
+# a plausible DS address, so something is there -- the question is whether it is what the
+# notes think it is.
 W:159164:4
 
-# results[3] -- [32-Bit] Current Stage, 0x00 = Stage 1 through 0x1d = Credits. Unlike the
-# canary this one changes as you play, so it is the cheapest confirmation that these
-# addresses track the game rather than merely holding plausible constants.
+# results[3] -- [32-Bit] Current Stage. It read 2 on the title screen, which the notes say
+# means Stage 3-A. On the title screen that is either stale data from a previous run or the
+# wrong field; watching it change as you start a run distinguishes those.
 W:1593d0:4
 
 
-# "It's Fever Time!" -- clear a Round and enter Fever Time. AddAddress reads the 24-bit
-# pointer, then the state at +0x9c; the pair says "Fever now, not Fever last frame", which
-# is the standard shape for an achievement that fires on a transition.
+# Kept so the runtime keeps evaluating and the per-frame cost stays comparable. It cannot
+# fire until the addresses are settled, and nothing this round depends on it.
 I:0xW159164_0xX00009c=2_I:0xW159164_d0xX00009c!=2
