@@ -62,6 +62,9 @@ Confirmed on hardware, in order of when each was settled:
 8. **The ROM's RetroAchievements hash** — step 3b, and it is **the hash the server has**,
    checked against the set's page. `c3b1916756737f2c4117cc95c1d51ac7` for Super Mario 64 DS.
    Log at `docs/logs/ra_wifi_launcher_hash-3ds.log`.
+9. **A real login from the launcher** — step 3c, `reached stage 10 of 10`: `ra.cfg` read,
+   credentials percent-encoded, `r=login` answered with a token for a real account. Log at
+   `docs/logs/ra_wifi_launcher_login-3ds.log`.
 
 Everything from the game's RAM up to a fired trigger is done, and the launcher now reaches the
 RetroAchievements API. **So open question #1 is closed for context A, and nothing in front of
@@ -93,14 +96,14 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **3c, `r=login`** — and it needs a decision before code: where the
-credentials live, and whether sending a password in the clear is acceptable. The
-recommendation on the record is to log in once, keep only the token, and never write the
-password to the card. See *#1a* for what cleartext costs.
+The immediate next step is **`r=gameid`** — one request, and it is the cheapest decisive thing
+left. The launcher has the ROM's hash and a login token; `dorequest.php?r=gameid&m=<hash>`
+answers with a `GameID` or with nothing, which is *the server itself* saying whether it
+recognises this dump. Today that has only been checked by eye against the set's page, and
+`r=patch` needs the ID anyway.
 
-3a and 3b are done and in front of nothing. The launcher reaches the API on hardware, and it
-computes the ROM's hash; what has not happened is a run that shows the *server* recognising
-that hash, which the next hardware round gets for free.
+After it, `r=patch` and the parsing (3d) are the last of step 3. Everything below them is
+proven on hardware: the chip, the link, DHCP, DNS, HTTP, the hash, and a real login.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -986,6 +989,35 @@ and the file sits readable on the card. What the code does do is keep it out of 
 because a token grants the same power over the account and the log's entire purpose is to be
 sent to someone.
 
+#### It logged in. `stage 10 of 10`, and the heap did not move
+
+```
+ra.cfg           found
+username         Bakke
+password         (set, 10 chars)
+10 keys parsed but not acted on yet
+...
+logging in as    Bakke
+1089 bytes back
+logged in, token (set, 16 chars)
+```
+
+Full log at `docs/logs/ra_wifi_launcher_login-3ds.log`. **A real RetroAchievements account,
+authenticated from inside nds-bootstrap's launcher**, with the config file odelot's format
+describes and no unknown keys reported — so his file loads here unchanged, which was the point
+of adopting it.
+
+And a number worth more than the rung: **`top 02325000` in all four heap reports.** The heap
+never grew once during the run. lwip coming up, DHCP, two HTTP exchanges and a login together
+cost about **184 bytes** of net allocation, out of the 10 K already free inside the claimed
+arena. So the whole network path is allocation-cheap, and the budget it leaves for 3d is the
+full **87,896 bytes** — 77,824 of safe growth to `IMAGES_LOCATION` plus 10,072 free where it
+already stands.
+
+That matters because it removes a worry rather than confirming one: the concern was that lwip
+would eat the heap and leave `r=patch` nothing. It does not. What is left is whether a whole
+achievement set fits in 88 K, which is a question about `r=patch` alone.
+
 #### Percent-encoding is the part that would have been blamed on the user
 
 A password is user text. An `&` ends the query parameter early, so the server sees a shorter
@@ -1804,10 +1836,12 @@ things to test. So the order is not "build the client":
      launcher*.
    - **3b, game identification — written, host-verified, not yet run.** The launcher computes
      the ROM's RetroAchievements hash and logs it. See *Step 3b* below.
-   - **3c, `r=login` — written, host-verified, not yet run.** Credentials from a config file,
-     percent-encoded, and a token back. See *Step 3c* below.
-   - **3d, `r=patch` and parsing.** JSON in, memaddr strings out, into the block that already
-     works.
+   - **3c, `r=login` — done, `stage 10 of 10` on hardware.** Credentials from a config file,
+     percent-encoded, and a token back for a real account. See *Step 3c* below.
+   - **3d, `r=patch` and parsing.** Two requests, not one: `r=gameid&m=<hash>` turns the hash
+     into a `GameID` — which is also the server's own verdict on whether it knows this dump —
+     and then `r=patch&u=&t=&g=` returns the set. JSON in, memaddr strings out, into the block
+     that already works. The reply must be **streamed**: the measured budget is 88 K.
 4. **Only after those**, live submission from inside the game — context **B**, behind the
    VBlank hook as a non-blocking state machine, watching for ARM7 contention with the SD
    path. Queue-and-flush from the launcher (see #1g) makes this an optimisation rather than
