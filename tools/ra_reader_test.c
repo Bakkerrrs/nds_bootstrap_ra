@@ -24,7 +24,9 @@
     the same terms as the rest of the project.
 */
 
+#define _GNU_SOURCE
 #include <stdio.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -54,6 +56,10 @@ char __bss_start[1], __bss_end[1], __vram_top[1];   /* referenced by cardengine.
     is a normal library and is linked -- see tools/ra_reader_test.sh for the file list.
 */
 #include "../retail/cardenginei/arm9_ra/source/ra_rcheevos.c"
+
+#define MIRROR_LOW   0x02000000u          /* console 0x000000 */
+#define MIRROR_HIGH  0x02800000u          /* the same page, two 4M mirrors up */
+#define APART        0x02C00000u          /* masks to the same console address, own memory */
 
 #define IO_BASE  0x04000000
 #define IO_SIZE  0x2000
@@ -103,6 +109,29 @@ int main(void) {
 	         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
 		perror("mmap 0x04000000");
 		return 2;
+	}
+
+	/*
+	    A real main RAM mirror, set up before anything ticks because ra_rc_console_address()
+	    reads through it. MIRROR_LOW and MIRROR_HIGH are one page of memory mapped twice, 8M
+	    apart -- the same relationship 0x027FC000 has to 0x023FC000 on the DS. APART is a
+	    separate page that masks to the same console address and must therefore be refused.
+
+	    Both are far above where this binary links, so MAP_FIXED cannot land on it.
+	*/
+	{
+		int fd = memfd_create("ra_mirror", 0);
+
+		if (fd < 0 || ftruncate(fd, 0x1000) != 0
+		 || mmap((void*)MIRROR_LOW,  0x1000, PROT_READ | PROT_WRITE,
+		         MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED
+		 || mmap((void*)MIRROR_HIGH, 0x1000, PROT_READ | PROT_WRITE,
+		         MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED
+		 || mmap((void*)APART, 0x1000, PROT_READ | PROT_WRITE,
+		         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
+			perror("mmap main RAM mirror");
+			return 2;
+		}
 	}
 
 	printf("link addresses\n");
@@ -355,6 +384,7 @@ int main(void) {
 	printf("\nrcheevos parses the definition and evaluates it\n");
 	CHECK(snapshot.rcActivate == 0);                  /* RC_OK */
 	CHECK(snapshot.rcStage == RA_RC_FRAME);
+	CHECK(snapshot.rcTriggerState != RC_TRIGGER_STATE_DISABLED);
 	CHECK(snapshot.rcTarget == 600);
 	/*
 	    The definition reads one address, so a peek count of zero would mean do_frame
@@ -376,6 +406,47 @@ int main(void) {
 	*/
 	CHECK(snapshot.rcTriggerState != RC_TRIGGER_STATE_DISABLED);
 	CHECK(snapshot.rcTriggerState != RC_TRIGGER_STATE_INACTIVE);
+
+	/*
+	    The bug that disabled the achievement on the first hardware run. The cardengine
+	    lives at 0x027FC000, inside main RAM's *second* 4M mirror, so subtracting the base
+	    gives 0x7Fxxxx -- past the 4M RetroAchievements maps, and correctly refused. The
+	    mask fixes it, but only where the region really is a mirror, so it is proved rather
+	    than assumed.
+	*/
+	printf("\na snapshot in a RAM mirror still has a console address\n");
+	{
+		/*
+		    MIRROR_HIGH and MIRROR_LOW are backed by the same memory 8M apart, which is what
+		    a DS main RAM mirror actually is -- so the positive case is tested against a real
+		    mirror rather than against a claim that one exists. APART is mapped but its own
+		    memory, and masks to the same console address, so it is the case that must be
+		    refused.
+		*/
+		/* Inside the mapped 4M: a plain subtraction, nothing written. */
+		CHECK(ra_rc_console_address(MIRROR_LOW + 0x54) == 0x54);
+
+		/*
+		    Past the 4M window but genuinely mirrored. This is the case that disabled the
+		    achievement on hardware: the cardengine sits at 0x027FC000, inside main RAM's
+		    second mirror, and the plain subtraction gave 0x7Fxxxx.
+		*/
+		*(volatile u32*)(MIRROR_HIGH + 0x54) = 0xC0FFEE00;
+		CHECK(*(volatile u32*)(MIRROR_LOW + 0x54) == 0xC0FFEE00);   /* really a mirror */
+		CHECK(ra_rc_console_address(MIRROR_HIGH + 0x54) == 0x54);
+		CHECK(*(volatile u32*)(MIRROR_HIGH + 0x54) == 0xC0FFEE00);  /* sentinel cleaned up */
+
+		/*
+		    Past the window and *not* a mirror, which is the twlsdk case where main RAM
+		    really is 16M. Masking would name a different word, so it must refuse.
+		*/
+		*(volatile u32*)(APART + 0x54) = 0x12345678;
+		CHECK(ra_rc_console_address(APART + 0x54) == 0);
+		CHECK(*(volatile u32*)(APART + 0x54) == 0x12345678);
+		/* Not main RAM at all, and misaligned, are refusals too. */
+		CHECK(ra_rc_console_address(0x09000000) == 0);
+		CHECK(ra_rc_console_address(MIRROR_HIGH + 0x55) == 0);
+	}
 
 	printf("\nthe definition's address translates to the snapshot's own ticks\n");
 	CHECK(ra_rc_translate(0, 4) == RA_DS_SYSTEM_RAM_BASE);

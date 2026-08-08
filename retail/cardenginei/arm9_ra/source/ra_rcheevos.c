@@ -57,6 +57,7 @@
     a definition from the server does not get a weaker one than a hand-written watch.
 */
 extern bool ra_readable(u32 addr, u32 len);
+extern bool ra_in_main_ram(u32 addr, u32 len);
 extern u32  ra_read(u32 addr, u8 size);
 
 /* VCOUNT, read directly -- the game owns every hardware timer. See raSnapshot.linesLast. */
@@ -207,8 +208,69 @@ static char* ra_put_hex6(char* p, u32 value) {
     RAM, so it has a console address like any game variable would -- that is what lets a
     definition point at it at all.
 */
-static const char* ra_rc_build_test_definition(u32 ticksAddress) {
-	const u32 consoleAddress = ticksAddress - RA_DS_SYSTEM_RAM_BASE;
+/*
+    A DS address back to a console address, which is not the subtraction it looks like.
+
+    Main RAM on a DS is 4M and the ARM9 sees it mirrored every 4M up to 0x03000000. The
+    cardengine lives at 0x027FC000 -- inside the *second* mirror -- so subtracting the base
+    gives 0x7Fxxxx, which is past the 4M RetroAchievements maps and is refused. That is
+    what disabled the test achievement on the first hardware run, and the validation pass
+    catching it is the system working rather than failing.
+
+    Masking into the 4M window fixes it for this variant and would be wrong for the twlsdk
+    ones, where main RAM really is 16M and 0x02FDxxxx is its own memory rather than a
+    mirror of 0x003Dxxxx. So the mirror is proved rather than assumed: a sentinel is written
+    through one address and read back through the other, and if they do not agree there is
+    no console address for this snapshot and the caller is told so.
+
+    Returns 0 if the address cannot be expressed as a console address. Console address 0 is
+    a real address, but it is main RAM's first word and never where the snapshot lands.
+
+    The sentinel is written through the address being translated, not through some other
+    field of the snapshot: proving that one region mirrors says nothing about another, and
+    an earlier version of this made exactly that mistake.
+*/
+static u32 ra_rc_console_address(u32 dsAddress) {
+	u32 console;
+	u32 mirrored;
+	u32 saved;
+	bool mirrors;
+	volatile u32* here;
+	volatile u32* there;
+
+	if (dsAddress >= RA_DS_SYSTEM_RAM_BASE
+	 && dsAddress <  RA_DS_SYSTEM_RAM_BASE + RA_DS_SYSTEM_RAM_SIZE) {
+		return dsAddress - RA_DS_SYSTEM_RAM_BASE;
+	}
+
+	if ((dsAddress & 3) || !ra_in_main_ram(dsAddress, 4)) {
+		return 0;
+	}
+	console  = (dsAddress - RA_DS_SYSTEM_RAM_BASE) & (RA_DS_SYSTEM_RAM_SIZE - 1);
+	mirrored = RA_DS_SYSTEM_RAM_BASE + console;
+
+	/*
+	    The proof, on the address actually being translated rather than on some other one
+	    that happens to be nearby: write a sentinel through it and read at the candidate
+	    mirror. Twice, with different values, so a word that already happened to hold the
+	    first sentinel cannot pass. The original is restored either way.
+	*/
+	here  = (volatile u32*)dsAddress;
+	there = (volatile u32*)mirrored;
+	saved = *here;
+
+	*here   = 0x5A3C69A5;
+	mirrors = (*there == 0x5A3C69A5);
+	if (mirrors) {
+		*here   = 0xA5693C5A;
+		mirrors = (*there == 0xA5693C5A);
+	}
+	*here = saved;
+
+	return mirrors ? console : 0;
+}
+
+static const char* ra_rc_build_test_definition(u32 consoleAddress) {
 	char* p = memaddrBuffer;
 
 	p = ra_put(p, "M:0xX");
@@ -246,10 +308,22 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 		return RA_RC_NO_MEMREFS;
 	}
 
-	activate = rc_runtime_activate_achievement(
-		&runtime, RA_TEST_ACHIEVEMENT_ID,
-		ra_rc_build_test_definition((u32)&snapshot->ticks),
-		0, 0);
+	{
+		const u32 consoleAddress = ra_rc_console_address((u32)&snapshot->ticks);
+		if (consoleAddress == 0) {
+			/*
+			    This snapshot has no console address -- it is outside the 4M
+			    RetroAchievements maps and not a mirror of it. Real achievements are
+			    unaffected, since they point at game memory; only this self-test needs an
+			    address it can name.
+			*/
+			return RA_RC_NO_ADDRESS;
+		}
+		activate = rc_runtime_activate_achievement(
+			&runtime, RA_TEST_ACHIEVEMENT_ID,
+			ra_rc_build_test_definition(consoleAddress),
+			0, 0);
+	}
 
 	snapshot->rcActivate = (s8)activate;
 	if (activate != RC_OK) {

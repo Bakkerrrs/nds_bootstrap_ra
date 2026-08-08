@@ -84,8 +84,11 @@ static raWatch watches[RA_WATCH_MAX];
 
     Written as `addr <= END - len` rather than `addr + len <= END` so a base near the top
     of the address space cannot wrap past the check.
+
+    Not static, because ra_rcheevos.c needs it too -- it has to know whether an address is
+    main RAM at all before writing a sentinel through it to test for mirroring.
 */
-static bool ra_in_main_ram(u32 addr, u32 len) {
+bool ra_in_main_ram(u32 addr, u32 len) {
 	return addr >= RA_MAIN_RAM_START && addr <= RA_MAIN_RAM_END - len;
 }
 

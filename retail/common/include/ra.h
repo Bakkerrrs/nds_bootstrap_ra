@@ -332,8 +332,9 @@ typedef struct raSnapshot {
 #define RA_RC_NONE        0  /* not reached -- the window did not come up */
 #define RA_RC_NO_MEMORY   1  /* malloc() refused; see heapBreak/heapTop/sbrkProbe */
 #define RA_RC_NO_MEMREFS  2  /* malloc() worked but rc_runtime_init()'s allocation did not */
-#define RA_RC_PARSE_BAD   3  /* the definition was rejected; see rcActivate */
-#define RA_RC_ACTIVE      4  /* one achievement activated and validated */
-#define RA_RC_FRAME       5  /* rc_runtime_do_frame() has run */
+#define RA_RC_NO_ADDRESS  3  /* the snapshot has no console address; self-test only */
+#define RA_RC_PARSE_BAD   4  /* the definition was rejected; see rcActivate */
+#define RA_RC_ACTIVE      5  /* one achievement activated and validated */
+#define RA_RC_FRAME       6  /* rc_runtime_do_frame() has run */
 
 #endif /* RA_H */
