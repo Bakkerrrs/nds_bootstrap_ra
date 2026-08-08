@@ -155,11 +155,12 @@ the test fails rather than this table going quietly stale.
 
 ### Still open, and one of them is now the critical path
 
-- **Open question #1, the network transport** — the critical path now, and answered as far
-  as reading and measuring can take it. The next move is **not** the client: `tools/wifiprobe/`
-  is a standalone DSi-mode homebrew that answers whether WiFi works on this console *at all*,
-  before any of it is nds-bootstrap's problem. Built and ready to flash; see its README for
-  how to read the stage number it comes back with. See the open questions section.
+- **Open question #1, the network transport** — the critical path, and step one of the
+  ladder **passed on hardware**: `tools/wifiprobe/` associated to a WPA2-PSK network and got
+  RetroAchievements to answer over plain HTTP, stage 6 of 6. So WPA2 works, TLS is not
+  needed, and the Atheros comes up on this console. What is untested is whether any of that
+  survives inside nds-bootstrap, where the ARM7 belongs to the game. See the open questions
+  section. See the open questions section.
 - **CI has never run on this repository.** The workflow exists and the build is verified
   to pass on the pinned toolchain, but Actions appears disabled for the fork, so the host
   test and the space-budget report added to it have never executed. Enabling it is a repo
@@ -561,18 +562,59 @@ Games that no longer fit in RAM read from SD during play, on the ARM7, which is 
 where a network stack would want to live. We made the contention slightly worse before we
 knew we would care about it.
 
-### #1e — the experiment ladder, in cost order
+### #1e — the probe's answer: WPA2 and plain HTTP both work
+
+Step one passed, completely, on the first run:
+
+```
+resolved retroachievements.org
+IP 104.26.3.251
+connected, port 80
+request sent
+994 bytes back
+the API answered over plain HTTP
+body: {"Success":false,"Status":401,"Code":"invalid_credentials", ...}
+reached stage 6 of 6
+WMI_BSSINFO MuMiMo24 (WPA2-PSK)
+   BSSID 00:5f:67:e9:f5:70
+   G TKIP P AES A PSK
+```
+
+Three things fall out of that, and two of them were supposed to be the hard ones.
+
+**WPA2 works.** `WMI_BSSINFO ... (WPA2-PSK)` with AES is the Atheros path doing the thing
+the legacy Mitsumi core cannot. The WEP problem — the one that looked like it might make
+live networking useless even if it worked, because routers stopped offering WEP — does not
+apply. The chip associated to an ordinary modern home network.
+
+**The Atheros firmware was not a problem here.** The highest-risk unknown in the whole plan
+was whether the chip arrives with its firmware uploaded or stone cold. Launched as ordinary
+DSi-mode homebrew it came up. That is *not* the same as it coming up under nds-bootstrap's
+boot path — which is step two and remains open — but it does mean the chip and the driver
+work on this specific 3DS and its specific WiFi board, which was in genuine doubt given how
+much less `dsiwifi` has been tested on 3DS hardware than on a DSi.
+
+**Plain HTTP to RetroAchievements works from the console**, not just from a PC. The API
+returned its own `invalid_credentials` JSON, which is the check that distinguishes reaching
+RetroAchievements from reaching a captive portal that answered on its behalf.
+
+So of the three obstacles, one is gone entirely (TLS was never needed and is now confirmed
+end to end from the hardware), one is much smaller than feared (WPA2, not WEP), and one is
+untouched: the ARM7 belongs to the game inside nds-bootstrap, and none of the above was
+tested there.
+
+One thing the run improved about the probe itself. `dsiwifi` narrates asynchronously and
+kept printing after the summary — the `WMI_BSSINFO` line arrived *after* "log written".
+The log file was being closed at the summary, so exactly the lines that describe how the
+chip came up were being dropped from the file. It now stays open until you exit.
+
+### #1f — the rest of the ladder
 
 The risk is concentrated in the firmware-state question, and that is also among the cheapest
 things to test. So the order is not "build the client":
 
-1. ~~**Outside the game entirely.**~~ **Built: `tools/wifiprobe/`.** A plain DSi-mode
-   homebrew `.nds` — no cardengine, no injected code, no game — that brings `dsiwifi` up,
-   associates, and fetches from `retroachievements.org` over plain HTTP, reporting a stage
-   number and writing `/wifiprobe.log` to the SD card. `dsiwifi` is a submodule and builds
-   clean against the pinned toolchain, which was the first thing that could have stopped
-   this. Not yet run on hardware. See `tools/wifiprobe/README.md` for how to read the
-   result.
+1. ~~**Outside the game entirely.**~~ **Done, and it passed — `tools/wifiprobe/`, stage 6
+   of 6 on hardware.** See *The probe's answer* below.
 2. **The chip's state under our boot path.** Coming in through nds-bootstrap, is `WLANFIRM`
    already uploaded? A WMI init that succeeds versus one that needs BMI plus an upload
    distinguishes them.

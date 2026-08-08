@@ -45,6 +45,8 @@
 #include "lwip/netdb.h"
 #include "dsiwifi9.h"
 
+#include "wifiprobe_fifo.h"
+
 #define PROBE_LOG_PATH "/wifiprobe.log"
 
 #define RA_HOST "retroachievements.org"
@@ -65,8 +67,10 @@
 #define STAGE_REQUESTED  5  /* the request was written */
 #define STAGE_ANSWERED   6  /* the API replied, and the reply looks like the API */
 
-static FILE* logFile;
-static int   stage = STAGE_START;
+static FILE*      logFile;
+static int        stage = STAGE_START;
+static probeSlots slots;
+static volatile bool slotsKnown = false;
 
 /*
     Everything goes to both the screen and the file. The screen is what you watch; the file
@@ -99,6 +103,51 @@ static void wifi_log(const char* s) {
 	if (logFile) {
 		fputs(s, logFile);
 		fflush(logFile);
+	}
+}
+
+/*
+    The ARM7's report on what the firmware has configured. Arrives once, before the stack
+    starts, and it is what separates "the hardware failed" from "there was nothing to
+    connect to" -- which look identical from here otherwise.
+*/
+static void slots_handler(int bytes, void* userdata) {
+	if (bytes >= (int)sizeof(slots)) {
+		fifoGetDatamsg(WIFIPROBE_FIFO_CHANNEL, sizeof(slots), (u8*)&slots);
+		slotsKnown = true;
+	}
+}
+
+static void probe_report_slots(void) {
+	if (!slotsKnown) {
+		probe_log("\x1b[33mARM7 sent no slot report\x1b[37m\n");
+		return;
+	}
+
+	probe_log("DSi slots (WPA2-capable): %s%s%s\n",
+	          (slots.dsiSlots & 1) ? "4 " : "",
+	          (slots.dsiSlots & 2) ? "5 " : "",
+	          (slots.dsiSlots & 4) ? "6 " : "");
+	probe_log("DS slots  (WEP/open):     %s%s%s\n",
+	          (slots.wepSlots & 1) ? "1 " : "",
+	          (slots.wepSlots & 2) ? "2 " : "",
+	          (slots.wepSlots & 4) ? "3 " : "");
+
+	if (slots.dsiSlots) {
+		probe_log("first DSi SSID: \x1b[36m%s\x1b[37m (wpa %u, wep %u)\n",
+		          slots.firstSsid, slots.firstWpaMode, slots.firstWepMode);
+	}
+
+	/*
+	    Said plainly, because it is the single most likely reason for a confusing result and
+	    it is entirely fixable by the person holding the console.
+	*/
+	if (!slots.dsiSlots && !slots.wepSlots) {
+		probe_log("\x1b[31mnothing configured for DS/DSi mode.\x1b[37m\n"
+		          "set up an internet connection in the\n"
+		          "console settings, then run this again.\n");
+	} else if (!slots.dsiSlots) {
+		probe_log("\x1b[33monly legacy DS slots: WEP or open only.\x1b[37m\n");
 	}
 }
 
@@ -215,6 +264,20 @@ int main(void) {
 		iprintf("logging to %s\n", PROBE_LOG_PATH);
 	}
 
+	/*
+	    Ask the ARM7 what the firmware holds before anything else runs, so the answer is at
+	    the top of the log where it belongs rather than inferred from a silence further down.
+	*/
+	fifoSetDatamsgHandler(WIFIPROBE_FIFO_CHANNEL, slots_handler, 0);
+	{
+		int frames = 60;
+		while (!slotsKnown && frames-- > 0) {
+			swiWaitForVBlank();
+		}
+	}
+	probe_log("\n-- stage 0: what is configured --\n");
+	probe_report_slots();
+
 	probe_log("\n-- stage 1: bring the chip up --\n");
 	DSiWifi_SetLogHandler(wifi_log);
 	DSiWifi_InitDefault(WFC_CONNECT);
@@ -258,11 +321,14 @@ done:
 	          ? "live unlocks are reachable from DSi mode.\n"
 	          : "stopped here -- see the log above.\n");
 
-	if (logFile) {
-		fclose(logFile);
-		logFile = 0;
-		iprintf("\nlog written. START to exit.\n");
-	}
+	/*
+	    The log stays open until you leave, deliberately. dsiwifi narrates asynchronously and
+	    keeps talking after the last stage finishes -- the first run on hardware printed its
+	    WMI_BSSINFO line, the one naming the access point and its security mode, *after* the
+	    summary. Closing the file at the summary would have dropped exactly the lines that
+	    say how the chip came up, which is the question the next step depends on.
+	*/
+	probe_log("\nSTART to exit.\n");
 
 	while (1) {
 		swiWaitForVBlank();
@@ -270,6 +336,11 @@ done:
 		if (keysDown() & KEY_START) {
 			break;
 		}
+	}
+
+	if (logFile) {
+		fclose(logFile);
+		logFile = 0;
 	}
 	return 0;
 }

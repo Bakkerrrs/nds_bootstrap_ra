@@ -17,7 +17,7 @@ include $(DEVKITARM)/ds_rules
 #---------------------------------------------------------------------------------
 BUILD    := build
 SOURCES  := source
-INCLUDES := include build ../dsiwifi/include
+INCLUDES := include build ../include ../dsiwifi/include
 DATA     := data
 GRAPHICS :=
 

@@ -20,6 +20,75 @@
 #include <string.h>
 
 #include "dsiwifi7.h"
+#include "wifiprobe_fifo.h"
+
+/*
+    dsiwifi's own view of the firmware's WiFi slots. A private header of the library,
+    included because we build it in-tree -- the same call made for rcheevos' rc_internal.h,
+    and for the same reason: reading the real layout beats copying it and letting the copy
+    rot.
+*/
+#include "wifi_card.h"
+
+/*
+    Report what the console actually has configured, before any attempt to connect.
+
+    This exists because of how dsiwifi chooses an access point: it scans, and for each
+    beacon it walks the firmware's slots looking for a matching SSID, skipping empty ones
+    with a bare `continue`. A console with nothing configured therefore behaves exactly like
+    a console whose WiFi chip never came up -- no association, no message, nothing to tell
+    the two apart. For a probe whose entire job is to distinguish causes, that is the one
+    ambiguity worth spending code to remove.
+
+    The two tables are different generations and it matters which one is populated:
+
+      slots 4-6, at NVRAM 0x1F400 -- the DSi-era config, WPA and WPA2 capable. These are
+      what dsiwifi tries first, and the only ones that can give a modern network.
+
+      slots 1-3, at the end of the user settings area -- the original DS config, WEP or
+      open only. dsiwifi falls back to these, and on a 3DS they are what the
+      "Nintendo DS Connections" settings screen writes.
+
+    So the answer to "which WiFi do I need configured?" is visible in the result rather than
+    guessed at: if the DSi slots come back empty, the console never wrote them, and no
+    amount of chip debugging will help.
+*/
+static void report_wifi_slots(void) {
+	static nvram_cfg     dsiCfg[3];
+	static nvram_cfg_wep wepCfg[3];
+	probeSlots           report;
+	u32                  endAddr;
+	int                  i;
+
+	memset(&report, 0, sizeof(report));
+
+	readFirmware(0x20, &endAddr, sizeof(u32));
+	endAddr *= 8;
+
+	readFirmware(0x1F400, dsiCfg, sizeof(dsiCfg));
+	readFirmware(endAddr - 0x400, wepCfg, sizeof(wepCfg));
+
+	for (i = 0; i < 3; i++) {
+		/* The same three tests dsiwifi applies before it will consider a slot usable. */
+		if (dsiCfg[i].ssid[0] && dsiCfg[i].wpa_mode != 0xFF && dsiCfg[i].slot_idx) {
+			report.dsiSlots |= (1 << i);
+			if (!report.firstSsid[0]) {
+				u8 len = dsiCfg[i].ssid_len;
+				if (len > 0x20) {
+					len = 0x20;
+				}
+				memcpy(report.firstSsid, dsiCfg[i].ssid, len);
+				report.firstWpaMode = dsiCfg[i].wpa_mode;
+				report.firstWepMode = dsiCfg[i].wep_mode;
+			}
+		}
+		if (wepCfg[i].ssid[0] && wepCfg[i].status != 0xFF && wepCfg[i].slot_idx) {
+			report.wepSlots |= (1 << i);
+		}
+	}
+
+	fifoSendDatamsg(WIFIPROBE_FIFO_CHANNEL, sizeof(report), (u8*)&report);
+}
 
 static volatile bool exitflag = false;
 
@@ -76,6 +145,12 @@ int main(void) {
 	irqEnable(IRQ_VBLANK | IRQ_VCOUNT | IRQ_NETWORK);
 
 	setPowerButtonCB(powerButtonCB);
+
+	/*
+	    Before the stack touches anything: say what the firmware has configured. If this
+	    comes back empty, everything after it fails for a reason that is not the hardware's.
+	*/
+	report_wifi_slots();
 
 	/* The one line that is not template. Everything dsiwifi does on this CPU hangs off it. */
 	installWifiFIFO();
