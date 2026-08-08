@@ -39,14 +39,22 @@ and every value predicted in advance has matched what the hardware showed.
 and confirmed on hardware**, with a working `malloc` over its arena. See
 *`cardenginei_arm9_ra` — running on hardware* below for the readings.
 
-**`rcheevos` is in, and it evaluates a real achievement definition** — on the host. Two
-hardware readings went into getting there. The first exposed a bug of mine: `ra_startup()`
-reported a dead heap as a working one on every frame after the first. The second, once the
-staging could no longer lie, established that **newlib's `malloc` does not work in this
-window** while `_sbrk()` demonstrably does.
+**`rcheevos` is in, and it evaluates a real achievement definition** — on the host, where
+the test now runs the achievement out to its target and watches the trigger fire. Four
+hardware readings went into getting the ground under it solid, and each one closed a
+question:
 
-So the allocator is ours now — `ra_alloc.c`, ~200 lines, host-tested. **That is what is
-waiting to be read on hardware.** See *First hardware reading* and *The allocator* below.
+1. `ra_startup()` reported a dead heap as a working one on every frame after the first — a
+   bug of mine, and the reason the next three readings were built to be unambiguous.
+2. **newlib's `malloc` does not work in this window.** `_sbrk()` returned the predicted base
+   address; `malloc` refused anyway, without ever calling it successfully.
+3. **Our allocator does.** 2,728 bytes of real rcheevos allocations, `mallocProbe` exactly on
+   `heapBase + 8`.
+4. **The snapshot has no RetroAchievements console address.** Main RAM here is 16 MB and the
+   map covers 4 MB, so the self-test moved to console address 0.
+
+What has never been read is rcheevos actually evaluating. That is the whole of the next
+step.
 
 The ARM9 cardengine has **436 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
