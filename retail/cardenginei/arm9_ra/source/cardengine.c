@@ -249,7 +249,14 @@ void ra_wram_tick(raSnapshot* snapshot) {
 	    stateMagic is guaranteed to read 0 the first time this line is reached and the
 	    watchlist installs itself exactly once.
 	*/
-	stage = ra_startup(__bss_start, __bss_end, __vram_top);
+	/*
+	    The arena stops below the definitions block at the top of the window. Shortened here
+	    rather than in the linker script because __vram_top is the window, and the block is
+	    a runtime reservation out of it -- the linker has no business knowing about something
+	    the bootloader writes.
+	*/
+	stage = ra_startup(__bss_start, __bss_end,
+	                   (char*)(CARDENGINEI_ARM9_RA_DEFS_LOCATION));
 	snapshot->wramStage = stage;
 	snapshot->heapSize  = ra_heap_size();
 	snapshot->heapUsed  = ra_heap_used();

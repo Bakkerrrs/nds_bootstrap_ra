@@ -145,6 +145,19 @@ int main(void) {
 		}
 	}
 
+	/*
+	    The definitions block the bootloader would have written at the top of the WRAM
+	    window. Mapped so ra_definition() has something real to read; left with no magic, so
+	    every test below runs against the built-in self-test definition unless it says
+	    otherwise.
+	*/
+	if (mmap((void*)CARDENGINEI_ARM9_RA_DEFS_LOCATION, 0x1000, PROT_READ | PROT_WRITE,
+	         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
+		perror("mmap definitions block");
+		return 2;
+	}
+	*(u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION = 0;
+
 	printf("link addresses\n");
 	CHECK(ra_in_main_ram((u32)&snapshot, sizeof(snapshot)));
 	CHECK(ra_in_main_ram((u32)&target, 4));
@@ -180,7 +193,9 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, heapTop) == 0x8C);
 	CHECK(__builtin_offsetof(raSnapshot, mallocProbe) == 0x90);
 	CHECK(__builtin_offsetof(raSnapshot, sbrkProbe) == 0x94);
-	CHECK(sizeof(raSnapshot) == 0x98);
+	CHECK(__builtin_offsetof(raSnapshot, rcFromFile) == 0x98);
+	CHECK(__builtin_offsetof(raSnapshot, rcDefLength) == 0x9A);
+	CHECK(sizeof(raSnapshot) == 0x9C);
 
 	*DISPCNT = 0x1F40;
 
@@ -432,6 +447,52 @@ int main(void) {
 	    eight megabytes past the end of the map, and not a mirror of 0x023FC000 either: that
 	    was tested directly on hardware with a sentinel and they are separate memory.
 	*/
+	/*
+	    The staged definition, which is how a real achievement gets tried without a rebuild.
+	    Exercised here because the alternative -- finding out on hardware -- costs a flash
+	    cycle per mistake, which is exactly what the file was introduced to stop.
+	*/
+	printf("\na staged definition is used, and a missing one falls back\n");
+	{
+		char* const  block = (char*)CARDENGINEI_ARM9_RA_DEFS_LOCATION;
+		char* const  text  = block + CARDENGINEI_ARM9_RA_DEFS_HEADER;
+		raSnapshot   probe;
+
+		memset(&probe, 0, sizeof(probe));
+
+		/* No magic: the built-in definition, and the snapshot says so. */
+		*(u32*)block = 0;
+		CHECK(strcmp(ra_definition(&probe), RA_TEST_DEFINITION) == 0);
+		CHECK(probe.rcFromFile == 0);
+
+		/* A staged definition is used verbatim. */
+		strcpy(text, "0xH00c0fe=7");
+		*(u32*)(block + 4) = strlen(text);
+		*(u32*)block = CARDENGINEI_ARM9_RA_DEFS_MAGIC;
+		CHECK(strcmp(ra_definition(&probe), "0xH00c0fe=7") == 0);
+		CHECK(probe.rcFromFile == 1);
+		CHECK(probe.rcDefLength == strlen("0xH00c0fe=7"));
+
+		/*
+		    A file typed in a text editor ends with a newline, and rcheevos would reject the
+		    whitespace as syntax. Trimmed rather than blamed on the user.
+		*/
+		strcpy(text, "0xH00c0fe=7\r\n");
+		*(u32*)(block + 4) = strlen(text);
+		CHECK(strcmp(ra_definition(&probe), "0xH00c0fe=7") == 0);
+		CHECK(probe.rcDefLength == strlen("0xH00c0fe=7"));
+
+		/* Empty and oversized both fall back rather than being handed to the parser. */
+		*(u32*)(block + 4) = 0;
+		CHECK(strcmp(ra_definition(&probe), RA_TEST_DEFINITION) == 0);
+		CHECK(probe.rcFromFile == 0);
+		*(u32*)(block + 4) = CARDENGINEI_ARM9_RA_DEFS_MAX;
+		CHECK(strcmp(ra_definition(&probe), RA_TEST_DEFINITION) == 0);
+
+		/* Back to no file, so the tests after this see the built-in. */
+		*(u32*)block = 0;
+	}
+
 	printf("\nthe self-test definition is anchored where the map reaches\n");
 	CHECK(ra_rc_translate(0, 1) == RA_DS_SYSTEM_RAM_BASE);
 	CHECK(ra_rc_validate_address(0) != 0);

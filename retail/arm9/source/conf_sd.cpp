@@ -186,6 +186,50 @@ extern void loadApFix(configuration* conf, const char* bootstrapPath, const char
 extern void loadMobiclipOffsets(configuration* conf, const char* bootstrapPath, const char* romTid, const u8 romVersion, const u16 headerCRC);
 extern void loadDSi2DSSavePatch(configuration* conf, const char* bootstrapPath, const char* romTid, const u8 romVersion, const u16 headerCRC);
 
+/*
+    Where the user puts a definition to try. Alongside TWLFontTable.dat and the rest of this
+    fork's data, so it is where anyone would look for it.
+*/
+#define RA_DEFINITIONS_PATH "sd:/_nds/nds-bootstrap/ra_achievements.txt"
+
+/*
+    Stage the achievement definitions, if the user has put a file there.
+
+    Deliberately not loadCardEngineBinary(): that reads the whole file into the destination
+    without bounding it, which is fine for a binary this project builds and ships and is not
+    fine for a text file a user edits by hand. A definition file is the one input here that
+    does not come from us, so its length is checked against the space before a byte is read.
+
+    Absent, empty or oversized are all the same non-event -- the magic simply is not written
+    and the WRAM binary falls back to its built-in self-test. Nothing about a missing file
+    should stop a game from booting.
+*/
+static void loadRaDefinitions(void) {
+	FILE* file = fopen(RA_DEFINITIONS_PATH, "rb");
+	long  size;
+
+	if (!file) {
+		return;
+	}
+	fseek(file, 0, SEEK_END);
+	size = ftell(file);
+	fseek(file, 0, SEEK_SET);
+
+	/* Room for the header and a terminator, or it does not go. */
+	if (size > 0
+	 && size < (long)(CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1)) {
+		u8* text = (u8*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
+		                 + CARDENGINEI_ARM9_RA_DEFS_HEADER);
+		if (fread(text, 1, size, file) == (size_t)size) {
+			text[size] = 0;
+			*(u32*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + 4) = (u32)size;
+			/* Magic last, so a partial write is never mistaken for a complete one. */
+			*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = CARDENGINEI_ARM9_RA_DEFS_MAGIC;
+		}
+	}
+	fclose(file);
+}
+
 static int loadCardEngineBinary(const char* cardenginePath, u8* location) {
 	FILE* cebin = fopen(cardenginePath, "rb");
 	int size;
@@ -1773,10 +1817,12 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 		    the staging region is uninitialised and the bootloader trusts that word.
 		*/
 		*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = 0;
+		*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
 		if (!colorTable && conf->consoleModel > 0) {
 			if (loadCardEngineBinary("nitro:/cardenginei_arm9_ra.bin",
 					(u8*)(CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + CARDENGINEI_ARM9_RA_IMAGE_OFFSET)) == 0) {
 				*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = CARDENGINEI_ARM9_RA_STAGE_MAGIC;
+				loadRaDefinitions();
 			}
 		}
 

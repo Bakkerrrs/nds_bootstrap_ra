@@ -119,6 +119,36 @@
 #define CARDENGINEI_ARM9_RA_IMAGE_OFFSET             0x10
 #define CARDENGINEI_ARM9_RA_IMAGE_MAX                0x20000
 
+/*
+    Achievement definitions, in the server's own memaddr syntax, staged as text alongside
+    the binary and copied into the top of its window.
+
+    Read from a file on the SD card rather than compiled in, and that is the point. Testing
+    a definition against a running game is the slowest loop in this project -- build, flash,
+    play, photograph -- and a definition is exactly the kind of thing that needs trying
+    several times before it is right. Through a file it is an edit, not a flash cycle.
+
+    It is also phase 3's mechanism in miniature. When the launcher eventually logs in and
+    fetches a real set before the game boots, this is the path the definitions will travel:
+    launcher -> staging -> DSi WRAM. Building it now for a hand-written file means the part
+    that has to work under a network later is already the part that has been exercised.
+
+    Layout at the staged and copied addresses alike:
+
+      +0x00  CARDENGINEI_ARM9_RA_DEFS_MAGIC, written last
+      +0x04  length of the text, excluding the terminator
+      +0x08  the text, NUL-terminated
+
+    Reads as "RDA1" in a byte-wise hex dump. The block lives at the *top* of the window and
+    the heap is shortened to stop below it, because the alternative -- putting it inside the
+    image the loader copies -- would land it in memory the allocator hands out.
+*/
+#define CARDENGINEI_ARM9_RA_DEFS_MAGIC               0x31414452
+#define CARDENGINEI_ARM9_RA_DEFS_MAX                 0x8000
+#define CARDENGINEI_ARM9_RA_DEFS_HEADER              0x8
+#define CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION   (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x30000)
+#define CARDENGINEI_ARM9_RA_DEFS_LOCATION            (CARDENGINEI_ARM9_RA_LOCATION + CARDENGINEI_ARM9_RA_SIZE - CARDENGINEI_ARM9_RA_DEFS_MAX)
+
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
 #define COLOR_LUT_BUFFERED_LOCATION                  0x027D0000
 #define CARDENGINEI_ARM9_SDK5_BUFFERED_LOCATION      0x027E0000

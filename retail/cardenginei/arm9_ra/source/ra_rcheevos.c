@@ -37,6 +37,7 @@
 #include <stdlib.h>
 
 #include "ra.h"
+#include "locations.h"
 
 #include "rc_runtime.h"
 #include "rc_runtime_types.h"
@@ -198,6 +199,58 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
 #define RA_TEST_DEFINITION "M:0xH000000>=0.600."
 
 /*
+    The definition actually evaluated: whatever the launcher staged from
+    sd:/_nds/nds-bootstrap/ra_achievements.txt, or the built-in self-test if there is none.
+
+    A file beats a constant here for one reason that matters more than flexibility: testing
+    a definition against a running game costs a build, a flash, a play session and a
+    photograph, and definitions are exactly the kind of thing that is wrong the first two
+    times. Through a file, trying another one is an edit.
+
+    Everything about the string is still distrusted. It is length-checked by the launcher
+    before it is staged, terminated here regardless of what the file contained, and handed
+    to rcheevos' parser -- which reports a bad definition as an error code rather than
+    misbehaving. A definition from a text file gets no more faith than one from the server,
+    because eventually it *is* one from the server.
+*/
+static const char* ra_definition(raSnapshot* snapshot) {
+	const u32* block = (const u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION;
+
+	if (block[0] != CARDENGINEI_ARM9_RA_DEFS_MAGIC) {
+		snapshot->rcFromFile = 0;
+		return RA_TEST_DEFINITION;
+	}
+	{
+		u32   length = block[1];
+		char* text   = (char*)(CARDENGINEI_ARM9_RA_DEFS_LOCATION
+		                       + CARDENGINEI_ARM9_RA_DEFS_HEADER);
+
+		if (length == 0
+		 || length >= CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER) {
+			snapshot->rcFromFile = 0;
+			return RA_TEST_DEFINITION;
+		}
+		/*
+		    Terminated here rather than trusted. The launcher writes a terminator, but this
+		    string is about to be walked by a parser and the cost of making sure is one
+		    store.
+		*/
+		text[length] = 0;
+		/*
+		    Trailing newline and carriage return trimmed, because the file was typed by a
+		    human in a text editor and rcheevos would reject the whitespace as syntax.
+		*/
+		while (length > 0 && (text[length - 1] == '\n' || text[length - 1] == '\r'
+		                   || text[length - 1] == ' '  || text[length - 1] == '\t')) {
+			text[--length] = 0;
+		}
+		snapshot->rcFromFile = 1;
+		snapshot->rcDefLength = (u16)length;
+		return text;
+	}
+}
+
+/*
     Bring rcheevos up, once, and report how far it got. Returns the stage reached.
 
     The malloc probe is not defensive habit. rc_runtime_init() allocates the memref list
@@ -223,7 +276,7 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 	}
 
 	activate = rc_runtime_activate_achievement(
-		&runtime, RA_TEST_ACHIEVEMENT_ID, RA_TEST_DEFINITION, 0, 0);
+		&runtime, RA_TEST_ACHIEVEMENT_ID, ra_definition(snapshot), 0, 0);
 
 	snapshot->rcActivate = (s8)activate;
 	if (activate != RC_OK) {

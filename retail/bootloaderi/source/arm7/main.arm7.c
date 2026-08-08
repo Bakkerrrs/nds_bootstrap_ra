@@ -2370,12 +2370,31 @@ int arm7_main(void) {
 			tonccpy((u32*)CARDENGINEI_ARM9_RA_LOCATION, raSrc, CARDENGINEI_ARM9_RA_IMAGE_MAX);
 			raWramLoaded = (*(u32*)CARDENGINEI_ARM9_RA_LOCATION == *raSrc);
 
+			/*
+			    Achievement definitions, if the launcher staged any. A separate copy rather
+			    than part of the image, because the block lives at the top of the window
+			    while the image sits at the bottom -- and the heap between them is shortened
+			    to stop below it, so this is the one region the allocator will not reclaim.
+
+			    Its own magic, checked separately: definitions are optional and a missing
+			    file must leave the binary working on its built-in self-test rather than
+			    reading whatever the window happened to contain.
+			*/
+			if (*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION == CARDENGINEI_ARM9_RA_DEFS_MAGIC) {
+				tonccpy((u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION,
+				        (u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION,
+				        CARDENGINEI_ARM9_RA_DEFS_MAX);
+			} else {
+				*(u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION = 0;
+			}
+
 			if (ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed) {
 				arm9_stateFlag = ARM9_WRAMONARM9;
 				while (arm9_stateFlag != ARM9_READY);
 			}
 		}
 		*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = 0;
+		*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
 
 		toncset((u32*)CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION, 0, 0x1800);
 		*(u32*)(COLOR_LUT_BUFFERED_LOCATION-4) = 0;

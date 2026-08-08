@@ -96,6 +96,40 @@ the last active value — 599 of 600. One short of the target, because on the fr
 reaches it the trigger fires and rcheevos has already stopped reporting. That is the honest
 reading rather than an off-by-one.
 
+### Definitions come from a file now, not from a rebuild
+
+Testing a definition against a running game is the slowest loop in this project: build,
+flash, play, photograph. And a definition is exactly the kind of thing that is wrong the
+first two times — a mistyped address, the wrong size, a condition that never becomes true.
+Compiling one in would have meant a flash cycle per attempt.
+
+So `cardenginei_arm9_ra` reads its definition from
+**`sd:/_nds/nds-bootstrap/ra_achievements.txt`**. One line, the server's own memaddr syntax,
+no rebuild. If the file is absent the binary falls back to its built-in self-test, and
+`rcFromFile` at `+0x98` says which one is running — because a definition that does not
+unlock is a very different problem depending on whether the file was picked up at all.
+
+This is also phase 3's mechanism in miniature. When the launcher eventually logs in and
+fetches a real set before the game boots, the definitions will travel exactly this path:
+launcher → staging buffer → DSi WRAM. Building it now for a hand-typed file means the part
+that has to work under a network later is the part already exercised.
+
+**Where it lives.** The block sits at the *top* of the 256 KB window,
+`0x03778000`–`0x03780000`, and the heap is shortened to stop below it. Putting it inside
+the image the loader copies would have been free — the loader already copies 128 KB into a
+68 KB image — but it would have landed in memory the allocator hands out. The cost is
+`heapSize` going from 188 KB to **156 KB**, which is still room for well over a hundred
+achievements at the ~1 KB each we measured.
+
+**What is distrusted.** The file is the one input here that does not come from us, so it is
+length-checked by the launcher before a byte is read — deliberately not through
+`loadCardEngineBinary()`, which reads a whole file into its destination unbounded, fine for
+a binary this project ships and not fine for a text file a user edits. It is terminated
+again on the WRAM side regardless of what the file contained, trailing whitespace is
+trimmed because a text editor adds a newline and rcheevos would reject it as syntax, and
+the result goes to the same parser that will one day receive strings from the server. It
+gets no more faith than those will.
+
 ### The next task: a real achievement, from a real game
 
 Everything below the client is now proven on hardware. What is missing is the client: the
@@ -2117,8 +2151,9 @@ value — 599 of 600. One short, because on the frame the count reaches the targ
 fires and rcheevos has already stopped reporting. The host test pins it as `target - 1`
 rather than rounding up: the latch should show what was reported, not what would look tidier.
 
-`heapSize` at `+0x60` reads **`0x2F048`** (192,584 bytes, ~188 KB) — the window minus
-the 68 KB image, its `.bss`, and the 8-byte alignment of the base. `heapUsed` at `+0x64` is
+`heapSize` at `+0x60` reads **`0x26EA8`** (159,400 bytes, ~156 KB) — the window minus the
+68 KB image, its `.bss`, the 8-byte alignment of the base, and the 32 KB definitions block
+reserved at the top. `heapUsed` at `+0x64` is
 what rcheevos actually took, and is the first real answer to "how much of 256 KB does this
 eat".
 

@@ -322,7 +322,16 @@ typedef struct raSnapshot {
 	u32 heapTop;         /* +0x8C */
 	u32 mallocProbe;     /* +0x90  what malloc(32) returned; 0 = refused */
 	u32 sbrkProbe;       /* +0x94  what _sbrk(64) returned; 0 = refused */
-} raSnapshot;            /*              0x98 bytes */
+	/*
+	    Which definition is being evaluated. Reported because the two possibilities look
+	    identical once running, and telling them apart is the whole point of being able to
+	    supply one from a file: a definition that does not unlock is a very different problem
+	    depending on whether the file was picked up at all.
+	*/
+	u8  rcFromFile;      /* +0x98  1 if the staged file was used, 0 for the built-in */
+	u8  reserved4;       /* +0x99 */
+	u16 rcDefLength;     /* +0x9A  length of the staged definition, after trimming */
+} raSnapshot;            /*              0x9C bytes */
 
 /*
     How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail
