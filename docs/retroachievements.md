@@ -242,6 +242,28 @@ The host test now reproduces the hardware failure exactly: the same watch resolv
 flag and returns `BAD_TARGET` without it, against a cell whose top byte is deliberately not
 `0x02`. A regression test derived from an observation rather than from a guess.
 
+### The zeros were the wrong cartridge, not the wrong walker
+
+With the mask in, the chain resolved -- `status` went `BAD_TARGET` to `OK` -- and landed on
+`0x0200009C`. That is main RAM's base plus the offset, which is exactly where a null pointer
+lands, and a direct watch on the raw word confirmed it: `0x02159164` held **zero**. So did
+Current Stage and Stages Completed, during active play.
+
+Three zeros can be an uneventful moment. A null pointer during gameplay cannot. That
+combination is the signature of reading the wrong memory, and the explanation turned out to
+be the dullest available: **the code notes are for *Space Invaders Extreme 2*, and the
+cartridge being played was the first game**, which has no achievement set at all. Right
+memory map, wrong cartridge.
+
+Worth separating the two results, because they are independent and only one of them was a
+bug. The 24-bit masking fix was correct on its own evidence -- our walker and rcheevos
+disagreed about one word, and the library was right. It stays. What it bought was a chain
+that resolves; what it revealed was that there was nothing at the end of it.
+
+And this is where the file format earned itself. Both of those rounds cost a text edit and
+ten minutes of play. Neither cost a build, a flash, or a rebuild of anything -- which is
+what the definitions file was introduced to avoid, one round before it was needed.
+
 ### The next task: a real achievement, from a real game
 
 Everything below the client is now proven on hardware. What is missing is the client: the
