@@ -65,6 +65,9 @@ Confirmed on hardware, in order of when each was settled:
 9. **A real login from the launcher** — step 3c, `reached stage 10 of 10`: `ra.cfg` read,
    credentials percent-encoded, `r=login` answered with a token for a real account. Log at
    `docs/logs/ra_wifi_launcher_login-3ds.log`.
+10. **The server recognising the ROM** — `reached stage 11 of 11`, `r=gameid` answered
+    **`GameID 14856`** for `c3b1916756737f2c4117cc95c1d51ac7`. The hash question is closed by
+    the server rather than by eye. Log at `docs/logs/ra_wifi_launcher_gameid-3ds.log`.
 
 Everything from the game's RAM up to a fired trigger is done, and the launcher now reaches the
 RetroAchievements API. **So open question #1 is closed for context A, and nothing in front of
@@ -96,13 +99,14 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **one hardware run of the 11-rung build**: `r=gameid` is written and
-host-tested but no console has asked the server about a hash yet. It is the cheapest decisive
-thing left — the server's own verdict on whether it recognises this dump, where so far the hash
-has only been compared by eye against the set's page.
+The immediate next step is **`r=patch`**, and it is the last piece of step 3. The whole network
+path below it is proven on hardware — chip, link, DHCP, DNS, HTTP, the ROM's hash, a real login,
+and the server returning `GameID 14856` for that hash.
 
-After it, `r=patch` and the parsing are the last of step 3. Everything below them is proven on
-hardware: the chip, the link, DHCP, DNS, HTTP, the hash, and a real login.
+What it needs is not more network. It needs `RA_DEFS_MAX_LINES` raised from **8** — a limit chosen
+when the definitions file was hand-typed — and the reply streamed rather than buffered, against a
+measured 85,656 bytes of heap and a 32,760-byte destination. See *It answered GameID 14856* below
+for both numbers.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -1017,6 +1021,38 @@ That matters because it removes a worry rather than confirming one: the concern 
 would eat the heap and leave `r=patch` nothing. It does not. What is left is whether a whole
 achievement set fits in 88 K, which is a question about `r=patch` alone.
 
+#### It answered `GameID 14856`, and that changes what is left
+
+```
+asking about     c3b1916756737f2c4117cc95c1d51ac7
+884 bytes back
+GameID           14856
+```
+
+Log at `docs/logs/ra_wifi_launcher_gameid-3ds.log`. **The hash question is now closed by the
+server**, not by a comparison against a web page: RetroAchievements has this dump, under an ID
+that `r=patch` can be asked about. The heap stayed at `top 02326000` through this rung too, so
+the budget for the last request is **85,656 bytes** — 73,728 of safe growth plus 11,928 free.
+
+So the entire network path is proven end to end, and **the last piece of step 3 is not a network
+question at all.** It is a size question, and it has two numbers:
+
+| | |
+| --- | --- |
+| heap available while lwip is up | 85,656 bytes |
+| the definitions block the set has to land in | **32,760 bytes of text** |
+| definitions the WRAM binary will parse | **`RA_DEFS_MAX_LINES` is 8** |
+
+The 8 is the one that matters, and it is not a bug — it was chosen when the definitions file was
+a hand-typed line or three, and `docs` has said so since. A real set is a hundred or more
+achievements. So `r=patch` cannot be written without raising it, which means touching
+`ra_rcheevos.c` — code that is proven on hardware and fires real achievements — so it is worth
+doing deliberately rather than as a side effect of a fetch.
+
+The 32,760 is probably enough and has never been checked: RA `MemAddr` strings run from tens to a
+few hundred characters, so a hundred of them is plausibly 20-25 K. The measurement to take is the
+one `r=patch` itself provides.
+
 #### `r=gameid`: the one question only the server can answer
 
 `r=patch` needs a `GameID`, and it comes from `dorequest.php?r=gameid&m=<hash>` — but the reason
@@ -1399,6 +1435,8 @@ encoding) and it looked as though nothing was being read. Liveness is proved by
 | `docs/logs/ra_wifi_launcher-3ds.log` | The step-two run that passed. Evidence, and a host-test fixture |
 | `docs/logs/ra_wifi_launcher_http-3ds.log` | The step-3a run that reached the API. Same |
 | `docs/logs/ra_wifi_launcher_hash-3ds.log` | The step-3b run: the hash, and the 382,212-byte figure that justifies streaming it |
+| `docs/logs/ra_wifi_launcher_login-3ds.log` | The step-3c run: a real login, and a heap that never grew |
+| `docs/logs/ra_wifi_launcher_gameid-3ds.log` | `GameID 14856`: the server's own verdict on the hash |
 | `retail/dsiwifi9/` | dsiwifi's ARM9 half rebuilt with lwip's pools cut to fit the launcher |
 | `retail/dsiwifi9/include/lwipopts_ndsbs.h` | The sizing, and why no `-I` path could have done it |
 | `libs/dsiwifi` | The driver, a submodule, shared with `tools/wifiprobe/` |
