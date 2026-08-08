@@ -587,21 +587,69 @@ the legacy Mitsumi core cannot. The WEP problem — the one that looked like it 
 live networking useless even if it worked, because routers stopped offering WEP — does not
 apply. The chip associated to an ordinary modern home network.
 
-**The Atheros firmware was not a problem here.** The highest-risk unknown in the whole plan
-was whether the chip arrives with its firmware uploaded or stone cold. Launched as ordinary
-DSi-mode homebrew it came up. That is *not* the same as it coming up under nds-bootstrap's
-boot path — which is step two and remains open — but it does mean the chip and the driver
-work on this specific 3DS and its specific WiFi board, which was in genuine doubt given how
-much less `dsiwifi` has been tested on 3DS hardware than on a DSi.
+**The firmware question is answered, and it dissolves rather than passes.** This was
+supposed to be the highest risk in the plan: the AR6002/AR6013/AR6014 keeps no firmware in
+flash, the Xtensa code is normally uploaded by the system menu, and booting through ntrboot
+may skip that — so the chip might arrive cold and need the full BMI bootloader plus a
+firmware image read out of eMMC. Reading eMMC is exactly where SD contention would bite
+under nds-bootstrap.
+
+The log says the chip *did* arrive cold:
+
+```
+Mfg 02010271 Cid 0d000001 (AR6014)
+AR6014 needs firmware upload 0.
+Reset cause: 00000002
+BMI version: 2300006f
+BMI finishing...
+Launching!
+Firmware 609c0202 ready, handshaking...
+```
+
+`needs firmware upload 0` is `dsiwifi` reporting that the host-interest word at `+0x58` —
+the flag the system menu would have set — reads zero. And then it launched the firmware
+anyway and the handshake succeeded.
+
+The reason is in the source: **`dsiwifi`'s entire AR6014 firmware-upload block is inside
+`#if 0`.** It is compiled out. No `ar6014_part*_bin` is written, nothing is read from eMMC,
+nothing is read from anywhere. All the driver does is reset the chip into its bootloader,
+poke a few BMI registers, and start what is already there — and on the AR6014 that works,
+which is presumably why upstream disabled the block. Its own comment, still in the code,
+reads *"TODO: Source AR6014 bins from SAFE_FIRM nwm? Or just leave them because they're
+only 4KiB"*.
+
+So bringing the chip up needs **no external data at all**: no eMMC, no NAND, no SD. The
+worst of the three obstacles was a concern about a code path that does not execute. That
+also removes SD contention from the firmware question specifically — though not from the
+rest of the ARM7, where nds-bootstrap serves ROM reads.
+
+The rest of the log is a clean WPA2 association: a four-way handshake, a GTK, and DHCP.
+
+```
+WPA2 Handshake 1/4:  ...  WPA2 Handshake 3/4:  Added GTK 1  Done auth
+Dev 04:03:d6:f9:36:52   AP 00:5f:67:e9:f5:70
+IP 192.168.0.111
+```
+
+And the chip is an **AR6014** — the 3DS's DWM-W028, the variant `dsiwifi` is least tested
+against and the one this project actually has. It worked on the first run.
 
 **Plain HTTP to RetroAchievements works from the console**, not just from a PC. The API
 returned its own `invalid_credentials` JSON, which is the check that distinguishes reaching
 RetroAchievements from reaching a captive portal that answered on its behalf.
 
-So of the three obstacles, one is gone entirely (TLS was never needed and is now confirmed
-end to end from the hardware), one is much smaller than feared (WPA2, not WEP), and one is
-untouched: the ARM7 belongs to the game inside nds-bootstrap, and none of the above was
-tested there.
+So of the three obstacles named before any of this was tested, two are gone and one is
+untouched:
+
+| Obstacle | Status |
+| --- | --- |
+| TLS required for `dorequest.php` | **Gone.** Plain HTTP, confirmed end to end from the console. |
+| WEP-only, so unusable on modern routers | **Gone.** WPA2-PSK with AES, associated and DHCP'd. |
+| Atheros firmware must be uploaded from eMMC | **Gone.** The upload path is `#if 0` and the chip starts from BMI alone. |
+| SD/SDIO controller contention | **Reduced.** Separate controllers, separate NDMA slots, and no eMMC read for firmware. |
+| The ARM7 belongs to the game | **Untouched.** Nothing above ran anywhere near nds-bootstrap. |
+
+That last row is now the whole of open question #1.
 
 One thing the run improved about the probe itself. `dsiwifi` narrates asynchronously and
 kept printing after the summary — the `WMI_BSSINFO` line arrived *after* "log written".
