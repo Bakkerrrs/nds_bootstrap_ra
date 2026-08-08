@@ -150,8 +150,12 @@ int main(void) {
 	    window. Mapped so ra_definition() has something real to read; left with no magic, so
 	    every test below runs against the built-in self-test definition unless it says
 	    otherwise.
+
+	    Mapped at the block's real size rather than a page, because the last test in this
+	    file stages the shipped example file here and that file is mostly comments.
 	*/
-	if (mmap((void*)CARDENGINEI_ARM9_RA_DEFS_LOCATION, 0x1000, PROT_READ | PROT_WRITE,
+	if (mmap((void*)CARDENGINEI_ARM9_RA_DEFS_LOCATION, CARDENGINEI_ARM9_RA_DEFS_MAX,
+	         PROT_READ | PROT_WRITE,
 	         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
 		perror("mmap definitions block");
 		return 2;
@@ -894,6 +898,71 @@ int main(void) {
 		*/
 		ra_watch_clear();
 		ra_install_defaults(&snapshot);
+	}
+
+	/*
+	    The shipped example file, parsed exactly as the WRAM binary would parse it.
+
+	    This exists because of a mistake it would have caught. The Super Mario 64 DS round
+	    was written with `0xH08e43c=0x38`, and in memaddr an operand starting `0x` is a
+	    *memory read*, not a hex constant -- so that line compared Screen ID against the
+	    16-bit word at address 0x38 and would have parsed cleanly, activated cleanly, and
+	    quietly never fired. Hex constants take an `h` prefix.
+
+	    The file had been rewritten four times by then and had never once been through the
+	    parser. It is the document the user edits and the only part of this system whose
+	    errors are silent, so it is now checked here rather than on hardware.
+	*/
+	printf("\nthe shipped example file parses\n");
+	{
+		char* const  block = (char*)CARDENGINEI_ARM9_RA_DEFS_LOCATION;
+		char* const  text  = block + CARDENGINEI_ARM9_RA_DEFS_HEADER;
+		const char*  path  = "tools/ra_achievements.example.txt";
+		FILE*        f     = fopen(path, "rb");
+		raSnapshot   probe;
+		size_t       len;
+
+		if (!f) {
+			printf("  cannot open %s -- run from the repository root\n", path);
+			failures++;
+		} else {
+			len = fread(text, 1, CARDENGINEI_ARM9_RA_DEFS_MAX
+			                     - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1, f);
+			fclose(f);
+			text[len] = 0;
+
+			CHECK(len > 0);
+			CHECK(len < CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER);
+
+			memset(&probe, 0, sizeof(probe));
+			*(u32*)(block + 4) = (u32)len;
+			*(u32*)block       = CARDENGINEI_ARM9_RA_DEFS_MAGIC;
+
+			CHECK(ra_rc_init(&probe) == RA_RC_ACTIVE);
+			CHECK(probe.rcFromFile == 1);
+			/*
+			    Every line accounted for: no line was rejected, and the definitions that
+			    activated are the file's own rather than the built-in fallback, which
+			    ra_rc_init() substitutes when nothing parses.
+			*/
+			CHECK(probe.rcBadLine == 0);
+			CHECK(probe.rcActivate == RC_OK);
+			CHECK(probe.rcActivated == 3);
+			/* The file's watches replaced the defaults. The count lives in the module
+			   until a tick copies it out, and ticking here would dereference the game's
+			   addresses, which this host does not have mapped. */
+			CHECK(watchCount == 4);
+			/*
+			    Comments and watches together must still fit the split limit, and the file
+			    should not be sitting exactly on it -- 7 of 8 leaves room for one more line
+			    without a code change, and pins the fact that there is a limit at all.
+			*/
+			CHECK(watchCount + probe.rcActivated <= RA_DEFS_MAX_LINES);
+
+			*(u32*)block = 0;
+			ra_watch_clear();
+			ra_install_defaults(&snapshot);
+		}
 	}
 
 

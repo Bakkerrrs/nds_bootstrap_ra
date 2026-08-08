@@ -279,6 +279,92 @@ the mask, and the correct cartridge — cost a text edit and ten minutes of play
 None cost a build or a flash, which is what the definitions file was introduced to avoid,
 one round before it turned out to be needed.
 
+### The canary round, and knowing when to stop paying for a game
+
+The mask round left one question open — do these notes describe this cartridge at all — and
+the first attempt to answer it was a badly designed test. The canary chosen was *Extreme
+Mode Unlocked*, and it read zero. Zero is what that address reads on a freshly downloaded
+ROM with no save file, whether the addressing is right or wrong. **A test that returns the
+same answer either way is not a test**, and asking for a hardware session to run it was the
+mistake, not the reading it produced.
+
+The replacement was `0x13c9c4`, *In Title Screen/Records Loop*: runtime state, no save
+involved, and a state the console can be put into deliberately. Two readings, one on the
+title screen and one during play, with three distinguishable outcomes — changed, both zero,
+or unchanged nonsense.
+
+The answer was the third, and two other watches agreed with it:
+
+| | Title screen | In game | The notes say |
+| --- | --- | --- | --- |
+| Current Stage `0x1593d0` | `0x02` | `0x79` | `0x00`–`0x1d` |
+| game state pointer `0x159164` | `0x02159158` | `0x02159158` | a pointer that moves between scenes |
+| Main Menu information `0x155288` | `0` | `0` | non-zero on the menu |
+
+`0x79` is outside the documented range of the field entirely, and a game-state pointer that
+holds the identical word on the title screen and mid-run is not a game-state pointer. So the
+memory is live — these are not unmapped reads, they return plausible-looking DS values — and
+the fields are not the fields. **A systematic offset between the notes' addressing and this
+dump**, which no further watch can correct.
+
+The obvious next move was `md5sum` against the set's supported files. The user could not
+find a dump that matched, and at that point the honest thing is to stop: every further round
+costs a play session to re-confirm something already known. Changing games is cheaper than
+chasing a hash.
+
+### Super Mario 64 DS, chosen for the sentence at the top of its notes
+
+> This Real Set has ONLY one ROM. It's EU ROM. All addresses are from EU ROM.
+
+That single line is why this game replaces *Extreme 2*. One supported ROM means there is
+exactly one right answer to "is this the dump the notes describe", and it can be settled
+with a hash **before** the console is switched on. Three rounds were spent discovering
+by measurement what a minute of arithmetic can now decide.
+
+The canary improves too. The old one could only report *changed* or *did not change*, and
+noise can produce a change. Screen ID at `0x8e43c` reports a **specific documented byte** —
+`0x37` on the Main Menu, `0x38` on File Select — and noise cannot produce `0x37`. Map ID at
+`0x9f2f8` gives a second predicted value from an unrelated address, and two independent
+addresses agreeing is what rules out coincidence.
+
+The character pointer at `0x9b450` is read **raw** rather than followed. Its value is the
+evidence, and following it would hide a null — which is precisely what the 24-bit mask did
+one round earlier. The chain still gets exercised, by rcheevos rather than by the walker,
+through a guarded definition:
+
+```
+0xH08e43c=h38_d0xH08e43c!=h38          reached File Select
+0xH09f2f8=h06_d0xH09f2f8!=h06          entered Bob-omb Battlefield
+0xW09b450!=0_I:0xW09b450_0xX00005C!=0  Mario is loaded, and the pointer is real first
+```
+
+The first fires within seconds of boot, before a level is loaded — so if the addresses are
+right, something unlocks almost immediately and the round is decided without playing. The
+third is the one that reaches code nothing else does: the guard condition exists because a
+null pointer plus `0x5C` still lands inside main RAM and reads whatever happens to be
+sitting there, which would be a fire that means nothing.
+
+### `h38` and not `0x38`: the example file now goes through the parser
+
+Those three definitions were first written as `0xH08e43c=0x38`. In memaddr an operand
+beginning `0x` is a **memory read**, not a hex constant — so that line compared Screen ID
+against the 16-bit word at address `0x38`. Hex constants take an `h` prefix; bare digits are
+decimal.
+
+It would have parsed cleanly, activated cleanly, reported `rcActivated = 3` and
+`rcBadLine = 0`, and never fired. Every field in the snapshot would have said the round was
+working. That is the worst failure mode this system has, and it would have cost a play
+session to not-quite-diagnose.
+
+The file had been rewritten four times by then and had **never once been through the
+parser**. It is the one document the user edits, and the only part of the system whose
+errors are silent. So the host test now reads `tools/ra_achievements.example.txt` off disk,
+stages it into the definitions block exactly as the bootloader would, and runs the real
+`ra_rc_init()` over it: no rejected lines, three definitions activated from the file rather
+than the built-in fallback, four watches installed, and the total still inside the
+eight-line split limit. Seconds instead of an evening, and it fails on the syntax error that
+motivated it.
+
 ### The next task: a real achievement, from a real game
 
 Everything below the client is now proven on hardware. What is missing is the client: the
