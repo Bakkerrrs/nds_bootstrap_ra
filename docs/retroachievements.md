@@ -31,37 +31,57 @@ is what you need to pick the work back up.
 
 ### State
 
-Phase 1 is done and confirmed on hardware across three sessions and two games. The
-reader evaluates a watchlist with pointer chains, re-resolved from scratch every frame,
-and every value predicted in advance has matched what the hardware showed.
+**The client-side half of an achievement is finished and proven on real hardware.**
+Published RetroAchievements code notes, written as real memaddr definitions, evaluated by
+rcheevos inside a retail DS game running natively on a 3DS, firing on the correct frames.
+Nothing is emulated and nothing is stubbed. What is *not* done is telling the server —
+nothing has ever been sent anywhere.
 
-`cardenginei_arm9_ra` — the separate ARM9 binary in DSi WRAM — is **built, loaded, called,
-and confirmed on hardware**, with a working `malloc` over its arena. See
-*`cardenginei_arm9_ra` — running on hardware* below for the readings.
+Confirmed on hardware, in order of when each was settled:
 
-**`rcheevos` is in, and it evaluates a real achievement definition** — on the host, where
-the test now runs the achievement out to its target and watches the trigger fire. Four
-hardware readings went into getting the ground under it solid, and each one closed a
-question:
+1. **Phase 1, the watchlist and pointer chains** — across several sessions and three games.
+   Re-resolved from scratch every frame; every value predicted in advance has matched.
+2. **`cardenginei_arm9_ra`**, the separate ARM9 binary in DSi WRAM — built, loaded, called,
+   with a working allocator over its arena. newlib's `malloc` does **not** work in this
+   window; ours does.
+3. **rcheevos evaluating a synthetic definition** — `rcTriggered = 1`, `rcLinesMax` 1
+   scanline of 263.
+4. **rcheevos evaluating three real ones** — Super Mario 64 DS, `rcTriggered = 3`, including
+   a guarded `AddAddress` chain and two delta memrefs. See *It fired* below.
+5. **WiFi** — `tools/wifiprobe/` associated to WPA2-PSK and got RetroAchievements to answer
+   over plain HTTP from this exact 3DS, stage 6 of 6.
 
-1. `ra_startup()` reported a dead heap as a working one on every frame after the first — a
-   bug of mine, and the reason the next three readings were built to be unambiguous.
-2. **newlib's `malloc` does not work in this window.** `_sbrk()` returned the predicted base
-   address; `malloc` refused anyway, without ever calling it successfully.
-3. **Our allocator does.** 2,728 bytes of real rcheevos allocations, `mallocProbe` exactly on
-   `heapBase + 8`.
-4. **The snapshot has no RetroAchievements console address.** Main RAM here is 16 MB and the
-   map covers 4 MB, so the self-test moved to console address 0.
+Everything from the game's RAM up to a fired trigger is done. Everything past the trigger is
+network, so **open question #1 (transport) is now the critical path with nothing in front of
+it** — and its first rung has already passed in isolation. What is untested is whether any
+of it survives inside nds-bootstrap, where the ARM7 belongs to the game.
 
-5. **It works.** `rcTriggered = 1` — an achievement unlocked on a 3DS running a DS game,
-   with `rcLinesMax` at 1 scanline out of 263.
-
-So the core of phase 2 is done and confirmed on hardware. What is missing now is the
-*client*: the piece that knows which achievements a game has. That makes open question #1,
-the network transport, the critical path.
-
-The ARM9 cardengine has **436 bytes** left. It had 28 before the watchlist moved out, which
+The ARM9 cardengine has **412 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
+
+### Picking it up in a fresh session
+
+The five things a new session needs that are not obvious from the source:
+
+| | |
+|---|---|
+| Branch | `claude/fase-1-avance-965hk5` |
+| Snapshot address | `tools/ra_snapshot_addr.sh` — currently `0x027FED50` for `cardenginei_arm9`, which is the variant a retail DS game loads on a 3DS. **Re-run it after every build**; it moves. |
+| Magic to look for | ASCII `RA2S` (`52 41 32 53`). `RA1S`/`RA0S` means a stale address from an older build. |
+| Host test | `./tools/ra_reader_test.sh` — no toolchain, no hardware, seconds. Run it before anything. |
+| Full build | `make` from the top level, **serially**, with `lzss` on `PATH`. See *Building*. |
+
+Two working habits this document was largely written by, both of which were learned by
+paying for them:
+
+- **A reading that cannot come out two ways is not a test.** Two rounds were spent on canaries
+  whose value was the same whether the hypothesis held or not.
+- **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
+  in `ra_achievements.txt` costs a text edit. The file exists for that reason.
+
+The immediate next step is *#1f — the rest of the ladder*: move the probe's working network
+path out of standalone DSi-mode homebrew and into nds-bootstrap's launcher, which is a third
+network context and the one that makes `r=patch` and `r=awardachievement` reachable.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -471,8 +491,15 @@ the test fails rather than this table going quietly stale.
   ladder **passed on hardware**: `tools/wifiprobe/` associated to a WPA2-PSK network and got
   RetroAchievements to answer over plain HTTP, stage 6 of 6. So WPA2 works, TLS is not
   needed, and the Atheros comes up on this console. What is untested is whether any of that
-  survives inside nds-bootstrap, where the ARM7 belongs to the game. See the open questions
-  section. See the open questions section.
+  survives inside nds-bootstrap, where the ARM7 belongs to the game. See *#1f — the rest of
+  the ladder*.
+- **Reporting an unlock has never been attempted.** Evaluation is done; `r=awardachievement`
+  is not written, and neither is `r=patch`. Both wait on the transport above.
+- **Game identification.** Nothing yet computes the RetroAchievements hash for a DS ROM, so
+  the launcher cannot ask the server *which* set to fetch. Today's definitions came from a
+  file the user edited by hand.
+- **The overlay still has no font**, which blocks naming the achievement that unlocked, the
+  overlay rewrite, and the `surveyBlocks()` bitmap-mode bug.
 - **CI has never run on this repository.** The workflow exists and the build is verified
   to pass on the pinned toolchain, but Actions appears disabled for the fork, so the host
   test and the space-budget report added to it have never executed. Enabling it is a repo
@@ -1019,9 +1046,16 @@ things to test. So the order is not "build the client":
    of 6 on hardware.** See *The probe's answer* below.
 2. **The chip's state under our boot path.** Coming in through nds-bootstrap, is `WLANFIRM`
    already uploaded? A WMI init that succeeds versus one that needs BMI plus an upload
-   distinguishes them.
-3. **Only if both pass**, integrate behind the VBlank hook as a non-blocking state machine,
-   and watch for ARM7 contention with the SD path.
+   distinguishes them. This is context **A**, the launcher — the same context the probe
+   already succeeded in, reached by a different boot path.
+3. **The definitions block, filled from the network instead of by hand.** Once 2 passes, the
+   launcher fetches a set and writes it where `ra_achievements.txt` is written today. That
+   destination is already proven end to end on hardware: three real definitions came through
+   it and fired. So this step is transport plus `r=patch` parsing, and nothing new below it.
+4. **Only after those**, live submission from inside the game — context **B**, behind the
+   VBlank hook as a non-blocking state machine, watching for ARM7 contention with the SD
+   path. Queue-and-flush from the launcher (see #1g) makes this an optimisation rather than
+   a prerequisite, which is why it is last rather than second.
 
 If 1 or 2 goes badly, the deferred design is the sensible answer rather than the consolation
 one: a 3DS-mode companion has an ARM11, a mature network stack, WPA2, TLS, and no contest for
