@@ -216,7 +216,26 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
     misbehaving. A definition from a text file gets no more faith than one from the server,
     because eventually it *is* one from the server.
 */
-#define RA_DEFS_MAX_LINES 8
+/*
+    128, raised from 8 when `r=patch` arrived.
+
+    The 8 was right for what it was for: the definitions file was a hand-typed line or three,
+    and a limit that small made the split obviously bounded. A real achievement set is a
+    hundred definitions or more, so the number had to follow the source of the definitions
+    changing from a person to a server.
+
+    What it costs is 4 bytes of pointer each, and they are `static` below rather than on the
+    stack for that reason -- `ra_rc_init()` is reached from the cardengine's own context, whose
+    stack is not this binary's to spend 512 bytes of. It runs once, so static is not a
+    compromise.
+
+    The other half of the limit is the block itself: 32,760 bytes of text at
+    CARDENGINEI_ARM9_RA_DEFS_MAX. 128 definitions therefore average 255 bytes each before the
+    block runs out first, which is the constraint worth knowing about -- RA memaddr strings run
+    from tens to a few hundred characters. tools/ra_reader_test.c pins the two numbers against
+    each other so raising one without the other fails on the host.
+*/
+#define RA_DEFS_MAX_LINES 128
 
 /*
     Split the staged text into lines, in place.
@@ -410,9 +429,9 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 	}
 
 	{
-		char* text = (char*)ra_definition(snapshot);
-		char* lines[RA_DEFS_MAX_LINES];
-		u8    count = 1;
+		char*        text = (char*)ra_definition(snapshot);
+		static char* lines[RA_DEFS_MAX_LINES];
+		u8           count = 1;
 		u8    i;
 
 		lines[0] = text;

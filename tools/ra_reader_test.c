@@ -31,15 +31,38 @@
 #include <sys/mman.h>
 
 /*
-    The linker script supplies these on the target. Here they span a scratch buffer, so the
-    .bss zeroing and the arena arithmetic are exercised for real rather than stubbed. The
-    allocator probe inside ra_startup() runs against the host's malloc -- our _sbrk() is
-    never reached, so heapUsed stays 0 here -- but the staging logic around it is the same
-    code the hardware runs.
+    __bss_start, __bss_end and __vram_top are NOT defined here. The runner supplies them with
+    --defsym, as absolute addresses inside the real DSi WRAM window this test mmaps below, and
+    that is a fix rather than a flourish.
+
+    They used to be 1-byte dummies in this file, and the cardengine takes their *addresses*:
+    `ra_startup(__bss_start, __bss_end, ...)` zeroes the range between the first two and puts
+    its arena at the second. Which meant the arena was whatever the linker's ordering of three
+    dummy symbols happened to make it -- and the linker is under no obligation to keep them in
+    declaration order. It bit twice. Adding rcheevos' hash.c to the link put __vram_top *below*
+    __bss_end, making the span -1 and the arena the whole process; and raising
+    RA_DEFS_MAX_LINES from 8 to 128 added 512 bytes of statics to this translation unit and did
+    it again. Both times the suite passed at -O0 and segfaulted at -O1, in tests unrelated to
+    the change.
+
+    With --defsym the addresses are chosen rather than inherited, and they mirror hardware: the
+    window at CARDENGINEI_ARM9_RA_LOCATION, a 16K .bss at the bottom, the definitions block at
+    the top, and the arena between them. Nothing added to this file can move it again.
+
+    The scratch window below is the same lesson at smaller scale. The tests that call
+    ra_startup() directly hand it a .bss range and an arena top, and the arena has to be real
+    memory *contiguous with* the .bss -- which two separate arrays, `fakeBss` and `fakeArena`,
+    were only ever by the linker's good manners. One buffer with offsets into it is correct by
+    construction.
 */
-static char fakeBss[4096];
-static char fakeArena[0x3B000];
-char __bss_start[1], __bss_end[1], __vram_top[1];   /* referenced by cardengine.c */
+#define FAKE_BSS_BYTES   4096
+#define FAKE_ARENA_BYTES 0x3B000
+
+static char fakeWindow[FAKE_BSS_BYTES + FAKE_ARENA_BYTES];
+
+#define FAKE_BSS      (fakeWindow)
+#define FAKE_BSS_END  (fakeWindow + FAKE_BSS_BYTES)
+#define FAKE_TOP      (fakeWindow + sizeof(fakeWindow))
 
 /*
     RA_ALLOC_NO_LIBC_NAMES keeps our malloc from replacing glibc's underneath printf and the
@@ -463,10 +486,16 @@ int main(void) {
 	    Mapped at the block's real size rather than a page, because the last test in this
 	    file stages the shipped example file here and that file is mostly comments.
 	*/
-	if (mmap((void*)CARDENGINEI_ARM9_RA_DEFS_LOCATION, CARDENGINEI_ARM9_RA_DEFS_MAX,
+	/*
+	    The whole DSi WRAM window, at the address it really has, rather than just the
+	    definitions block at the top of it. The allocator's arena lives in here now -- see the
+	    note about --defsym above -- so it has to be real memory, and mapping the true window
+	    means heapSize and the arena arithmetic are the ones hardware computes.
+	*/
+	if (mmap((void*)CARDENGINEI_ARM9_RA_LOCATION, CARDENGINEI_ARM9_RA_SIZE,
 	         PROT_READ | PROT_WRITE,
 	         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
-		perror("mmap definitions block");
+		perror("mmap the WRAM window");
 		return 2;
 	}
 	*(u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION = 0;
@@ -654,14 +683,14 @@ int main(void) {
 		    Run before the real startup, because ra_startup() only does its work once per
 		    boot and this needs to be that once.
 		*/
-		char* const bssEnd = fakeBss + sizeof(fakeBss);
+		char* const bssEnd = FAKE_BSS_END;
 
-		CHECK(ra_startup(fakeBss, bssEnd, bssEnd) == RA_STAGE_HEAP);
+		CHECK(ra_startup(FAKE_BSS, bssEnd, bssEnd) == RA_STAGE_HEAP);
 		/*
 		    The regression. This second call used to return RA_STAGE_ALLOC and claim a
 		    working heap, because the "already ran" flag is set before the probe.
 		*/
-		CHECK(ra_startup(fakeBss, bssEnd, bssEnd) == RA_STAGE_HEAP);
+		CHECK(ra_startup(FAKE_BSS, bssEnd, bssEnd) == RA_STAGE_HEAP);
 		CHECK(ra_malloc_probe() == 0);
 		CHECK(ra_sbrk_probe() == 0);   /* no arena was taken, which is why it failed */
 		CHECK(ra_heap_size() == 0);
@@ -672,11 +701,10 @@ int main(void) {
 	}
 
 	printf("\nstartup zeroes .bss once and measures the arena\n");
-	memset(fakeBss, 0xA5, sizeof(fakeBss));
-	CHECK(ra_startup(fakeBss, fakeBss + sizeof(fakeBss),
-	                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_ALLOC);
-	CHECK(fakeBss[0] == 0 && fakeBss[sizeof(fakeBss) - 1] == 0);
-	CHECK(ra_heap_size() == 0x3B000);
+	memset(FAKE_BSS, 0xA5, FAKE_BSS_BYTES);
+	CHECK(ra_startup(FAKE_BSS, FAKE_BSS_END, FAKE_TOP) == RA_STAGE_ALLOC);
+	CHECK(FAKE_BSS[0] == 0 && FAKE_BSS[FAKE_BSS_BYTES - 1] == 0);
+	CHECK(ra_heap_size() == FAKE_ARENA_BYTES);
 	/* The probe allocated, wrote, read back and freed, so the arena is whole again. */
 	CHECK(ra_heap_used() == 0);
 	CHECK(ra_malloc_probe() != 0);
@@ -684,10 +712,9 @@ int main(void) {
 	    Second call must be a no-op. The flag that says so lives in .data, so the zeroing
 	    cannot clear it -- which is the point of putting it there.
 	*/
-	fakeBss[0] = 0x42;
-	CHECK(ra_startup(fakeBss, fakeBss + sizeof(fakeBss),
-	                 fakeBss + sizeof(fakeBss) + 0x3B000) == RA_STAGE_ALLOC);
-	CHECK(fakeBss[0] == 0x42);
+	FAKE_BSS[0] = 0x42;
+	CHECK(ra_startup(FAKE_BSS, FAKE_BSS_END, FAKE_TOP) == RA_STAGE_ALLOC);
+	CHECK(FAKE_BSS[0] == 0x42);
 
 	printf("\n_sbrk refuses everything, so the arena has one owner\n");
 	{
@@ -828,16 +855,27 @@ int main(void) {
 			CHECK(strcmp(lines[2], "0x159992>d0x159992") == 0);
 		}
 
-		/* A file with more lines than there are slots stops rather than overruns. */
+		/*
+		    A file with more lines than there are slots stops rather than overruns.
+
+		    The fixture is sized *from* the limit rather than to a round number, which it was
+		    not: `many[256]` held twelve 12-byte lines comfortably while RA_DEFS_MAX_LINES was
+		    8, and overflowed the moment it became 128. glibc's fortify check caught it, which
+		    is the system working -- but a buffer whose size has to be re-derived by hand every
+		    time a constant moves is a fixture waiting to lie.
+		*/
 		{
-			char*  lines[RA_DEFS_MAX_LINES];
-			char   many[256];
-			int    n;
-			u32    len = 0;
+			enum { LINE_BYTES = sizeof("0xH00ffff=1\n") };
+			static char* lines[RA_DEFS_MAX_LINES];
+			static char  many[(RA_DEFS_MAX_LINES + 4) * LINE_BYTES];
+			int          n;
+			u32          len = 0;
 
 			for (n = 0; n < RA_DEFS_MAX_LINES + 4; n++) {
 				len += sprintf(many + len, "0xH00%04x=1\n", n);
 			}
+			/* And it has to fit where it is about to be copied. */
+			CHECK(len < CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER);
 			memcpy(text, many, len + 1);
 			CHECK(ra_split_definitions(text, len, lines) == RA_DEFS_MAX_LINES);
 		}
@@ -1267,6 +1305,16 @@ int main(void) {
 			    without a code change, and pins the fact that there is a limit at all.
 			*/
 			CHECK(watchCount + probe.rcActivated <= RA_DEFS_MAX_LINES);
+			/*
+			    And the two halves of the limit have to stay consistent with each other. 128
+			    definitions have to fit the 32,760-byte block, which caps the average memaddr
+			    string; raising the line count without checking that is how the block would
+			    quietly become the real limit instead. RA strings run from tens to a few
+			    hundred characters, so 255 average is the number to know.
+			*/
+			CHECK(RA_DEFS_MAX_LINES == 128);
+			CHECK((CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER)
+			      / RA_DEFS_MAX_LINES >= 200);
 
 			*(u32*)block = 0;
 			ra_watch_clear();

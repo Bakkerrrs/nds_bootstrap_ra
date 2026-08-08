@@ -6,6 +6,15 @@
 #
 # The two link options are what make it a real test:
 #
+#   --defsym=__bss_start/__bss_end/__vram_top
+#       the cardengine takes the *addresses* of these three to decide what to zero and where
+#       its arena goes. They used to be 1-byte dummies inside ra_reader_test.c, which made the
+#       arena depend on the linker's ordering of three symbols -- and that ordering changed
+#       twice, silently, each time something was added to the link or to the file, giving a
+#       negative span and an allocator that scribbled over the whole process. Here they are
+#       absolute addresses inside the real WRAM window the test mmaps, so the arena is chosen
+#       rather than inherited and nothing added later can move it.
+#
 #   -no-pie -Wl,-Ttext-segment=0x02100000
 #       puts the test's globals, including the reader's own snapshot buffer, inside
 #       the 0x02000000-0x03000000 range the reader validates addresses against. The
@@ -70,6 +79,9 @@ $CC -std=gnu99 -Wall -Wno-unused-function -Wno-pointer-to-int-cast -Wno-int-to-p
 	-I"$out/include" -Iretail/common/include \
 	-I"$RC/include" -I"$RC/src" \
 	-no-pie -Wl,-Ttext-segment=0x02100000 \
+	-Wl,--defsym=__bss_start=0x03740000 \
+	-Wl,--defsym=__bss_end=0x03744000 \
+	-Wl,--defsym=__vram_top=0x03780000 \
 	tools/ra_reader_test.c \
 	$rc_runtime_sources \
 	"$RC"/src/rc_util.c "$RC"/src/rc_compat.c "$RC"/src/rc_version.c \
