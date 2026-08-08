@@ -72,7 +72,7 @@ endif
 export GAME_ICON := $(CURDIR)/$(ASSETS)/icon.bmp
 
 #.PHONY: cardengine_arm7 cardengine_arm9 bootloader BootStrap clean
-.PHONY: all dist release nightly bootloader bootloader2 bootloaderi bootloaderi2 cardengine_arm7 cardengine_arm7_ace3dsp cardengine_arm7_music cardengine_arm9_igm cardengine_arm9_igm_extmem cardengine_arm9 cardengine_arm9_32 cardengine_arm9_start cardengine_arm9_start_foto cardengine_arm9_alt cardengine_arm9_alt_gsdd cardengine_arm9_alt2 cardengine_arm9_alt3 cardengine_arm9_extmem cardengine_arm9_extmem_gsdd cardengine_arm9_extmem_start cardengine_arm9_extmem_foto cardengine_arm9_dldipatcher cardengine_arm9_slot2heap cardenginei_arm7 cardenginei_arm7_alt cardenginei_arm7_twlsdk cardenginei_arm7_twlsdk3 cardenginei_arm7_dsiware cardenginei_arm7_dsiware3 cardenginei_arm7_cheat cardenginei_arm9_colorlut cardenginei_arm9_ra cardenginei_arm9_igm cardenginei_arm9 cardenginei_arm9_gsdd cardenginei_arm9_dldi cardenginei_arm9_gsdd_dldi cardenginei_arm9_twlsdk cardenginei_arm9_twlsdk3 cardenginei_arm9_twlsdk_dldi cardenginei_arm9_twlsdk3_dldi cardenginei_arm9_dsiware cardenginei_arm9_dsiware3 preLoadSettings apfix mobiclipOffsets dsi2dsSavePatches arm7/$(TARGET).elf arm9/$(TARGET).elf clean
+.PHONY: all dist release nightly dsiwifi dsiwifi9 bootloader bootloader2 bootloaderi bootloaderi2 cardengine_arm7 cardengine_arm7_ace3dsp cardengine_arm7_music cardengine_arm9_igm cardengine_arm9_igm_extmem cardengine_arm9 cardengine_arm9_32 cardengine_arm9_start cardengine_arm9_start_foto cardengine_arm9_alt cardengine_arm9_alt_gsdd cardengine_arm9_alt2 cardengine_arm9_alt3 cardengine_arm9_extmem cardengine_arm9_extmem_gsdd cardengine_arm9_extmem_start cardengine_arm9_extmem_foto cardengine_arm9_dldipatcher cardengine_arm9_slot2heap cardenginei_arm7 cardenginei_arm7_alt cardenginei_arm7_twlsdk cardenginei_arm7_twlsdk3 cardenginei_arm7_dsiware cardenginei_arm7_dsiware3 cardenginei_arm7_cheat cardenginei_arm9_colorlut cardenginei_arm9_ra cardenginei_arm9_igm cardenginei_arm9 cardenginei_arm9_gsdd cardenginei_arm9_dldi cardenginei_arm9_gsdd_dldi cardenginei_arm9_twlsdk cardenginei_arm9_twlsdk3 cardenginei_arm9_twlsdk_dldi cardenginei_arm9_twlsdk3_dldi cardenginei_arm9_dsiware cardenginei_arm9_dsiware3 preLoadSettings apfix mobiclipOffsets dsi2dsSavePatches arm7/$(TARGET).elf arm9/$(TARGET).elf clean
 
 all:	$(OUTPUT)
 
@@ -111,7 +111,14 @@ DSIWIFI := ../libs/dsiwifi
 
 ifeq ($(RA_LAUNCHER_WIFI),1)
 ARM7_EXTRA_DEPS := dsiwifi
+ARM9_EXTRA_DEPS := dsiwifi9
 endif
+
+# Step 3's ARM9 half: dsiwifi's host side rebuilt in this tree with lwip's pools cut to fit.
+# See retail/dsiwifi9/. Needs the submodule's generated dswifi_version.h, hence the order.
+.PHONY: dsiwifi9
+dsiwifi9: dsiwifi
+	@$(MAKE) -C dsiwifi9
 
 .PHONY: dsiwifi
 dsiwifi:
@@ -127,7 +134,7 @@ arm7/$(TARGET).elf: $(ARM7_EXTRA_DEPS)
 	@$(MAKE) -C arm7
 
 #---------------------------------------------------------------------------------
-arm9/$(TARGET).elf:	bootloader bootloader2 bootloaderi bootloaderi2 preLoadSettings apfix mobiclipOffsets dsi2dsSavePatches
+arm9/$(TARGET).elf:	$(ARM9_EXTRA_DEPS) bootloader bootloader2 bootloaderi bootloaderi2 preLoadSettings apfix mobiclipOffsets dsi2dsSavePatches
 	@$(MAKE) -C arm9
 
 #---------------------------------------------------------------------------------		

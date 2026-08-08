@@ -63,6 +63,13 @@ CFLAGS	+=	-DRA_LAUNCHER_WIFI=1 \
 			-iquote $(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../../libs/dsiwifi/include)
 endif
 
+#---------------------------------------------------------------------------------
+# Step 3 needs lwip on this side, and it is *our* build of dsiwifi's ARM9 half rather than
+# the submodule's: see retail/dsiwifi9/include/lwipopts_ndsbs.h, which cuts lwip's static
+# pools from 833K of .bss to 76K so they fit this 736K link region at all.
+#---------------------------------------------------------------------------------
+DSIWIFI9	:=	$(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../dsiwifi9)
+
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 
 ASFLAGS	:=	-g $(ARCH) $(INCLUDE)
@@ -73,6 +80,12 @@ LDFLAGS	=	-specs=../ds_arm9_ndsbs.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 # any extra libraries we wish to link with the project (order is important)
 #---------------------------------------------------------------------------------
 LIBS	:=	-lfat -lnds9
+
+# Named by path rather than -l, so a stale or missing archive is a clear error instead of the
+# linker quietly finding another copy. Before -lfat/-lnds9, since it needs them.
+ifeq ($(RA_LAUNCHER_WIFI),1)
+LIBS	:=	$(DSIWIFI9)/libdsiwifi9_ndsbs.a $(LIBS)
+endif
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

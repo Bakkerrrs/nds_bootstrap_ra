@@ -76,7 +76,7 @@ The five things a new session needs that are not obvious from the source:
 | Magic to look for | ASCII `RA2S` (`52 41 32 53`). `RA1S`/`RA0S` means a stale address from an older build. |
 | Host test | `./tools/ra_reader_test.sh` — no toolchain, no hardware, seconds. Run it before anything. |
 | Full build | `make` from the top level, **serially**, with `lzss` on `PATH`. See *Building*. |
-| Step-2 build | `make RA_LAUNCHER_WIFI=1` — the WiFi diagnostic. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
+| WiFi build | `make RA_LAUNCHER_WIFI=1` — the network diagnostic, now 9 rungs through DHCP, DNS and one HTTP GET. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
 
 Two working habits this document was largely written by, both of which were learned by
 paying for them:
@@ -86,14 +86,11 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **step 3**: the launcher fetching a definition set instead of
-reading one off the card. Step 2 passed on hardware — the chip comes up in the launcher and
-reaches a usable link — so what is in front of step 3 is a decision, not an unknown: dsiwifi's
-lwip does not fit the launcher's link region as configured, and *Step two, wired* has the
-number and the three options.
-
-Nothing is owed on step 2 any more: the log is in at `docs/logs/ra_wifi_launcher-3ds.log`, and
-`tools/ra_reader_test.sh` reads that file rather than a transcription of it.
+The immediate next step is **one hardware run of step 3a**: build `RA_LAUNCHER_WIFI=1` again
+and send `/ra_wifi_launcher.log`. The ladder now runs to **9 rungs** — the same build carries
+lwip, DHCP, DNS and one HTTP GET to the RA API, so a run either reaches the server from the
+launcher or says which rung it stopped on. It compiles, links, and fits; nothing about it has
+touched a console yet. See *Step 3a — lwip in the launcher* below.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -608,13 +605,9 @@ bytes** of `.bss`. The launcher's ARM9 is linked by
 `retail/arm9/ds_arm9_ndsbs.mem` into `0x02280000`–`0x02338000` — **753,664 bytes total**, code
 and heap included, and it cannot simply grow: `IPS_LOCATION` and `IMAGES_LOCATION` sit at
 `0x02337000` and `0x02338000`. So lwip as
-dsiwifi ships it **does not fit in the launcher today**, and step 3 has to answer that before
-it can fetch anything. Three options, in order of appeal: shrink `PBUF_POOL_SIZE` (a 1500-byte
-MTU and one HTTP GET at a time do not need 512 buffers); move the launcher's link region into
-the 2.5 MB preserved block at `0x02400000` that the RA staging buffer already lives in; or
-put the fetch in the bootloader instead. That is a real piece of step 3, discovered by
-writing step 2, and it is why step 2 was worth building separately rather than as the first
-half of step 3.
+dsiwifi ships it **did not fit in the launcher**, which is a real piece of step 3 discovered by
+writing step 2 -- and the reason step 2 was worth building separately rather than as the first
+half of step 3. *Step 3a* above is what came of it.
 
 #### Why the diagnostic build does not boot games
 
@@ -639,6 +632,96 @@ acknowledging them: `wifi_host.c` stamps a free-marker six bytes below the buffe
 handed, which is correct only for a buffer the ARM9 supplied through `INITBUFS`, and this
 probe supplies none — so stamping would corrupt the ARM7's own mbox header. Nothing is lost,
 because the WPA2 handshake is EAPOL and never comes that way.
+
+### Step 3a — lwip in the launcher, and the pool that had to be cut
+
+Step 3 is "the launcher fetches a definition set instead of reading one off the card", and it
+has four parts: an IP stack, the RetroAchievements hash for a DS ROM, `r=login`, and `r=patch`
+plus parsing. Only the first is a question about the platform; the other three are work. So it
+goes first and alone, and the rung is deliberately the same one the standalone probe already
+cleared: **reach the RA API over plain HTTP**. No credentials, no hash, no JSON — the request
+logs in as a user that does not exist, and a well-formed `invalid_credentials` reply proves
+DNS, TCP, HTTP and the API parsing our query.
+
+The ladder therefore grows from 5 rungs to 9: `IP` (DHCP), `resolved`, `connected`,
+`answered` on top of step 2's five. Everything at or below rung 5 is already proven on
+hardware, which is what makes a failure above it unambiguous — it is the new code.
+
+**Built and unrun.** It compiles, links and fits; no console has seen it.
+
+#### The pool was bigger than the region, so the pool was cut
+
+The measured obstacle from step 2: dsiwifi configures lwip with `PBUF_POOL_SIZE 512` and
+`MEMP_MEM_MALLOC 0`, so the pools are static arrays, and `memp_memory_PBUF_POOL_base` alone is
+**784,387 bytes** of `.bss` against a **753,664-byte** link region for the entire launcher.
+
+Those numbers are right for homebrew that owns all 16 MB. They are not a bug and not something
+to argue with upstream — they are simply not this program's budget, which is one HTTP GET
+before a game boots. So `retail/dsiwifi9/include/lwipopts_ndsbs.h` cuts them:
+
+| | dsiwifi | ours |
+| --- | --- | --- |
+| `PBUF_POOL_SIZE` | 512 | 32 |
+| `MEMP_NUM_PBUF` | 1024 | 64 |
+| `MEMP_NUM_TCP_SEG` | 64 | 24 |
+| `MEMP_NUM_NETCONN` | 32 | 8 |
+| **static `.bss` in the library** | **833,410** | **75,674** |
+
+Eleven times smaller. The sizing is not aggressive: 32 receive buffers against a `TCP_WND` of
+two MSS is roughly an order of magnitude over what can be in flight, and running the *receive*
+pool dry stalls a transfer rather than failing it — a bug that would present as "the network
+is slow", which is the worst kind to design in.
+
+**The other option was checked first and is not available.** Giving the launcher more room
+would have needed no submodule work at all, but `retail/arm9/ds_arm9_ndsbs.mem` puts it at
+`0x02280000`–`0x02338000` and it is boxed in on both sides by things the launcher itself uses:
+`IMAGES_LOCATION` at `0x02338000`, where `conf_sd.cpp` decompresses the boot images the
+bootloader later displays, and `CARDENGINE_ARM9_SLOT2HEAP_LOCATION_BUFFERED` at `0x0227F800`
+just below. Growing the region upward would put the launcher's own `.bss` on top of the images
+it writes.
+
+With the pools cut, the ARM9 region goes from 401,312 bytes used to **562,608 of 753,664**,
+leaving **191 KB of heap**. That is comfortable but no longer generous, and it is the number to
+watch: lwip's send path allocates from `malloc` (`MEM_LIBC_MALLOC` is 1), so the heap is now
+shared between libfat, the launcher's own allocations, and the network.
+
+#### Two mechanisms worth writing down, because both cost an attempt
+
+**No include path can override lwip's options.** `opt.h` does `#include "lwipopts.h"`, and for
+a quoted include the compiler searches the including file's *own directory* first — where
+dsiwifi's `lwipopts.h` sits, next to `opt.h`. `-I` loses. `-iquote` loses. What works is the
+header guard: our file is force-included with `-include` ahead of every translation unit, pulls
+in theirs by explicit relative path so `__LWIPOPTS_H__` gets defined, then overrides. When
+`opt.h` later asks, it gets nothing and our values stand. Including their file rather than
+copying it means everything unlisted still tracks the submodule.
+
+**And the submodule's build offers no way in**, which is why this is a separate library in our
+tree rather than a flag passed down. Its `CFLAGS` and `INCLUDES` are `:=` assignments, so a
+command-line override replaces rather than extends them, and `release` builds both CPUs at
+once so anything passed would hit the ARM7 half too. `retail/dsiwifi9/` compiles the same
+sources with the same code-generation flags the submodule uses — the only difference between
+what we build and what it builds is the sizing header.
+
+#### Who owns FIFO_DSWIFI, and what that cost
+
+Linking dsiwifi's ARM9 half means `wifi_host_init()` installs its own datamsg handler on
+`FIFO_DSWIFI` and drives the sequence itself. Two owners of one channel is not a thing, so the
+probe stopped speaking IPC directly and now calls `DSiWifi_SetLogHandler()` and
+`DSiWifi_InitDefault(WFC_CONNECT)` — **the same two calls `tools/wifiprobe/` makes.** That is
+an improvement in its own right: the control and the measurement now enter through the same
+door, so a difference between them cannot be ours.
+
+What it costs is that rungs 4 and 5 used to arrive as the driver's own signals —
+`WIFI_IPCINT_CONNECT` and `WIFI_IPCINT_READY` — and are now read out of its prose like the
+rest, matching `WMI_CONNECT_EVENT` and `Done auth`. `Done auth` rather than `Added GTK`
+because the GTK line is WPA2-only and `wmi_post_handshake()` prints `Done auth` on the open and
+WEP paths too; a rung that silently cannot be reached on some networks is worse than a
+slightly weaker one.
+
+The committed step-2 log validates that substitution for free: it was captured *before* this
+change and still contains both lines, so the host test now asserts that the text-based reading
+agrees with what the IPC-based one reported at the time. Same bytes, same verdict, different
+mechanism.
 
 #### The ARM7 was supposed to be the wall. It is not, and the reason is a section name
 
@@ -672,13 +755,13 @@ that side.
 The claim above was that dsiwifi's lwip does not fit in the launcher. Linked, it is not an
 estimate: `memp_memory_PBUF_POOL_base` is **784,387 bytes** of `.bss` on its own, and the
 probe's ARM9 — which does link lwip — carries **840,160 bytes** of `.bss` in total. The
-launcher's whole link region is **753,664 bytes**, of which about **397 KB** is free after
-its own code and data.
+launcher's whole link region is **753,664 bytes**, of which **352 KB** was free after its own
+code and data.
 
-So the pool alone is larger than the entire region, and step 3 cannot simply link the library
-and see. Of the three options listed earlier, that measurement makes the first one the obvious
-first try: `PBUF_POOL_SIZE 512` is 512 × 1,516, and one HTTP GET at a time does not need 512
-buffers.
+So the pool alone is larger than the entire region, and step 3 could not simply link the
+library and see. That measurement is what chose the fix: cutting `PBUF_POOL_SIZE` from 512 to
+32 took the library's static `.bss` from 833,410 bytes to 75,674, which is what
+*Step 3a — lwip in the launcher* above is about.
 
 #### The one part a host can check, and it is checked
 
@@ -794,9 +877,10 @@ the test fails rather than this table going quietly stale.
   came back, so the diff is one-sided. Cheap to close if it ever matters: run
   `tools/wifiprobe/` and keep `/wifiprobe.log` next to
   `docs/logs/ra_wifi_launcher-3ds.log`.
-- **Where the IP stack lives is undecided**, and step 3 cannot start without deciding it.
-  Measured: lwip's pbuf pool is 784,387 bytes of `.bss` and the launcher's ARM9 link region is
-  753,664 bytes in total. Shrinking `PBUF_POOL_SIZE` is the first thing to try.
+- **Step 3a builds and has never run.** lwip now fits the launcher -- 833,410 bytes of static
+  `.bss` cut to 75,674 -- and the ladder runs to 9 rungs, through DHCP, DNS and one HTTP GET.
+  Whether any of it works is one flash away, and the heap it leaves behind, 191 KB, is the
+  number to watch when it does.
 - **Reporting an unlock has never been attempted.** Evaluation is done; `r=awardachievement`
   is not written, and neither is `r=patch`. Both wait on the transport above.
 - **Game identification.** Nothing yet computes the RetroAchievements hash for a DS ROM, so
@@ -951,6 +1035,8 @@ encoding) and it looked as though nothing was being read. Liveness is proved by
 | `retail/arm9/source/ra_wifi_verdict.c` | Reads how the chip arrived out of dsiwifi's log text. Host-tested |
 | `retail/arm7/source/ra_wifi7.c` | Step two on the ARM7: `installWifiFIFO()`, and where it goes |
 | `docs/logs/ra_wifi_launcher-3ds.log` | The step-two run that passed. Evidence, and the host test's fixture |
+| `retail/dsiwifi9/` | dsiwifi's ARM9 half rebuilt with lwip's pools cut to fit the launcher |
+| `retail/dsiwifi9/include/lwipopts_ndsbs.h` | The sizing, and why no `-I` path could have done it |
 | `libs/dsiwifi` | The driver, a submodule, shared with `tools/wifiprobe/` |
 
 `RA_READER_ENABLED` in `ra.h` is the kill switch. Set it to `0` and the cardengine
@@ -1394,13 +1480,20 @@ things to test. So the order is not "build the client":
    every time regardless — but whether the driver works as a guest of *nds-bootstrap's* ARM7,
    which inherits SCFG rather than opening it and is already driving the SD controller one
    instance below the WiFi SDIO block. See *Step two, wired* above.
-3. **The definitions block, filled from the network instead of by hand.** Once 2 passes, the
-   launcher fetches a set and writes it where `ra_achievements.txt` is written today. That
-   destination is already proven end to end on hardware: three real definitions came through
-   it and fired. So this step is transport plus `r=patch` parsing, and nothing new below it —
-   **except one thing step 2 turned up**: dsiwifi's lwip carries ~800 KB of static packet
-   pools and the launcher's ARM9 is linked into a 736 KB region, so this step starts by
-   deciding where the IP stack lives. Three options are listed under *Step two, wired*.
+3. **The definitions block, filled from the network instead of by hand.** The launcher fetches
+   a set and writes it where `ra_achievements.txt` is written today — a destination already
+   proven end to end on hardware, since three real definitions came through it and fired. Four
+   parts, and only the first is a question about the platform rather than work:
+
+   - **3a, the IP stack — written, not yet run.** lwip in the launcher, cut to fit, reaching
+     the RA API over plain HTTP with no credentials. The ladder runs to 9 rungs. See
+     *Step 3a — lwip in the launcher*.
+   - **3b, game identification.** Nothing yet computes the RetroAchievements hash for a DS
+     ROM, so the launcher cannot ask *which* set to fetch.
+   - **3c, `r=login`.** A token, and the first time this project handles a real password —
+     over cleartext, which is the user's call to make knowingly (see *#1a*).
+   - **3d, `r=patch` and parsing.** JSON in, memaddr strings out, into the block that already
+     works.
 4. **Only after those**, live submission from inside the game — context **B**, behind the
    VBlank hook as a non-blocking state machine, watching for ARM7 contention with the SD
    path. Queue-and-flush from the launcher (see #1g) makes this an optimisation rather than

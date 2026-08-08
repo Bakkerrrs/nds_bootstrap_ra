@@ -208,9 +208,10 @@ static void test_wifi_verdict(void) {
 	/*
 	    The 3DS log, classified on the host, must come out the way the console said it did.
 
-	    The stage stops at WMI rather than at 5 because rungs 4 and 5 -- associated, and link
-	    ready -- arrive as IPC messages and never appear in the text at all. That split is
-	    deliberate: the top of the ladder is not decided by string matching.
+	    It stops at 5 and not higher because the log is a *step 2* run: there was no IP stack
+	    in that build, so rungs 6 to 9 have nothing to be read from. Which makes this fixture
+	    do double duty -- it is also the check that adding those rungs did not quietly move
+	    the ones below them.
 	*/
 	printf("\nthe 3DS log classifies as the console reported it\n");
 	wifi_feed_chunked(&v, 59);
@@ -223,7 +224,16 @@ static void test_wifi_verdict(void) {
 	CHECK(v.wmiReady == 1);
 	CHECK(v.mboxAllocFailed == 0);
 	CHECK(strcmp(raWifiVerdictArrival(&v), "cold") == 0);
-	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_WMI);
+	/*
+	    Association and the end of the handshake now come out of the text, because step 3
+	    hands FIFO_DSWIFI to dsiwifi's own ARM9 half and those IPC messages stop reaching us.
+	    This log was captured before that change and still carries both lines -- so it proves
+	    the text-based reading agrees with what the IPC-based one reported at the time.
+	*/
+	CHECK(v.associated == 1);
+	CHECK(v.linkReady == 1);
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_READY);
+	CHECK(v.gotIp == 0);   /* a step-2 build: there was no lwip to get one */
 
 	/* And the summary the console printed is in the file, saying the same two things. */
 	CHECK(strstr(wifiLogText, "arrived          cold") != NULL);
@@ -308,13 +318,23 @@ static void test_wifi_verdict(void) {
 	    The two rungs the ARM7 reports over IPC rather than in text, so the ladder's top is
 	    not decided by string matching at all.
 	*/
-	printf("\nassociation and link-ready come from IPC, not from the log\n");
+	/*
+	    The four rungs above the link are lwip's, and lwip answers in return values rather
+	    than in narration -- so the probe sets them and no string can. Checked in order,
+	    because the ladder only means anything if each rung is the thing that proves it.
+	*/
+	printf("\nthe top four rungs come from lwip, not from the log\n");
 	wifi_feed_chunked(&v, 59);
-	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_WMI);
-	v.associated = 1;
-	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_ASSOCIATED);
-	v.linkReady = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_READY);
+	v.gotIp = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_IP);
+	v.dnsOk = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_RESOLVED);
+	v.tcpOk = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_CONNECTED);
+	v.apiOk = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_ANSWERED);
+	CHECK(RA_WIFI_STAGE_ANSWERED == RA_WIFI_STAGE_MAX);
 
 	/*
 	    A chip name it cannot parse must leave the field empty rather than half-filled: the

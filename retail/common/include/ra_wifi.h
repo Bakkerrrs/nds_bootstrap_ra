@@ -70,8 +70,12 @@
 #define RA_WIFI_STAGE_FIRMWARE    2  /* the Xtensa core is running our firmware */
 #define RA_WIFI_STAGE_WMI         3  /* WMI is up: the driver has a working command channel */
 #define RA_WIFI_STAGE_ASSOCIATED  4  /* WMI_CONNECT_EVENT -- associated to the AP */
-#define RA_WIFI_STAGE_READY       5  /* handshake done, GTK installed, link usable */
-#define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_READY
+#define RA_WIFI_STAGE_READY       5  /* handshake done, keys installed, link usable */
+#define RA_WIFI_STAGE_IP          6  /* DHCP gave us an address */
+#define RA_WIFI_STAGE_RESOLVED    7  /* DNS answered for retroachievements.org */
+#define RA_WIFI_STAGE_CONNECTED   8  /* TCP to port 80 */
+#define RA_WIFI_STAGE_ANSWERED    9  /* the API replied, and the reply looks like the API */
+#define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_ANSWERED
 
 /*
     What dsiwifi's narration said about how the chip arrived.
@@ -91,10 +95,20 @@ typedef struct raWifiVerdict {
 	u8   firmwareLaunched; /* "Launching!" */
 	u8   firmwareReady;    /* "ready, handshaking..." */
 	u8   wmiReady;         /* "fully initialized!" */
-	u8   associated;       /* WIFI_IPCINT_CONNECT arrived */
-	u8   linkReady;        /* WIFI_IPCINT_READY arrived */
+	u8   associated;       /* "WMI_CONNECT_EVENT" */
+	u8   linkReady;        /* "Done auth" -- the handshake finished */
 	u8   mboxAllocFailed;  /* "bad mbox alloc" -- the ARM7 heap could not spare 3K */
 	u8   reserved[3];
+
+	/*
+	    Set by the probe rather than read out of the log: from step 3 on, the top of the
+	    ladder is lwip's business and lwip answers in return values, not in narration.
+	*/
+	u8   gotIp;
+	u8   dnsOk;
+	u8   tcpOk;
+	u8   apiOk;
+	u32  ip;               /* as DSiWifi_GetIP() returns it */
 	char chip[16];         /* "AR6014", as dsiwifi named it */
 	/*
 	    The partial line being accumulated -- not a result. Larger than dsiwifi's own 0x7C

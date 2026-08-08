@@ -48,6 +48,18 @@
 #define RA_WIFI_SAY_FW_READY   "ready, handshaking"
 #define RA_WIFI_SAY_WMI_READY  "fully initialized!"
 #define RA_WIFI_SAY_BAD_MBOX   "bad mbox alloc"
+/*
+    Association and the end of the handshake used to arrive as IPC messages, which was
+    better -- they were the driver's own signals rather than its prose. Step 3 hands
+    FIFO_DSWIFI to dsiwifi's ARM9 half, because two owners of one channel is not a thing, so
+    these two rungs are read out of the text like the rest.
+
+    "Done auth" rather than "Added GTK": the GTK line is WPA2-only, and wmi_post_handshake()
+    prints "Done auth" on the open and WEP paths too. A rung that silently cannot be reached
+    on some networks is worse than a slightly weaker one.
+*/
+#define RA_WIFI_SAY_ASSOC      "WMI_CONNECT_EVENT"
+#define RA_WIFI_SAY_AUTH_DONE  "Done auth"
 
 void raWifiVerdictReset(raWifiVerdict* v) {
 	memset(v, 0, sizeof(*v));
@@ -108,6 +120,12 @@ void raWifiVerdictLine(raWifiVerdict* v, const char* line) {
 	if (strstr(line, RA_WIFI_SAY_BAD_MBOX)) {
 		v->mboxAllocFailed = 1;
 	}
+	if (strstr(line, RA_WIFI_SAY_ASSOC)) {
+		v->associated = 1;
+	}
+	if (strstr(line, RA_WIFI_SAY_AUTH_DONE)) {
+		v->linkReady = 1;
+	}
 }
 
 void raWifiVerdictFlush(raWifiVerdict* v) {
@@ -149,6 +167,18 @@ void raWifiVerdictChunk(raWifiVerdict* v, const char* chunk) {
     never associates reports 3, which is the useful answer.
 */
 int raWifiVerdictStage(const raWifiVerdict* v) {
+	if (v->apiOk) {
+		return RA_WIFI_STAGE_ANSWERED;
+	}
+	if (v->tcpOk) {
+		return RA_WIFI_STAGE_CONNECTED;
+	}
+	if (v->dnsOk) {
+		return RA_WIFI_STAGE_RESOLVED;
+	}
+	if (v->gotIp) {
+		return RA_WIFI_STAGE_IP;
+	}
 	if (v->linkReady) {
 		return RA_WIFI_STAGE_READY;
 	}

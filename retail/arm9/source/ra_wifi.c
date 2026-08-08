@@ -42,8 +42,33 @@
 #include <string.h>
 #include <unistd.h>
 
-/* dsiwifi's IPC contract, header-only. The library itself stays on the ARM7. */
-#include "dsiwifi_cmds.h"
+/*
+    Step 3 links dsiwifi's ARM9 half after all -- see retail/dsiwifi9/, which rebuilds it with
+    lwip's pools cut from 833K of .bss to 76K so it fits the launcher's link region.
+
+    That changes who owns FIFO_DSWIFI. wifi_host_init() installs its own datamsg handler on
+    that channel and drives the whole sequence itself, and two owners of one channel is not a
+    thing -- so the probe stops speaking IPC and calls the same API tools/wifiprobe/ calls.
+    Which is an improvement in its own right: the control and the measurement now go through
+    the same entry points, so a difference between them cannot be ours.
+
+    What is lost is that association and end-of-handshake used to arrive as the driver's own
+    signals; now they are read out of its prose like everything else. See
+    RA_WIFI_SAY_ASSOC in ra_wifi_verdict.c.
+*/
+#include "dsiwifi9.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+
+#define RA_HOST "retroachievements.org"
+#define RA_PORT 80
+/*
+    A login for a user that does not exist, exactly as the probe does it. The reply is a 401
+    with a JSON body, which proves DNS, TCP, HTTP and the API parsing our query without this
+    program ever handling a real password. Over cleartext that distinction is worth keeping,
+    and it is the reason step 3's first rung needs no credentials at all.
+*/
+#define RA_PATH "/dorequest.php?r=login&u=ndsbootstrap_probe&p=x"
 
 /* What the launcher's ARM7 stashed there at boot, before anything could change it. */
 #define REG_SCFG_EXT7 *(u32*)0x02FFFDF0
@@ -62,6 +87,7 @@
 #define RA_WIFI_WAIT_ARM7   3
 #define RA_WIFI_WAIT_CHIP   20
 #define RA_WIFI_WAIT_LINK   40
+#define RA_WIFI_WAIT_DHCP   30
 #define RA_WIFI_WAIT_TAIL   8   /* after the summary: dsiwifi keeps narrating */
 
 /*
@@ -191,49 +217,6 @@ static void raWifiCapture(const char* text) {
 	}
 }
 
-static void raWifiMsgHandler(int bytes, void* userdata) {
-	Wifi_FifoMsgExt msg;
-
-	if (bytes < 4 || bytes > (int)sizeof(msg)) {
-		fifoGetDatamsg(FIFO_DSWIFI, bytes > (int)sizeof(msg) ? (int)sizeof(msg) : bytes, (u8*)&msg);
-		return;
-	}
-	fifoGetDatamsg(FIFO_DSWIFI, bytes, (u8*)&msg);
-
-	switch (msg.cmd) {
-		case WIFI_IPCINT_DBGLOG:
-			msg.log_str[sizeof(msg.log_str) - 1] = 0;
-			raWifiCapture(msg.log_str);
-			break;
-
-		case WIFI_IPCINT_CONNECT:
-			/* WMI_CONNECT_EVENT: associated. The WPA2 handshake is still to come. */
-			verdict.associated = 1;
-			break;
-
-		case WIFI_IPCINT_READY:
-			/* Sent at the end of wmi_post_handshake(): keys installed, link usable. */
-			verdict.linkReady = 1;
-			break;
-
-		case WIFI_IPCINT_PKTDATA:
-			/*
-			    Ignored, and deliberately not acknowledged. wifi_host.c writes the
-			    F00FF00F free-marker six bytes below the buffer it is handed -- correct
-			    when the ARM9 supplied that buffer through INITBUFS, which this probe
-			    never does. With no buffer supplied the pointer is into the ARM7's own
-			    mbox scratch, and stamping a marker into it would corrupt the driver's
-			    packet header. Dropping inbound IP is free here: there is no IP stack to
-			    drop it into, and the WPA2 handshake never comes this way -- EAPOL is
-			    handled entirely on the ARM7.
-			*/
-			break;
-
-		default:
-			break;
-	}
-}
-
 /*
     The SCFG words, first, because they decide whether the rest of the run means anything.
     Reported and not corrected: opening SCFG here would make this a measurement of a boot
@@ -307,12 +290,121 @@ static bool raWifiWaitStage(int wanted, int seconds, const char* what) {
 	return false;
 }
 
+static void raWifiReportIp(const char* what, u32 addr) {
+	const u8* b = (const u8*)&addr;
+
+	raWifiLog("%-16s %u.%u.%u.%u\n", what, b[0], b[1], b[2], b[3]);
+}
+
+/*
+    DHCP, and it is lwip's first real test rather than a formality: everything below this
+    point ran without an IP stack in step 2, so a failure here is the new code and not the
+    driver.
+*/
+static bool raWifiWaitIp(int seconds) {
+	int frames = seconds * 60;
+
+	while (frames-- > 0) {
+		const u32 addr = DSiWifi_GetIP();
+
+		if (addr != 0 && addr != 0xFFFFFFFF) {
+			verdict.ip    = addr;
+			verdict.gotIp = 1;
+			raWifiReportIp("IP", addr);
+			return true;
+		}
+		raWifiIdle();
+	}
+	raWifiLog("\x1b[31mno IP after %ds\x1b[37m\n", seconds);
+	return false;
+}
+
+/*
+    One GET, and the reply is checked for *content*. A captive portal, a proxy or a Cloudflare
+    interstitial all succeed at the socket level and mean nothing; the API's own error code
+    coming back is what proves we reached RetroAchievements rather than something answering on
+    its behalf. Same test the probe applies, for the same reason.
+*/
+static void raWifiHttpGet(void) {
+	static char        response[2048];
+	struct hostent*    he;
+	struct sockaddr_in addr;
+	char               request[320];
+	int                sock;
+	int                total = 0;
+
+	he = gethostbyname(RA_HOST);
+	if (!he || !he->h_addr_list[0]) {
+		raWifiLog("\x1b[31mDNS failed for %s\x1b[37m\n", RA_HOST);
+		return;
+	}
+	memcpy(&addr.sin_addr, he->h_addr_list[0], 4);
+	verdict.dnsOk = 1;
+	raWifiLog("resolved         %s\n", RA_HOST);
+	raWifiReportIp("its address", addr.sin_addr.s_addr);
+
+	sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (sock < 0) {
+		raWifiLog("\x1b[31msocket() failed\x1b[37m\n");
+		return;
+	}
+	addr.sin_family = AF_INET;
+	addr.sin_port   = htons(RA_PORT);
+
+	if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+		raWifiLog("\x1b[31mconnect() to port %d failed\x1b[37m\n", RA_PORT);
+		lwip_close(sock);
+		return;
+	}
+	verdict.tcpOk = 1;
+	raWifiLog("connected        port %d\n", RA_PORT);
+
+	/* A user agent is mandatory on every Connect API call; without one it is our fault. */
+	siprintf(request,
+	         "GET %s HTTP/1.1\r\n"
+	         "Host: %s\r\n"
+	         "User-Agent: nds-bootstrap-ra-launcher/0.1\r\n"
+	         "Connection: close\r\n"
+	         "\r\n",
+	         RA_PATH, RA_HOST);
+
+	if (send(sock, request, strlen(request), 0) < 0) {
+		raWifiLog("\x1b[31msend() failed\x1b[37m\n");
+		lwip_close(sock);
+		return;
+	}
+	raWifiLog("request sent\n");
+
+	while (total < (int)sizeof(response) - 1) {
+		const int got = recv(sock, response + total, sizeof(response) - 1 - total, 0);
+
+		if (got <= 0) {
+			break;
+		}
+		total += got;
+	}
+	response[total] = 0;
+	lwip_close(sock);
+
+	raWifiLog("%d bytes back\n", total);
+	if (strstr(response, "invalid_credentials")) {
+		verdict.apiOk = 1;
+		raWifiLog("\x1b[32mthe API answered over plain HTTP\x1b[37m\n");
+	} else if (total > 0) {
+		raWifiLog("\x1b[31mreply is not the API\x1b[37m\n");
+	}
+	{
+		const char* body = strstr(response, "\r\n\r\n");
+		raWifiLog("body: %s\n", body ? body + 4 : response);
+	}
+}
+
 void raWifiProbe(bool sdFound) {
 	int stage;
 
 	logFile = fopen(sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT, "w");
 
-	iprintf("\x1b[33mnds-bootstrap RA WiFi, step 2\x1b[37m\n");
+	iprintf("\x1b[33mnds-bootstrap RA WiFi, step 3\x1b[37m\n");
 	iprintf("launcher context, no game running\n\n");
 	if (logFile) {
 		iprintf("logging to %s\n", sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT);
@@ -326,7 +418,6 @@ void raWifiProbe(bool sdFound) {
 	raWifiReportScfg();
 
 	raWifiLog("\n-- the ARM7 half --\n");
-	fifoSetDatamsgHandler(FIFO_DSWIFI, raWifiMsgHandler, 0);
 
 	if (!raWifiWaitArm7()) {
 		raWifiLog("\x1b[31mthe ARM7 never reported installWifiFIFO().\x1b[37m\n"
@@ -337,29 +428,35 @@ void raWifiProbe(bool sdFound) {
 	raWifiLog("installWifiFIFO() is in\n");
 
 	/*
-	    One message starts everything. wifi_card_handleMsg() turns dsiwifi's own logging on
-	    and calls wifi_card_device_init(), which does the SDIO reset, BMI, the firmware
-	    launch, the WMI handshake and the scan -- all on the ARM7, all narrated back here.
+	    One call starts everything, and it is the same call tools/wifiprobe/ makes.
+	    DSiWifi_InitDefault() installs dsiwifi's own handler on FIFO_DSWIFI, sends INIT_IOP,
+	    and from there the ARM7 does the SDIO reset, BMI, the firmware launch, WMI and the
+	    scan while the ARM9 half brings lwip up and starts DHCP. All of it narrates through
+	    the log handler.
 	*/
-	raWifiLog("\n-- stage 1-3: bring the chip up --\n");
-	{
-		Wifi_FifoMsg msg;
-		memset(&msg, 0, sizeof(msg));
-		msg.cmd = WIFI_IPCCMD_INIT_IOP;
-		fifoSendDatamsg(FIFO_DSWIFI, sizeof(msg), (u8*)&msg);
-	}
+	raWifiLog("\n-- stage 1-5: bring the chip up and associate --\n");
+	DSiWifi_SetLogHandler(raWifiCapture);
+	DSiWifi_InitDefault(WFC_CONNECT);
 
 	if (!raWifiWaitStage(RA_WIFI_STAGE_WMI, RA_WIFI_WAIT_CHIP, "WMI")) {
 		goto done;
 	}
+	if (!raWifiWaitStage(RA_WIFI_STAGE_READY, RA_WIFI_WAIT_LINK, "link")) {
+		goto done;
+	}
 
 	/*
-	    Association is the AP's business as much as ours, and dsiwifi scans first, so this
-	    is the slow rung. It is also the one the probe already passed on this console and
-	    this network, which is what makes a failure here informative rather than ambiguous.
+	    And here step 3 begins: everything above this line was proven in step 2 without an IP
+	    stack, so anything that fails from now on is lwip in the launcher -- which is the one
+	    thing this round exists to find out.
 	*/
-	raWifiLog("\n-- stage 4-5: associate and authenticate --\n");
-	raWifiWaitStage(RA_WIFI_STAGE_READY, RA_WIFI_WAIT_LINK, "link");
+	raWifiLog("\n-- stage 6: DHCP --\n");
+	if (!raWifiWaitIp(RA_WIFI_WAIT_DHCP)) {
+		goto done;
+	}
+
+	raWifiLog("\n-- stage 7-9: reach the API over plain HTTP --\n");
+	raWifiHttpGet();
 
 done:
 	/*
@@ -389,6 +486,15 @@ done:
 	          verdict.wmiReady ? "ready" : "no");
 	raWifiLog("associated       %s\n", verdict.associated ? "yes" : "no");
 	raWifiLog("link ready       %s\n", verdict.linkReady ? "yes" : "no");
+	if (verdict.gotIp) {
+		raWifiReportIp("IP", verdict.ip);
+	} else {
+		raWifiLog("IP               none\n");
+	}
+	raWifiLog("DNS / TCP / API  %s / %s / %s\n",
+	          verdict.dnsOk ? "ok" : "no",
+	          verdict.tcpOk ? "ok" : "no",
+	          verdict.apiOk ? "ok" : "no");
 	if (verdict.mboxAllocFailed) {
 		raWifiLog("\x1b[31mthe ARM7 could not allocate its mboxes\x1b[37m\n");
 	}
@@ -399,9 +505,13 @@ done:
 	}
 
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);
-	raWifiLog(stage >= RA_WIFI_STAGE_READY
-	          ? "the chip comes up inside the launcher.\n"
-	          : "stopped here -- see the log above.\n");
+	if (stage >= RA_WIFI_STAGE_ANSWERED) {
+		raWifiLog("the launcher can reach RetroAchievements.\n");
+	} else if (stage >= RA_WIFI_STAGE_READY) {
+		raWifiLog("the link is up; the IP stack is where it stopped.\n");
+	} else {
+		raWifiLog("stopped here -- see the log above.\n");
+	}
 
 	/*
 	    Said explicitly because the first run could not say it, and the run was wasted for
