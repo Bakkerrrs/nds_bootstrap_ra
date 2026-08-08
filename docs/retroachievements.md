@@ -59,6 +59,9 @@ Confirmed on hardware, in order of when each was settled:
 7. **The launcher reaching RetroAchievements** — step 3a, `reached stage 9 of 9`: lwip cut to
    fit, DHCP, DNS, TCP and one HTTP GET to `dorequest.php`, with the API's own
    `invalid_credentials` coming back. Log at `docs/logs/ra_wifi_launcher_http-3ds.log`.
+8. **The ROM's RetroAchievements hash** — step 3b, and it is **the hash the server has**,
+   checked against the set's page. `c3b1916756737f2c4117cc95c1d51ac7` for Super Mario 64 DS.
+   Log at `docs/logs/ra_wifi_launcher_hash-3ds.log`.
 
 Everything from the game's RAM up to a fired trigger is done, and the launcher now reaches the
 RetroAchievements API. **So open question #1 is closed for context A, and nothing in front of
@@ -707,9 +710,14 @@ only the close is missing, which the API's own error code being present settles 
 distinguishes `peer closed after 994` from `recv stopped after 994` from `recv stopped after 0`.
 Three different worlds that all used to look like a frozen screen.
 
-The same build now also reports free heap after the hash, once lwip is up, and after the HTTP
-exchange. That is the number step 3d will run into, and it is worth having from a run that
-worked rather than from one that did not.
+The next run confirmed the diagnosis exactly: **`recv stopped after 1000`**, then `1000 bytes
+back`, then the API's own JSON, then `stage 9 of 9`. The reply had arrived in full and only the
+close was missing — so the freeze was never a network failure, and the run that hung and the run
+that succeeded differed by nothing except whether one TCP FIN turned up.
+
+The same build also reports free heap after the hash, once lwip is up, and after the HTTP
+exchange. The first version of that report was itself misleading; see *Step 3b* for the
+correction and for the ~96 KB that step 3d actually gets.
 
 #### The one alarming line in the log, which is not ours and is not a problem
 
@@ -884,6 +892,22 @@ The fix is not a different game, it is a different file: **nds-bootstrap applies
 run time**, which is what `apPatchPath` and the whole `apfix` tree are for. So the clean EU dump
 is the one to point it at — it boots identically and it is the file the set is keyed to. Worth
 knowing before 3d rather than during it.
+
+#### And the heap number the first version printed was wrong in a flattering direction
+
+The run reported `heap after hash 8528 free of 96452`, which reads as almost out of memory. It
+was not: `mallinfo().arena` is what newlib has **claimed by `sbrk()` so far**, not what is
+available. malloc simply had not needed to grow past 96 K, and another 88,076 bytes of the
+region sat unclaimed above it. `usmblks` is not filled in by this newlib at all, so
+`largest 0` meant nothing either.
+
+Corrected to report what is true: how far the claimed heap has grown, how much room is left to
+grow into, and the sum. For that run the honest figure is **96,604 bytes usable** — 88,076
+unclaimed plus 8,528 free inside the arena — against a ceiling of 184,528 that the region
+allows but libfat and lwip have already eaten into.
+
+**So ~96 KB is the budget step 3d gets**, and that is the number to design `r=patch` around:
+stream the reply, do not buffer the set.
 
 #### The test harness had a landmine in it, and adding two files stepped on it
 
@@ -1068,13 +1092,12 @@ the test fails rather than this table going quietly stale.
   came back, so the diff is one-sided. Cheap to close if it ever matters: run
   `tools/wifiprobe/` and keep `/wifiprobe.log` next to
   `docs/logs/ra_wifi_launcher-3ds.log`.
-- **The 191 KB of heap left after lwip has never been under pressure.** Step 3a's run did one
-  GET; `r=patch` returns a whole achievement set, and lwip's send path allocates from the same
-  `malloc` as libfat and the launcher's own strings. It is the number to watch in 3d.
-- **The hash has never been checked against the server** (3b), and the ROM it was run against
-  is a `(patched)` dump, so it very likely does not match what RetroAchievements has. Point the
-  launcher at the **clean EU dump** — nds-bootstrap applies AP patches at run time, so a
-  pre-patched file buys nothing and costs the hash. Then compare against the game's page.
+- **The heap has never been under pressure.** One GET is not a set: `r=patch` returns the whole
+  thing, and lwip's send path allocates from the same `malloc` as libfat and the launcher's own
+  strings. Streaming the reply rather than buffering it is the obvious precaution.
+- **About 96 KB of heap is what step 3d actually gets**, not the 184 KB the link map allows.
+  Measured during the HTTP exchange: malloc had claimed 96,452 bytes with 8,528 free inside and
+  88,076 of the region still unclaimed. `r=patch` returns a whole achievement set into that.
 - **The host test's fake WRAM arena is defined by luck** and it bit once already. See *Step 3b*
   — `__bss_end` and `__vram_top` are 1-byte dummies in `ra_reader_test.c`, and the arena is
   whatever the linker's ordering of them makes it. Worth fixing deliberately; it is not fixed.

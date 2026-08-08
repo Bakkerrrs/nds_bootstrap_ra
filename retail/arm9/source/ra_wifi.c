@@ -274,11 +274,26 @@ static bool raWifiWaitArm7(void) {
     Better to have the figure from a run that worked than to discover it from one that did not.
 */
 static void raWifiReportHeap(const char* when) {
-	struct mallinfo mi = mallinfo();
+	/*
+	    Deliberately not `mallinfo().fordblks of .arena`, which is what the first version
+	    printed and which is misleading enough to be worth the correction. `arena` is what
+	    newlib has *claimed by sbrk() so far*, not what is available: the first run reported
+	    "8528 free of 96452" and read as almost-out-of-memory, when in fact malloc had simply
+	    not needed to grow past 96 K yet and there was another 88 K of unclaimed region above
+	    it. `usmblks` is not filled in by this newlib at all, so "largest 0" meant nothing.
 
-	raWifiLog("heap %-11s %lu free of %lu, largest %lu\n", when,
-	          (unsigned long)mi.fordblks, (unsigned long)mi.arena,
-	          (unsigned long)mi.usmblks);
+	    What is true and useful: how far the claimed heap has grown, where it may grow to, and
+	    the sum of the two kinds of free space. That last figure is the one step 3d has to live
+	    inside.
+	*/
+	extern char*         fake_heap_end;
+	const struct mallinfo mi   = mallinfo();
+	char* const           top  = (char*)sbrk(0);
+	const unsigned long   room = (unsigned long)(fake_heap_end > top ? fake_heap_end - top : 0);
+
+	raWifiLog("heap %-11s %lu usable (%lu unclaimed + %lu free in %lu)\n", when,
+	          room + (unsigned long)mi.fordblks, room,
+	          (unsigned long)mi.fordblks, (unsigned long)mi.arena);
 }
 
 /* Drain once per frame, so a hang leaves everything up to it already on the card. */
