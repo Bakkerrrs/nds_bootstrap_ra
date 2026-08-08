@@ -851,6 +851,40 @@ tools/wifiprobe/wifiprobe.nds          a100b64c97ebea15684372b31505ae82
 Only rcheevos' `md5.c` is linked into the launcher — the hashing, not the file plumbing. The
 whole of 3b costs about 6.5 K of the ARM9.
 
+#### On a real game the number is 382,212, and rcheevos' own function could not have run
+
+The first hardware run of 3b, on *Super Mario 64 DS* — log at
+`docs/logs/ra_wifi_launcher_hash-3ds.log`:
+
+```
+hash             c3b1916756737f2c4117cc95c1d51ac7
+arm9 / arm7      382212 / 150308 bytes
+would malloc     382212 bytes
+```
+
+Which settles the design decision with a measurement rather than an inference. **382,212 bytes
+in one block, against 352,352 free before lwip and 184,528 after** — it does not fit even at
+the most favourable moment in the launcher's life, by 30 K. nds-bootstrap's own `.nds` needed
+353,164 and was already over; a real game is 30 K worse. Calling `rc_hash_nintendo_ds()` here
+was never going to work, and the streaming implementation is a requirement rather than a
+precaution.
+
+**And the ROM is the wrong dump, which is a finding about the test setup and not the code.** The
+file is `... Super Mario 64 DS (Europe) ... (patched).nds`. An AP patch rewrites the ARM9
+binary, and the ARM9 binary is most of what the hash covers — so this hash is almost certainly
+not the one RetroAchievements has, and `r=patch` would answer "unknown game" for a reason that
+has nothing to do with 3b being correct.
+
+That matters because it is exactly the trap this game was chosen to avoid: the set's notes say
+*"This Real Set has ONLY one ROM. It's EU ROM"*, and the whole point was that the right dump can
+be settled by hash before the console is switched on. Three rounds were spent on *Extreme 2*
+learning that lesson.
+
+The fix is not a different game, it is a different file: **nds-bootstrap applies AP patches at
+run time**, which is what `apPatchPath` and the whole `apfix` tree are for. So the clean EU dump
+is the one to point it at — it boots identically and it is the file the set is keyed to. Worth
+knowing before 3d rather than during it.
+
 #### The test harness had a landmine in it, and adding two files stepped on it
 
 Putting the hash check inside `tools/ra_reader_test.c` made the suite **segfault at `-O1` and
@@ -1037,10 +1071,10 @@ the test fails rather than this table going quietly stale.
 - **The 191 KB of heap left after lwip has never been under pressure.** Step 3a's run did one
   GET; `r=patch` returns a whole achievement set, and lwip's send path allocates from the same
   `malloc` as libfat and the launcher's own strings. It is the number to watch in 3d.
-- **The hash has never been checked against the server** (3b). It matches rcheevos' own
-  implementation on real `.nds` files, which is the strongest local check there is, but "the
-  server recognises it" is a different claim. One hardware run prints it; comparing it against
-  the game's page on retroachievements.org settles it by eye.
+- **The hash has never been checked against the server** (3b), and the ROM it was run against
+  is a `(patched)` dump, so it very likely does not match what RetroAchievements has. Point the
+  launcher at the **clean EU dump** — nds-bootstrap applies AP patches at run time, so a
+  pre-patched file buys nothing and costs the hash. Then compare against the game's page.
 - **The host test's fake WRAM arena is defined by luck** and it bit once already. See *Step 3b*
   — `__bss_end` and `__vram_top` are 1-byte dummies in `ra_reader_test.c`, and the arena is
   whatever the linker's ordering of them makes it. Worth fixing deliberately; it is not fixed.
@@ -1201,6 +1235,7 @@ encoding) and it looked as though nothing was being read. Liveness is proved by
 | `retail/arm7/source/ra_wifi7.c` | Step two on the ARM7: `installWifiFIFO()`, and where it goes |
 | `docs/logs/ra_wifi_launcher-3ds.log` | The step-two run that passed. Evidence, and a host-test fixture |
 | `docs/logs/ra_wifi_launcher_http-3ds.log` | The step-3a run that reached the API. Same |
+| `docs/logs/ra_wifi_launcher_hash-3ds.log` | The step-3b run: the hash, and the 382,212-byte figure that justifies streaming it |
 | `retail/dsiwifi9/` | dsiwifi's ARM9 half rebuilt with lwip's pools cut to fit the launcher |
 | `retail/dsiwifi9/include/lwipopts_ndsbs.h` | The sizing, and why no `-I` path could have done it |
 | `libs/dsiwifi` | The driver, a submodule, shared with `tools/wifiprobe/` |
