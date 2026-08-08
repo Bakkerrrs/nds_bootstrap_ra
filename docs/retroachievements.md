@@ -893,21 +893,47 @@ run time**, which is what `apPatchPath` and the whole `apfix` tree are for. So t
 is the one to point it at — it boots identically and it is the file the set is keyed to. Worth
 knowing before 3d rather than during it.
 
-#### And the heap number the first version printed was wrong in a flattering direction
+#### The heap took three attempts to report, and the truth is a hazard rather than a number
 
-The run reported `heap after hash 8528 free of 96452`, which reads as almost out of memory. It
-was not: `mallinfo().arena` is what newlib has **claimed by `sbrk()` so far**, not what is
-available. malloc simply had not needed to grow past 96 K, and another 88,076 bytes of the
-region sat unclaimed above it. `usmblks` is not filled in by this newlib at all, so
-`largest 0` meant nothing either.
+Both wrong versions were wrong in a *flattering* direction, which is the reason this gets a
+section instead of a footnote.
 
-Corrected to report what is true: how far the claimed heap has grown, how much room is left to
-grow into, and the sum. For that run the honest figure is **96,604 bytes usable** — 88,076
-unclaimed plus 8,528 free inside the arena — against a ceiling of 184,528 that the region
-allows but libfat and lwip have already eaten into.
+**First version:** `heap after hash 8528 free of 96452`. Reads as almost out of memory, and is
+not — `mallinfo().arena` is what newlib has claimed by `sbrk()` so far, not what is available.
+`usmblks` is not filled in by this newlib either, so `largest 0` meant nothing.
 
-**So ~96 KB is the budget step 3d gets**, and that is the number to design `r=patch` around:
-stream the reply, do not buffer the set.
+**Second version:** `fake_heap_end - sbrk(0)`, which reported **13,438,976 bytes**. True, and
+useless. libnds sets `fake_heap_end` from main RAM and knows nothing about nds-bootstrap: on
+hardware it measured `0x02FF3794`.
+
+**What actually bounds the heap is `IMAGES_LOCATION`, and nothing enforces it.** The launcher
+decompresses the boot images to `0x02338000` for the bootloader to display, and
+`ds_arm9_ndsbs.mem` ends the link region at exactly that address — but the enforcement libnds
+would provide lives in `fake_heap_end`, and that is set **12.8 MB higher**. So malloc will grow
+straight through the images, and then through the RA staging block at `0x02600000`, the
+cardengine staging at `0x026F0000`, the ARM7's at `0x027B2000` and the NDS header at
+`0x027FFE00`. Silently. The failure would surface as a corrupt boot screen, or a cardengine
+that starts and dies inside code that was overwritten after it was staged.
+
+Measured on the run at the top of this section:
+
+| | |
+| --- | --- |
+| end of static data | `0x0230AF30` |
+| heap top after the HTTP exchange | `0x02322794` (96,356 claimed) |
+| `IMAGES_LOCATION` — the real ceiling | `0x02338000` |
+| `fake_heap_end` — what libnds allows | `0x02FF3794` |
+| **safe headroom** | **88,172 bytes** |
+
+**Which retires the reason given earlier for streaming the hash and replaces it with a better
+one.** `rc_hash_nintendo_ds()` wanting 382,212 bytes in one block would *not* have failed to
+allocate — there are 12.8 MB behind `fake_heap_end`. It would have succeeded and overrun
+`IMAGES_LOCATION` by **294,040 bytes**, quietly destroying the boot images the launcher had
+just written. So streaming was necessary, and the earlier claim that it "does not fit" was
+wrong about the mechanism while landing on the right decision.
+
+**And ~88 KB is the budget step 3d gets**, which settles a design question before it is asked:
+`r=patch` must stream its reply, not buffer the set.
 
 #### The test harness had a landmine in it, and adding two files stepped on it
 
@@ -1095,9 +1121,15 @@ the test fails rather than this table going quietly stale.
 - **The heap has never been under pressure.** One GET is not a set: `r=patch` returns the whole
   thing, and lwip's send path allocates from the same `malloc` as libfat and the launcher's own
   strings. Streaming the reply rather than buffering it is the obvious precaution.
-- **About 96 KB of heap is what step 3d actually gets**, not the 184 KB the link map allows.
-  Measured during the HTTP exchange: malloc had claimed 96,452 bytes with 8,528 free inside and
-  88,076 of the region still unclaimed. `r=patch` returns a whole achievement set into that.
+- **The launcher's heap is not bounded by anything.** `fake_heap_end` is 12.8 MB above
+  `IMAGES_LOCATION`, so malloc will grow through the boot images and the whole staging map
+  without complaint — measured, `0x02FF3794` against a real ceiling of `0x02338000`. The safe
+  headroom is **88,172 bytes**, which is what step 3d gets and why `r=patch` must stream. Worth
+  fixing properly by lowering `fake_heap_end` in the launcher's startup; not fixed.
+- **The SD and the WiFi contend on the ARM7, and it has now been seen.** One run froze between
+  the HTTP exchange and the summary — SD writes with the network live, which is exactly #1d's
+  worry. Log syncs are throttled and the window is marked so a repeat locates itself, but
+  neither is a fix, and step 4 inherits this directly.
 - **The host test's fake WRAM arena is defined by luck** and it bit once already. See *Step 3b*
   — `__bss_end` and `__vram_top` are 1-byte dummies in `ra_reader_test.c`, and the arena is
   whatever the linker's ordering of them makes it. Worth fixing deliberately; it is not fixed.

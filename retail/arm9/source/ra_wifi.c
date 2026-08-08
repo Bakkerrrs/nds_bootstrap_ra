@@ -57,6 +57,8 @@
     signals; now they are read out of its prose like everything else. See
     RA_WIFI_SAY_ASSOC in ra_wifi_verdict.c.
 */
+#include "locations.h"
+
 #include "dsiwifi9.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -115,6 +117,10 @@
 static FILE*         logFile;
 static raWifiVerdict verdict;
 
+/* Drains happen once a frame; sync every eighth that moved bytes, so roughly 8 per second. */
+#define RA_WIFI_SYNC_EVERY 8
+
+static u32           syncPending;
 static char          textBuf[RA_WIFI_TEXT_MAX];
 static volatile u32  textHead;      /* written only by the interrupt */
 static u32           textTail;      /* read only by the main loop */
@@ -178,7 +184,22 @@ static void raWifiDrain(void) {
 		moved = true;
 	}
 
-	if (moved) {
+	/*
+	    Synced when a line lands, but not more than a few times a second.
+
+	    Every fsync() is an SD transaction, and on the DSi the SD is the *ARM7's* -- served
+	    over the FIFO by the same CPU that is at that moment running dsiwifi's timer, its SDIO
+	    interrupt and a WPA2 link. One v6 run froze immediately after the summary's heap line,
+	    which is SD I/O with the network live, and the run before it did not. That is the
+	    contention #1d worried about, seen for the first time, and it is the one hazard step 4
+	    inherits directly.
+
+	    Fewer transactions is not a fix and is not claimed as one -- a blocking libfat call
+	    cannot be bounded by a frame counter. It is less exposure while the reading is being
+	    taken, which is worth having until the contention itself is understood.
+	*/
+	if (moved && ++syncPending >= RA_WIFI_SYNC_EVERY) {
+		syncPending = 0;
 		raWifiSync();
 	}
 }
@@ -275,25 +296,40 @@ static bool raWifiWaitArm7(void) {
 */
 static void raWifiReportHeap(const char* when) {
 	/*
-	    Deliberately not `mallinfo().fordblks of .arena`, which is what the first version
-	    printed and which is misleading enough to be worth the correction. `arena` is what
-	    newlib has *claimed by sbrk() so far*, not what is available: the first run reported
-	    "8528 free of 96452" and read as almost-out-of-memory, when in fact malloc had simply
-	    not needed to grow past 96 K yet and there was another 88 K of unclaimed region above
-	    it. `usmblks` is not filled in by this newlib at all, so "largest 0" meant nothing.
+	    Third attempt at this line, and the two wrong versions are worth keeping in view
+	    because each was wrong in a way that mattered.
 
-	    What is true and useful: how far the claimed heap has grown, where it may grow to, and
-	    the sum of the two kinds of free space. That last figure is the one step 3d has to live
-	    inside.
+	    `mallinfo().fordblks of .arena` reads as almost-out-of-memory: `arena` is what newlib
+	    has claimed by sbrk() so far, not what is available. Then `fake_heap_end - sbrk(0)`
+	    reported **13.4 MB**, which is true and useless -- libnds sets `fake_heap_end` from
+	    main RAM and knows nothing about nds-bootstrap's link region. It was measured at
+	    0x02FF3794.
+
+	    What actually bounds the heap here is neither: it is `IMAGES_LOCATION`. The launcher
+	    decompresses the boot images to 0x02338000 for the bootloader to display later, and
+	    `ds_arm9_ndsbs.mem` ends the link region at exactly that address -- but nothing
+	    *enforces* it, because the enforcement libnds would do lives in `fake_heap_end` and
+	    that has been set 12.8 MB higher. So malloc will grow straight through the images, and
+	    then through the RA staging block at 0x02600000, the cardengine staging at 0x026F0000
+	    and the ARM7's at 0x027B2000, silently, and the failure would appear as a corrupt boot
+	    screen or a cardengine that starts and dies.
+
+	    So the number reported is the distance to `IMAGES_LOCATION`, and `fake_heap_end` is
+	    printed beside it precisely so the gap between the two is visible rather than
+	    reassuring.
 	*/
-	extern char*         fake_heap_end;
+	extern char*          fake_heap_end;
 	const struct mallinfo mi   = mallinfo();
 	char* const           top  = (char*)sbrk(0);
-	const unsigned long   room = (unsigned long)(fake_heap_end > top ? fake_heap_end - top : 0);
+	char* const           safe = (char*)IMAGES_LOCATION;
 
-	raWifiLog("heap %-11s %lu usable (%lu unclaimed + %lu free in %lu)\n", when,
-	          room + (unsigned long)mi.fordblks, room,
-	          (unsigned long)mi.fordblks, (unsigned long)mi.arena);
+	raWifiLog("heap %-11s %ld safe + %lu free, top %08lX, limit %08lX\n", when,
+	          (long)(safe - top), (unsigned long)mi.fordblks,
+	          (unsigned long)top, (unsigned long)fake_heap_end);
+
+	if (top >= safe) {
+		raWifiLog("\x1b[31mthe heap has passed IMAGES_LOCATION\x1b[37m\n");
+	}
 }
 
 /* Drain once per frame, so a hang leaves everything up to it already on the card. */
@@ -575,12 +611,19 @@ done:
 	    its own summary. Draining here means those lines land above the summary they inform,
 	    and the summary is computed from a log that is actually finished.
 	*/
+	/*
+	    Marked at both ends on purpose. One v6 run froze somewhere in here -- after the HTTP
+	    heap line and before the summary -- and with the window unmarked there was no way to
+	    tell the tail drain from the summary's own writes. A repeat now says which.
+	*/
+	raWifiLog("\n-- draining the tail --\n");
 	{
 		int frames = RA_WIFI_WAIT_TAIL * 60;
 		while (frames-- > 0) {
 			raWifiIdle();
 		}
 	}
+	raWifiSync();
 	raWifiVerdictFlush(&verdict);
 	stage = raWifiVerdictStage(&verdict);
 
