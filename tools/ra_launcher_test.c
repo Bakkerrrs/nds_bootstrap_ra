@@ -282,6 +282,33 @@ static void test_config(void) {
 		}
 	}
 
+	/*
+	    r=gameid's reply is a bare number, and the number 0 is an *answer*: it is what the API
+	    returns for a hash it has never seen. Reading it as "no field" would turn "your dump is
+	    not the supported one" into "something went wrong", which are different problems with
+	    different next moves.
+	*/
+	printf("\nthe gameid reply gives up a number, and zero is a number\n");
+	{
+		u32 id = 12345;
+
+		CHECK(raNetJsonNumber("{\"Success\":true,\"GameID\":1448}", "GameID", &id)
+		   && id == 1448);
+		CHECK(raNetJsonNumber("{\"Success\":true,\"GameID\":0}", "GameID", &id) && id == 0);
+		CHECK(raNetJsonNumber("{\"Success\":true, \"GameID\" : 7 }", "GameID", &id) == false);
+		/* whitespace after the colon is legal; before it the needle simply will not match */
+		CHECK(raNetJsonNumber("{\"GameID\":  7}", "GameID", &id) && id == 7);
+
+		/* A quoted value is not a number. Reading its digits would name the wrong game. */
+		id = 999;
+		CHECK(raNetJsonNumber("{\"GameID\":\"1448\"}", "GameID", &id) == false);
+		CHECK(id == 0);
+
+		/* Absent, and a value that would overflow, both have to fail rather than wrap. */
+		CHECK(raNetJsonNumber("{\"Success\":false}", "GameID", &id) == false);
+		CHECK(raNetJsonNumber("{\"GameID\":99999999999999}", "GameID", &id) == false);
+	}
+
 	remove(path);
 }
 

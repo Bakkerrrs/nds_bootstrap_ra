@@ -120,6 +120,8 @@ static raWifiVerdict verdict;
 #define RA_WIFI_SYNC_EVERY 8
 
 static u32           syncPending;
+/* Stage 0b computes it; stage 11 asks the server about it. */
+static char          romHash[33];
 static char          textBuf[RA_WIFI_TEXT_MAX];
 static volatile u32  textHead;      /* written only by the interrupt */
 static u32           textTail;      /* read only by the main loop */
@@ -510,6 +512,73 @@ static void raWifiLogin(const raConfig* cfg) {
 	}
 }
 
+/*
+    Stage 11: r=gameid, which turns the ROM's hash into the server's own verdict on it.
+
+    `r=patch` needs a GameID and this is where it comes from, but the reason to do it as its own
+    rung is that it answers a question nothing local can. Step 3b proved the hash matches what
+    rcheevos computes, and the user checked it by eye against the set's page. Neither of those is
+    the server saying "I know this dump", and the difference matters: a hash that RetroAchievements
+    does not recognise is what a trimmed, translated or differently-patched ROM produces, and it
+    looks exactly like a game with no achievement set.
+
+    No credentials needed -- this request is unauthenticated -- so it is deliberately independent
+    of whether the login above worked.
+
+    **A GameID of zero is an answer, not an error.** It is what the API returns for a hash it does
+    not know, and saying so plainly is the whole value of this rung.
+*/
+static void raWifiIdentify(void) {
+	static char   response[1024];
+	char          path[128];
+	raNetProgress p;
+	int           got;
+	u32           gameId = 0;
+
+	if (!romHash[0]) {
+		raWifiLog("\x1b[33mno ROM hash; identification skipped\x1b[37m\n");
+		return;
+	}
+	if (sniprintf(path, sizeof(path), "/dorequest.php?r=gameid&m=%s", romHash)
+	    >= (int)sizeof(path)) {
+		raWifiLog("\x1b[31mgameid request too long\x1b[37m\n");
+		return;
+	}
+
+	raWifiLog("asking about     %s\n", romHash);
+
+	memset(&p, 0, sizeof(p));
+	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+	if (got < 0) {
+		raWifiLog("\x1b[31mgameid HTTP failed at step %d\x1b[37m\n", -got);
+		return;
+	}
+	raWifiLog("%d bytes back\n", got);
+
+	if (!raNetJsonNumber(response, "GameID", &gameId)) {
+		raWifiLog("\x1b[31mno GameID in the reply\x1b[37m\n");
+		raWifiLog("body: %s\n", raNetBody(response));
+		return;
+	}
+
+	verdict.gameId = gameId;
+	if (gameId == 0) {
+		/*
+		    Not a failure of ours. The request worked, the API answered, and the answer is that
+		    it has never seen this dump -- so there is no set to fetch and 3d would have nothing
+		    to do. Said in full, because the next move is to find the supported ROM rather than
+		    to debug any of this.
+		*/
+		raWifiLog("\x1b[33mthe server does not know this hash\x1b[37m\n"
+		          "the dump is not one the set covers.\n");
+		raWifiLog("body: %s\n", raNetBody(response));
+		return;
+	}
+
+	verdict.identified = 1;
+	raWifiLog("\x1b[32mGameID           %lu\x1b[37m\n", (unsigned long)gameId);
+}
+
 void raWifiProbe(bool sdFound, const char* ndsPath) {
 	static raConfig config;
 	int             stage;
@@ -542,12 +611,11 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	*/
 	raWifiLog("\n-- stage 0b: the ROM's RetroAchievements hash --\n");
 	{
-		char       hash[33];
 		raHashInfo hashInfo;
 
 		raWifiLog("ROM              %s\n", ndsPath ? ndsPath : "(none given)");
-		if (ndsPath && raHashRom(ndsPath, hash, &hashInfo)) {
-			raWifiLog("\x1b[32mhash             %s\x1b[37m\n", hash);
+		if (ndsPath && raHashRom(ndsPath, romHash, &hashInfo)) {
+			raWifiLog("\x1b[32mhash             %s\x1b[37m\n", romHash);
 		} else {
 			raWifiLog("\x1b[31mhash failed: %s\x1b[37m\n", raHashLastError());
 		}
@@ -640,6 +708,10 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	raWifiLogin(&config);
 	raWifiReportHeap("after login");
 
+	raWifiLog("\n-- stage 11: does the server know this ROM --\n");
+	raWifiIdentify();
+	raWifiReportHeap("after gameid");
+
 done:
 	/*
 	    Give the tail a chance before the summary rather than after it. dsiwifi narrates
@@ -685,6 +757,11 @@ done:
 	          verdict.tcpOk ? "ok" : "no",
 	          verdict.apiOk ? "ok" : "no");
 	raWifiLog("logged in        %s\n", verdict.loggedIn ? "yes" : "no");
+	if (verdict.identified) {
+		raWifiLog("GameID           %lu\n", (unsigned long)verdict.gameId);
+	} else {
+		raWifiLog("GameID           %s\n", verdict.gameId == 0 ? "unknown to the server" : "not asked");
+	}
 	if (verdict.mboxAllocFailed) {
 		raWifiLog("\x1b[31mthe ARM7 could not allocate its mboxes\x1b[37m\n");
 	}
@@ -695,7 +772,9 @@ done:
 	}
 
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);
-	if (stage >= RA_WIFI_STAGE_LOGGED_IN) {
+	if (stage >= RA_WIFI_STAGE_IDENTIFIED) {
+		raWifiLog("logged in, and the server knows the ROM.\n");
+	} else if (stage >= RA_WIFI_STAGE_LOGGED_IN) {
 		raWifiLog("logged in from the launcher.\n");
 	} else if (stage >= RA_WIFI_STAGE_ANSWERED) {
 		raWifiLog("the launcher can reach RetroAchievements.\n");

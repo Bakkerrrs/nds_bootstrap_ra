@@ -77,7 +77,8 @@
 #define RA_WIFI_STAGE_CONNECTED   8  /* TCP to port 80 */
 #define RA_WIFI_STAGE_ANSWERED    9  /* the API replied, and the reply looks like the API */
 #define RA_WIFI_STAGE_LOGGED_IN   10 /* r=login returned a token for the configured user */
-#define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_LOGGED_IN
+#define RA_WIFI_STAGE_IDENTIFIED  11 /* r=gameid turned the ROM's hash into a GameID */
+#define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_IDENTIFIED
 
 /*
     What dsiwifi's narration said about how the chip arrived.
@@ -111,6 +112,8 @@ typedef struct raWifiVerdict {
 	u8   tcpOk;
 	u8   apiOk;
 	u8   loggedIn;         /* r=login returned a token */
+	u8   identified;       /* r=gameid returned a non-zero GameID */
+	u32  gameId;           /* ...this one. Zero means the server does not know the dump */
 	u32  ip;               /* as DSiWifi_GetIP() returns it */
 	char chip[16];         /* "AR6014", as dsiwifi named it */
 	/*
@@ -228,6 +231,7 @@ int         raNetHttpGet(const char* host, const char* path, char* out, int outS
                          raNetProgress* p);
 const char* raNetBody(const char* response);
 bool        raNetJsonString(const char* json, const char* key, char* out, size_t outSize);
+bool        raNetJsonNumber(const char* json, const char* key, u32* out);
 
 /* The ARM7 half: hand this CPU to dsiwifi. One call, and where it goes matters. */
 void raWifiInstall(void);

@@ -96,14 +96,13 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **`r=gameid`** — one request, and it is the cheapest decisive thing
-left. The launcher has the ROM's hash and a login token; `dorequest.php?r=gameid&m=<hash>`
-answers with a `GameID` or with nothing, which is *the server itself* saying whether it
-recognises this dump. Today that has only been checked by eye against the set's page, and
-`r=patch` needs the ID anyway.
+The immediate next step is **one hardware run of the 11-rung build**: `r=gameid` is written and
+host-tested but no console has asked the server about a hash yet. It is the cheapest decisive
+thing left — the server's own verdict on whether it recognises this dump, where so far the hash
+has only been compared by eye against the set's page.
 
-After it, `r=patch` and the parsing (3d) are the last of step 3. Everything below them is
-proven on hardware: the chip, the link, DHCP, DNS, HTTP, the hash, and a real login.
+After it, `r=patch` and the parsing are the last of step 3. Everything below them is proven on
+hardware: the chip, the link, DHCP, DNS, HTTP, the hash, and a real login.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -1017,6 +1016,25 @@ already stands.
 That matters because it removes a worry rather than confirming one: the concern was that lwip
 would eat the heap and leave `r=patch` nothing. It does not. What is left is whether a whole
 achievement set fits in 88 K, which is a question about `r=patch` alone.
+
+#### `r=gameid`: the one question only the server can answer
+
+`r=patch` needs a `GameID`, and it comes from `dorequest.php?r=gameid&m=<hash>` — but the reason
+to make that its own rung is that it settles something nothing local can. Step 3b proved the hash
+matches what rcheevos computes, and the user compared it against the set's page. Neither is the
+server saying *"I know this dump"*, and the difference is exactly what a trimmed, translated or
+differently-patched ROM produces: a hash RetroAchievements has never seen, which looks precisely
+like a game with no achievement set.
+
+Unauthenticated, so it does not depend on the login rung above it.
+
+**A `GameID` of zero is an answer, not an error**, and that distinction is most of the code. It is
+what the API returns for a hash it does not know, so the run reports "the server does not know
+this hash — the dump is not one the set covers" and stops. The next move then is to find the
+supported ROM, not to debug the network. `raNetJsonNumber()` is separate from
+`raNetJsonString()` for the same reason: a matcher that accepted a quote would read the first
+digits of `"GameID":"1448"` and name a game that is not the game, and the host test pins that,
+along with zero, whitespace, absence and an overflowing value.
 
 #### Percent-encoding is the part that would have been blamed on the user
 

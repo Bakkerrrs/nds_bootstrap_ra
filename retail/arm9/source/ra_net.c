@@ -220,4 +220,54 @@ bool raNetJsonString(const char* json, const char* key, char* out, size_t outSiz
 	return i > 0;
 }
 
+/*
+    Pull one *numeric* field out of a JSON object.
+
+    Separate from raNetJsonString() rather than folded into it, because the distinction is the
+    whole point for `r=gameid`: the reply is `{"Success":true,"GameID":1448}` and the field is a
+    bare number. A matcher that accepted a quote here would happily read the first digits of a
+    string field and return a plausible game that is not the game.
+
+    So the needle is `"key":` and the value must begin with a digit. `"GameID":"1448"` fails,
+    which is correct: that is not what the API sends, and if it ever did, silence beats a guess.
+
+    Zero is a legitimate value and is returned as one -- see the caller. For `r=gameid` it means
+    the server does not recognise the hash, which is an answer rather than a failure.
+*/
+bool raNetJsonNumber(const char* json, const char* key, u32* out) {
+	char        needle[40];
+	const char* at;
+	u32         value = 0;
+	int         digits = 0;
+
+	*out = 0;
+	if (sniprintf(needle, sizeof(needle), "\"%s\":", key) >= (int)sizeof(needle)) {
+		return false;
+	}
+	at = strstr(json, needle);
+	if (!at) {
+		return false;
+	}
+	at += strlen(needle);
+
+	/* Whitespace is legal JSON between the colon and the value, even if this API sends none. */
+	while (*at == ' ' || *at == '\t') {
+		at++;
+	}
+	while (*at >= '0' && *at <= '9') {
+		/* Refuse rather than wrap: a truncated game ID is a different game. */
+		if (value > (0xFFFFFFFFu - (u32)(*at - '0')) / 10) {
+			return false;
+		}
+		value = value * 10 + (u32)(*at - '0');
+		digits++;
+		at++;
+	}
+	if (digits == 0) {
+		return false;
+	}
+	*out = value;
+	return true;
+}
+
 #endif /* RA_LAUNCHER_WIFI */
