@@ -61,7 +61,12 @@ fi
 
 rc_runtime_sources=$(ls "$RC"/src/rcheevos/*.c | grep -v 'rc_validate\.c$')
 
+# ra_wifi_verdict.c is linked rather than #included: see the note in ra_reader_test.c about
+# __bss_end and __vram_top. Nothing else joins this link -- step 3b's hash check is a separate
+# binary below, for the reason documented at the top of tools/ra_hash_test.c.
+#
 $CC -std=gnu99 -Wall -Wno-unused-function -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -O1 \
+	-DRA_LAUNCHER_WIFI=1 \
 	-I"$out/include" -Iretail/common/include \
 	-I"$RC/include" -I"$RC/src" \
 	-no-pie -Wl,-Ttext-segment=0x02100000 \
@@ -69,11 +74,34 @@ $CC -std=gnu99 -Wall -Wno-unused-function -Wno-pointer-to-int-cast -Wno-int-to-p
 	$rc_runtime_sources \
 	"$RC"/src/rc_util.c "$RC"/src/rc_compat.c "$RC"/src/rc_version.c \
 	"$RC"/src/rhash/md5.c \
+	retail/arm9/source/ra_wifi_verdict.c \
 	-lm -o "$out/ra_reader_test"
 
 set +e
 "$out/ra_reader_test"
 status=$?
+set -e
+
+#---------------------------------------------------------------------------------
+# Step 3b: ra_hash.c against the real rc_hash_nintendo_ds().
+#
+# Its own binary, and the note at the top of tools/ra_hash_test.c says why -- joining the link
+# above moved the allocator's arena and segfaulted the suite. Nothing here needs the fixed link
+# address or the mapped pages: the hash is file I/O and an MD5.
+#
+# The RC_HASH_NO_* defines drop rhash's disc, encryption and zip paths, which this needs none of
+# and which would otherwise drag in a CD reader and AES.
+#---------------------------------------------------------------------------------
+$CC -std=gnu99 -Wall -O1 \
+	-DRA_LAUNCHER_WIFI=1 -DRC_HASH_NO_DISC -DRC_HASH_NO_ENCRYPTED -DRC_HASH_NO_ZIP \
+	-I"$out/include" -Iretail/common/include -I"$RC/include" -I"$RC/src" \
+	tools/ra_hash_test.c retail/arm9/source/ra_hash.c \
+	"$RC"/src/rhash/md5.c "$RC"/src/rhash/hash.c "$RC"/src/rhash/hash_rom.c \
+	"$RC"/src/rc_util.c "$RC"/src/rc_compat.c \
+	-o "$out/ra_hash_test"
+
+set +e
+"$out/ra_hash_test" || status=1
 set -e
 
 # The other half of pinning step two's log classifier.

@@ -142,12 +142,31 @@ void        raWifiVerdictFlush(raWifiVerdict* v);
 int         raWifiVerdictStage(const raWifiVerdict* v);
 const char* raWifiVerdictArrival(const raWifiVerdict* v);
 
+/*
+    Step 3b. What the launcher had to allocate to compute the hash, reported so the margin
+    against the heap is a measurement rather than a hope: rc_hash_nintendo_ds() takes
+    max(0xA00, arm9Size, arm7Size) in one block, and the launcher has ~352 K of heap before
+    lwip starts and ~191 K after.
+*/
+typedef struct raHashInfo {
+	u32 arm9Size;
+	u32 arm7Size;
+	u32 bufferBytes;
+} raHashInfo;
+
 #if RA_LAUNCHER_WIFI
 /*
     The probe itself, on the ARM9 launcher. Never returns: it stops on a summary. See the
     switch above for why that is the design and not a shortcut.
 */
-void raWifiProbe(bool sdFound);
+void raWifiProbe(bool sdFound, const char* ndsPath);
+
+/*
+    The RetroAchievements hash of a DS ROM, as rcheevos computes it. 32 lowercase hex digits
+    and a terminator. False leaves hash empty and raHashLastError() explaining why.
+*/
+bool        raHashRom(const char* path, char hash[33], raHashInfo* info);
+const char* raHashLastError(void);
 
 /* The ARM7 half: hand this CPU to dsiwifi. One call, and where it goes matters. */
 void raWifiInstall(void);

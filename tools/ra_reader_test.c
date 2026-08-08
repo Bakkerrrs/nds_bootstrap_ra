@@ -57,6 +57,13 @@ char __bss_start[1], __bss_end[1], __vram_top[1];   /* referenced by cardengine.
 */
 #include "../retail/cardenginei/arm9_ra/source/ra_rcheevos.c"
 
+/*
+    The launcher's side, declarations only. Both implementations are separate translation
+    units linked by the runner -- see the note above the step-two section for why they must
+    not be #included here.
+*/
+#include "ra_wifi.h"
+
 #define MIRROR_LOW   0x02000000u          /* console 0x000000 */
 #define MIRROR_HIGH  0x02800000u          /* the same page, two 4M mirrors up */
 #define APART        0x02C00000u          /* masks to the same console address, own memory */
@@ -123,10 +130,17 @@ static u32 targetPtrPtr;
     break a build, it reports the wrong world after a play session. So the strings are
     pinned here against the log a real console produced, and the runner greps the submodule
     for the format strings besides.
+
+    Unlike the cardengine sources above, the launcher's two files are *linked* rather than
+    #included -- see the runner. That is not a style preference. `__bss_end` and `__vram_top`
+    are 1-byte dummies in this translation unit whose *addresses* define the arena
+    `ra_alloc.c` hands out, so any static added to this TU moves what lies between them and
+    the allocator starts writing over live variables. Including ra_hash.c here did exactly
+    that: the suite passed at -O0 and segfaulted at -O1, several tests before the new code
+    was even reached. Anything with file-scope state stays in its own TU.
     ------------------------------------------------------------------------------------
 */
-#define RA_LAUNCHER_WIFI 1
-#include "../retail/arm9/source/ra_wifi_verdict.c"
+
 
 /*
     The log a 3DS produced, read off disk rather than transcribed.

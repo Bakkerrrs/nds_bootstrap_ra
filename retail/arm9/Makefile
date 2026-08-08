@@ -70,6 +70,20 @@ endif
 #---------------------------------------------------------------------------------
 DSIWIFI9	:=	$(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../dsiwifi9)
 
+#---------------------------------------------------------------------------------
+# Step 3b needs one file out of rcheevos: md5.c. Not the rest of rhash -- rc_hash_nintendo_ds()
+# allocates the ROM's largest code block in one piece and the launcher has no such heap, so
+# retail/arm9/source/ra_hash.c streams the same ranges instead and tools/ra_hash_test.c holds
+# it to rcheevos' answer on real .nds files.
+#
+# -iquote so nothing in rcheevos/src can win an angle-bracket include against newlib.
+#---------------------------------------------------------------------------------
+RCHEEVOS	:=	$(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../cardenginei/arm9_ra/rcheevos)
+
+ifeq ($(RA_LAUNCHER_WIFI),1)
+CFLAGS	+=	-iquote $(RCHEEVOS)/src
+endif
+
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 
 ASFLAGS	:=	-g $(ARCH) $(INCLUDE)
@@ -128,6 +142,13 @@ endif
 
 export OFILES	:=	$(addsuffix .o,$(BINFILES)) \
 					$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+
+# md5.c by name rather than by adding its directory to SOURCES: that directory is all of
+# rhash, and the rest of it is the server-side and disc code this launcher must not carry.
+ifeq ($(RA_LAUNCHER_WIFI),1)
+export VPATH	:=	$(VPATH) $(RCHEEVOS)/src/rhash
+export OFILES	:=	$(OFILES) md5.o
+endif
 
 export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 					$(foreach dir,$(LIBDIRS),-I$(dir)/include) \

@@ -399,7 +399,7 @@ static void raWifiHttpGet(void) {
 	}
 }
 
-void raWifiProbe(bool sdFound) {
+void raWifiProbe(bool sdFound, const char* ndsPath) {
 	int stage;
 
 	logFile = fopen(sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT, "w");
@@ -416,6 +416,38 @@ void raWifiProbe(bool sdFound) {
 
 	raWifiLog("\n-- stage 0: the bus --\n");
 	raWifiReportScfg();
+
+	/*
+	    Step 3b, and it runs here for two reasons. It needs no network, so putting it first
+	    means a failure cannot be blamed on one. And it reads the ROM off the card while the
+	    heap is still whole -- the launcher has roughly 352 K free at this point and 191 K once
+	    lwip is up, and although ra_hash.c streams rather than allocating, libfat still wants
+	    buffers and there is no reason to make it compete.
+
+	    The hash is what 3c and 3d will ask the server about, so it is logged in full: it can
+	    be checked against the game's page on retroachievements.org by eye, which is a cheaper
+	    verification than any amount of code.
+	*/
+	raWifiLog("\n-- stage 0b: the ROM's RetroAchievements hash --\n");
+	{
+		char       hash[33];
+		raHashInfo hashInfo;
+
+		raWifiLog("ROM              %s\n", ndsPath ? ndsPath : "(none given)");
+		if (ndsPath && raHashRom(ndsPath, hash, &hashInfo)) {
+			raWifiLog("\x1b[32mhash             %s\x1b[37m\n", hash);
+		} else {
+			raWifiLog("\x1b[31mhash failed: %s\x1b[37m\n", raHashLastError());
+		}
+		/*
+		    Printed even on failure, because these three numbers are what say *why* the
+		    streaming implementation exists: bufferBytes is what rcheevos' own function would
+		    have had to allocate in one block.
+		*/
+		raWifiLog("arm9 / arm7      %lu / %lu bytes\n",
+		          (unsigned long)hashInfo.arm9Size, (unsigned long)hashInfo.arm7Size);
+		raWifiLog("would malloc     %lu bytes\n", (unsigned long)hashInfo.bufferBytes);
+	}
 
 	raWifiLog("\n-- the ARM7 half --\n");
 

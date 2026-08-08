@@ -90,13 +90,14 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **3b, the RetroAchievements hash for a DS ROM**. Nothing computes
-it yet, so the launcher cannot ask the server *which* set to fetch — and it is the last part of
-step 3 that can be done without handling a password. After it, `r=login` (3c) and `r=patch`
-(3d) are transport that is already proven, plus JSON.
+The immediate next step is **3c, `r=login`** — and it needs a decision before code: where the
+credentials live, and whether sending a password in the clear is acceptable. The
+recommendation on the record is to log in once, keep only the token, and never write the
+password to the card. See *#1a* for what cleartext costs.
 
-No platform question is open in front of any of that. Step 3a reached the API from the launcher
-on hardware: see *Step 3a — lwip in the launcher* below.
+3a and 3b are done and in front of nothing. The launcher reaches the API on hardware, and it
+computes the ROM's hash; what has not happened is a run that shows the *server* recognising
+that hash, which the next hardware round gets for free.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -782,6 +783,75 @@ change and still contains both lines, so the host test now asserts that the text
 agrees with what the IPC-based one reported at the time. Same bytes, same verdict, different
 mechanism.
 
+### Step 3b — the ROM's hash, and rcheevos as the reference rather than the implementation
+
+Without this the launcher cannot ask the server *which* set to fetch. It is the last part of
+step 3 that needs no password, and the only one whose correctness is a single number that can
+be checked against RetroAchievements' own site rather than by playing.
+
+**Built, host-verified, and not yet run on hardware.** The probe now logs the hash of the ROM
+it was pointed at, before it touches the network.
+
+#### rcheevos defines it; we had to implement it anyway
+
+`rc_hash_nintendo_ds()` is already in the vendored submodule, and the first version of this
+simply called it. Then it got measured. It allocates `max(0xA00, arm9_size, arm7_size)` in
+**one block** so it can hash each region from memory — **353,164 bytes** for nds-bootstrap's
+own `.nds`, and a real DS game is commonly larger. The launcher's ARM9 has about **352 K of
+heap before lwip and 184 K after**. It does not fit even in the best case, and no reordering
+of the probe would have saved it.
+
+So `ra_hash.c` streams the same four ranges — 352 bytes of header, the ARM9 code, the ARM7
+code, 2,560 bytes of zero-padded icon block, plus the 512-byte SuperCard skip — through one
+1 K buffer. Fixed cost, any ROM size, and the right shape for the shipped feature where this
+runs on every boot.
+
+**Which makes divergence the entire risk**, and it is the nastiest failure mode in step 3: a
+hash over almost-the-right bytes is a well-formed MD5 that the server does not recognise, and
+on hardware that is *indistinguishable from a game with no achievement set*. No play session
+could tell those apart.
+
+So `tools/ra_hash_test.c` compiles the real `rc_hash_nintendo_ds()` — only there, never into
+the launcher — and requires the two to agree on real `.nds` files, whichever ones the build
+produced. rcheevos stays the definition; ours is an implementation of it that cannot drift in
+silence. Both agree today:
+
+```
+retail/bin/nds-bootstrap-nightly.nds   d2f9350db41ccd1e821ed5a4420351c5
+tools/wifiprobe/wifiprobe.nds          a100b64c97ebea15684372b31505ae82
+```
+
+Only rcheevos' `md5.c` is linked into the launcher — the hashing, not the file plumbing. The
+whole of 3b costs about 6.5 K of the ARM9.
+
+#### The test harness had a landmine in it, and adding two files stepped on it
+
+Putting the hash check inside `tools/ra_reader_test.c` made the suite **segfault at `-O1` and
+pass at `-O0`**, in a test several sections *before* the new code ran. That is worth the
+paragraph, because the cause is not the new code at all.
+
+That file defines `__bss_start`, `__bss_end` and `__vram_top` as 1-byte dummies, because the
+cardengine takes their addresses: `ra_startup(__bss_start, __bss_end, ...)` zeroes the range
+between the first two and hands out an arena starting at the second. On the target those are
+linker-script symbols spanning a real window. On the host they are whatever the linker decides,
+and adding rcheevos' `hash.c` and `hash_rom.c` to that link put `__vram_top` **below**
+`__bss_end` — a span of **−1 bytes** — so the allocator's arena became the entire process.
+
+It had always been luck. `fakeArena[0x3B000]` sits in that file unused, which says the intent
+was there and was never wired to the symbols.
+
+The fix here is deliberately narrow: the hash check is a **separate binary** that joins none of
+that link and needs none of it — no cardengine sources, no fixed link address, no mapped pages,
+because a hash is file I/O and an MD5. Making the arena explicit is a real fix and a separate
+change; it is recorded under *Still open* rather than smuggled into 3b.
+
+#### And it runs before the network
+
+Two reasons, and neither is cosmetic. It needs no network, so putting it first means a failure
+cannot be blamed on one. And it reads the ROM off the card while the heap is still whole —
+`ra_hash.c` streams, but libfat still wants buffers, and there is no reason to make it compete
+with lwip for them.
+
 #### The ARM7 was supposed to be the wall. It is not, and the reason is a section name
 
 The one thing this could not be reasoned about was space. dsiwifi's ARM7 half is ~13,000
@@ -940,8 +1010,13 @@ the test fails rather than this table going quietly stale.
 - **The 191 KB of heap left after lwip has never been under pressure.** Step 3a's run did one
   GET; `r=patch` returns a whole achievement set, and lwip's send path allocates from the same
   `malloc` as libfat and the launcher's own strings. It is the number to watch in 3d.
-- **Nothing computes the RetroAchievements hash for a DS ROM** (3b), so the launcher cannot ask
-  which set to fetch. Today's definitions still come from a file the user edits.
+- **The hash has never been checked against the server** (3b). It matches rcheevos' own
+  implementation on real `.nds` files, which is the strongest local check there is, but "the
+  server recognises it" is a different claim. One hardware run prints it; comparing it against
+  the game's page on retroachievements.org settles it by eye.
+- **The host test's fake WRAM arena is defined by luck** and it bit once already. See *Step 3b*
+  — `__bss_end` and `__vram_top` are 1-byte dummies in `ra_reader_test.c`, and the arena is
+  whatever the linker's ordering of them makes it. Worth fixing deliberately; it is not fixed.
 - **Reporting an unlock has never been attempted.** Evaluation is done; `r=awardachievement`
   is not written, and neither is `r=patch`. Both wait on the transport above.
 - **Game identification.** Nothing yet computes the RetroAchievements hash for a DS ROM, so
@@ -1091,6 +1166,8 @@ encoding) and it looked as though nothing was being read. Liveness is proved by
 | `retail/cardenginei/arm9/source/ra_overlay.c` | Notification implementation |
 | `tools/ra_snapshot_addr.sh` | Prints the snapshot address and the space left, from the link maps |
 | `tools/ra_reader_test.c` / `.sh` | Host-side test for the watchlist, the chain walker, the example file and step two's log classifier |
+| `tools/ra_hash_test.c` | Host-side test for step 3b: our ROM hash against rcheevos' own. Its own binary, for a reason worth reading |
+| `retail/arm9/source/ra_hash.c` | The ROM's RetroAchievements hash, streamed rather than allocated |
 | `retail/common/include/ra_wifi.h` | Step two: the `RA_LAUNCHER_WIFI` switch, the stage ladder, the verdict struct |
 | `retail/arm9/source/ra_wifi.c` | Step two on the ARM9: one IPC message, the log, the summary |
 | `retail/arm9/source/ra_wifi_verdict.c` | Reads how the chip arrived out of dsiwifi's log text. Host-tested |
@@ -1550,8 +1627,8 @@ things to test. So the order is not "build the client":
    - **3a, the IP stack — done, `stage 9 of 9` on hardware.** lwip in the launcher, cut to
      fit, reaching the RA API over plain HTTP with no credentials. See *Step 3a — lwip in the
      launcher*.
-   - **3b, game identification.** Nothing yet computes the RetroAchievements hash for a DS
-     ROM, so the launcher cannot ask *which* set to fetch.
+   - **3b, game identification — written, host-verified, not yet run.** The launcher computes
+     the ROM's RetroAchievements hash and logs it. See *Step 3b* below.
    - **3c, `r=login`.** A token, and the first time this project handles a real password —
      over cleartext, which is the user's call to make knowingly (see *#1a*).
    - **3d, `r=patch` and parsing.** JSON in, memaddr strings out, into the block that already
