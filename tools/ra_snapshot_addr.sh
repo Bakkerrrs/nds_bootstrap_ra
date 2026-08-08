@@ -8,8 +8,12 @@
 # 3DS that is cardenginei_arm9.
 #
 # Then open the in-game menu's RAM viewer, navigate to that address, and look for
-# the ASCII bytes "RA1S" (52 41 31 53) followed by a frame counter that climbs
+# the ASCII bytes "RA2S" (52 41 32 53) followed by a frame counter that climbs
 # once per frame.
+#
+# The digit is the layout version, so a stale address from an older build announces
+# itself as "RA1S" or "RA0S" rather than being read as though the offsets still meant
+# what this document says.
 #
 # The "free" column is __vram_top - __bss_end: the gap between the end of .bss and the
 # end of the cardengine's window, which is all the room it has left. It is what limits
