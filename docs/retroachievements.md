@@ -656,6 +656,48 @@ kept printing after the summary — the `WMI_BSSINFO` line arrived *after* "log 
 The log file was being closed at the summary, so exactly the lines that describe how the
 chip came up were being dropped from the file. It now stays open until you exit.
 
+### #1g — there are three network contexts, not two, and the middle one was invisible
+
+Everything above was argued as a choice between two places to put the network: inside the
+game, where the ARM7 belongs to the game, or outside on a separate 3DS-mode companion app.
+That framing missed the obvious one.
+
+**nds-bootstrap's launcher is ordinary DSi-mode homebrew.** `retail/arm9/source/main.cpp`
+calls `consoleDemoInit()` and checks `isDSiMode()`; `retail/arm7/` is its own ARM7, not the
+game's. It reads the SD card, parses configuration, loads the ROM and stages
+`cardenginei_arm9_ra` — all before a single instruction of the game has run. It is, in
+every respect that matters, the same context the probe just succeeded in.
+
+So there are three:
+
+| Context | WiFi | Contention |
+| --- | --- | --- |
+| **A — the launcher**, before the game boots | proven, this is what the probe is | none; no game exists yet |
+| **B — inside the game**, cardengine + WRAM binary | unproven, hard | the ARM7 is the game's, nothing may block |
+| **C — a 3DS-mode companion app** | full stack, TLS, WPA2 | none, but it is a second program the user must run |
+
+The plan had been B or C. **A is better than both**, and it is where the work should go:
+
+- It needs no companion app, so the user launches one thing.
+- It has no ARM7 contention, because there is no game yet — which was the last obstacle
+  standing.
+- It is where the interesting network work naturally belongs anyway: identifying the game
+  and fetching its achievement set are things you do *before* play, not during.
+- The pipe already exists. `CARDENGINEI_ARM9_RA_BUFFERED_LOCATION` and its `SRA1` magic were
+  built to carry a binary from the launcher into DSi WRAM; carrying achievement definitions
+  the same way is the mechanism we already debugged.
+
+What A cannot do is submit an unlock at the instant it happens, because by then the launcher
+is gone. Unlocks get queued in WRAM during play and flushed afterwards — either by the ARM7
+cardengine writing them to the SD card, which it already does for screenshots and saves, and
+the launcher sending them on next boot; or through the in-game menu, which already exists.
+The Connect API's bulk endpoint is built for exactly this.
+
+That is deferred submission, but by minutes rather than by a separate program, and on one
+console with one launch. **Live submission from inside the game becomes an optimisation
+rather than a prerequisite** — worth doing later if the ARM7 question turns out well, and
+not blocking anything if it does not.
+
 ### #1f — the rest of the ladder
 
 The risk is concentrated in the firmware-state question, and that is also among the cheapest
