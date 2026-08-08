@@ -122,9 +122,12 @@ apart, because they have different fixes.
 **First, and it needs no network at all:** copy `docs/logs/ra_definitions-14856.txt` to
 `sd:/_nds/nds-bootstrap/ra_achievements.txt` and boot Super Mario 64 DS with a **normal** build.
 That is the server's own 56 definitions going through `loadRaDefinitions()` into the cardengine,
-and it answers "can rcheevos run a real set on this hardware" on its own. The host says the memory
-fits with 29,780 bytes to spare; what it cannot say is whether **1,946 conditions per frame** are
-fast enough. `rcLinesMax` is the number to read — it was 1 scanline of 263 for three definitions.
+and it answers "can rcheevos run a real set on this hardware" on its own. Two numbers are open and
+everything else is already answered on the host: **`rcInitTotal`** (`+0x9E`), the one-time parse,
+and **`rcLinesMax`** (`+0x85`), the steady-state cost of 1,946 conditions per frame out of 263 —
+three definitions cost 1. See *Step 4, offline half* for the full checklist, with a prediction
+against every field, and for why `rcInitLines` had to be fixed before the run rather than after
+it.
 
 **Then the network beside a game**, which is the part *#1g* has always flagged as the real unknown:
 in context B the ARM7 belongs to the game, and the launcher's ARM7 has 18 KB of IWRAM spare with
@@ -3258,6 +3261,95 @@ generous rather than tight.
 The staging strategy that follows from all of this: prove the load path with the 48-byte
 stub that exists now. If the address is wrong after all, the blast radius is 48 bytes and
 it shows up as a failed verification on hardware before anything grows into it.
+
+## Step 4, offline half: running the server's own set inside the game
+
+Step 3 ends with 56 published definitions staged where the cardengine reads them. Step 4 runs
+them, and it stacks two things that have never been tried: rcheevos evaluating a real set inside a
+retail game, and WiFi in context B where the ARM7 belongs to the game. Those fail for unrelated
+reasons and have unrelated fixes, so they are separated — and the first one needs no network at
+all.
+
+**The mechanism is not a new path.** `ra_definition()` decides whether the block is real by the
+magic at `CARDENGINEI_ARM9_RA_DEFS_LOCATION` and nothing else, so the cardengine cannot tell a
+file from an `r=patch`. Same address, same header, same `rcFromFile = 1`, same
+`ra_split_definitions()`. Copying `docs/logs/ra_definitions-14856.txt` to
+`sd:/_nds/nds-bootstrap/ra_achievements.txt` therefore exercises *the same code* with the network
+removed as a variable.
+
+There is also a hard reason and not only a methodological one: **`RA_LAUNCHER_WIFI=1` does not boot
+games**, by design — dsiwifi's bring-up has two untimed `while` loops on the ARM7 and handing a
+possibly-wedged ARM7 to a bootloader that is about to overwrite its code is not something to do for
+a measurement. So no build today both fetches a set and boots a game. Building that one is step 4;
+the file is the bridge until it exists.
+
+### `rcInitLines` could not measure this, so it was fixed first
+
+The one-time parse used to be timed as a single `VCOUNT` delta around `ra_rc_init()`, taken modulo
+263. That is correct for three definitions and **silently wrong for fifty-six**: a parse spanning
+four frames reports whatever remainder it lands on, so a slow init reads as a fast one. And there
+is no way to count frames from inside a handler that is not being re-entered.
+
+Why it matters more than tidiness: rcheevos deduplicates memrefs by scanning a list that grows as
+definitions are added, so ~1,946 conditions across two parse passes is plausibly **tens of
+millions of cycles at 67 MHz — ten frames or more, spent inside the game's VCOUNT handler**. That
+is a hazard to the game, not a detail, and a number that wraps would have hidden it.
+
+So the measurement moved down a level. Each activation is timed on its own and the results are
+published *as the loop runs*, so a hang shows how far it got:
+
+| Field | Offset | What it is |
+| --- | --- | --- |
+| `rcInitLines` | `+0x6F` | the **slowest single** activation, clamped at 255 |
+| `rcInitTotal` | `+0x9E` | scanlines **summed** over all of them, clamped at 0xFFFF |
+
+Per-definition deltas sum correctly as long as no single activation exceeds one frame, and
+`rcInitLines` is what says whether that assumption held: at 255 it saturated and the total is a
+lower bound.
+
+`rcFirstTriggered` (`+0x9D`) went in beside them. With one definition a counter was enough; with
+fifty-six, `rcTriggered` climbing says something fired and nothing about what. Both fields fit in
+`reserved4[3]` — one `u8` and one aligned `u16` at an odd offset — so **every offset above them
+keeps its address** and the checklist below stays valid for every reading anyone has photographed.
+
+### The predictions, made before the run
+
+Snapshot at **`0x027FED50`** (`cardenginei_arm9`, which is what a retail DS game loads on a 3DS).
+Re-run `tools/ra_snapshot_addr.sh` after any rebuild.
+
+| Field | Offset | Expected | What it being otherwise means |
+| --- | --- | --- | --- |
+| `rcFromFile` | `+0x98` | **1** | 0 = the file was not picked up; the built-in self-test is running and nothing below is about the set |
+| `rcDefLength` | `+0x9A` | **`6FA9`** (28,585) | anything else = the file was truncated or edited |
+| `rcActivated` | `+0x99` | **`38`** (56) | fewer = a definition the host accepted was refused on hardware, and `rcBadLine` says which |
+| `rcBadLine` | `+0x9C` | **0** | non-zero = the first line that failed to parse |
+| `rcStage` | `+0x6C` | `RA_RC_ACTIVE` | `RA_RC_NO_MEMORY` = the arena measurement was wrong |
+| **`rcFirstTriggered`** | **`+0x9D`** | **1** | the set opens with `1=1.300.` — always true, 300 hits — so **line 1 should unlock about five seconds in.** Any other line first means a definition is reading memory it should not, which is a bug rather than a success |
+| `rcTriggered` | `+0x70` | ≥ 1 within ~5 s | 0 after a minute = `do_frame` is not reaching memory; check `rcPeeks` |
+| `rcPeeksRejected` | `+0x80` | **0** | non-zero = a definition asked for an address this console cannot supply. **This is the field most likely to be non-zero**, and it is why `rc_runtime_validate_addresses()` was put in before there was a real set to need it |
+| **`rcInitTotal`** | **`+0x9E`** | **unknown — this is the reading** | 263 per frame. Under ~500 is a non-event; several thousand is ten-plus frames inside the game's VCOUNT handler, and then the parse has to be amortised across frames |
+| `rcInitLines` | `+0x6F` | < 255 | 255 = one activation alone exceeded a frame, and `rcInitTotal` is a floor rather than a total |
+| **`rcLinesMax`** | **`+0x85`** | **unknown — the other reading** | steady-state cost of 1,946 conditions per frame, out of 263. Three definitions cost **1** |
+
+Two of those are genuinely open, and they are the point of the run: `rcInitTotal` and `rcLinesMax`.
+The host has already answered everything else — 56 of 56 parse, and the set fits the arena with
+29,636 bytes to spare.
+
+`rcPeeksRejected` deserves its own sentence. The addresses in this set run up to `0x00189074`, and
+the reader translates a console address by adding `0x02000000` — so they land in the game's main
+RAM and should all be readable. Should. Nothing has ever tested that with addresses this project
+did not choose, and a rejection is *better* than the alternative: it used to mean a Data Abort.
+
+### What is deliberately not being changed yet
+
+The self-test watches stay. `ra_definitions-14856.txt` contains no `W:` lines, so `anyWatch` stays
+false and the four built-in watches remain — which is the designed behaviour and useful here, since
+they are the thing that says the reader is alive at all independently of whether any achievement
+fires.
+
+And nothing amortises the parse across frames. That is the obvious fix if `rcInitTotal` comes back
+large, and doing it before measuring would be guessing at a cost — the same mistake as the three
+wrong heap lines in step 3.
 
 ## Known graphical limitations of the overlay (deferred)
 

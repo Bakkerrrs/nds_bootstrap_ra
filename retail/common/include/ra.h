@@ -297,6 +297,16 @@ typedef struct raSnapshot {
 	    so it is much more expensive than a frame of evaluation. Reported separately
 	    because otherwise it lands in linesMax and makes the steady-state cost look
 	    twenty times worse than it is.
+
+	    **The slowest single activation**, not the total, and the change is what made this
+	    number usable. It used to be one VCOUNT delta across the whole of ra_rc_init(), taken
+	    modulo 263 -- which is correct for three definitions and silently wrong for fifty-six:
+	    a parse spanning four frames reports whatever the remainder happens to be, and a slow
+	    init reads as a fast one. There is no way to count the frames from inside a handler
+	    that is not being re-entered, so the measurement moved down a level: each activation
+	    is timed on its own, this is the worst of them, and rcInitTotal is the sum.
+
+	    255 means it saturated, and then rcInitTotal is a lower bound.
 	*/
 	u8  rcInitLines;     /* +0x6F */
 	u32 rcTriggered;     /* +0x70  ACHIEVEMENT_TRIGGERED events delivered */
@@ -353,7 +363,24 @@ typedef struct raSnapshot {
 	u8  rcActivated;     /* +0x99  definitions successfully activated */
 	u16 rcDefLength;     /* +0x9A  length of the staged text */
 	u8  rcBadLine;       /* +0x9C  1-based line of the first parse failure, 0 if none */
-	u8  reserved4[3];    /* +0x9D */
+	/*
+	    Which definition unlocked first, 1-based, and it exists so that a prediction can be
+	    made in advance rather than a set being declared "working" because a counter moved.
+
+	    With fifty-six definitions loaded, `rcTriggered` climbing says something fired and
+	    nothing about what. The set for GameID 14856 opens with `1=1.300.` -- always true, three
+	    hundred hits -- so line 1 should unlock about five seconds in, and this field is how that
+	    gets checked. Anything else here first means a definition is reading memory it should
+	    not, which is a real bug and not a success.
+	*/
+	u8  rcFirstTriggered; /* +0x9D */
+	/*
+	    Scanlines summed over every activation, clamped at 0xFFFF. 263 per frame, so ~2,900 is
+	    eleven frames -- and eleven frames spent inside the game's VCOUNT handler is the hazard
+	    this step exists to measure, not a detail. See rcInitLines for why the total could not
+	    simply be one delta.
+	*/
+	u16 rcInitTotal;      /* +0x9E */
 } raSnapshot;            /*              0xA0 bytes */
 
 /*

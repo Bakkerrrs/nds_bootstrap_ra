@@ -547,6 +547,15 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, rcActivated) == 0x99);
 	CHECK(__builtin_offsetof(raSnapshot, rcDefLength) == 0x9A);
 	CHECK(__builtin_offsetof(raSnapshot, rcBadLine) == 0x9C);
+	/*
+	    Step 4's two fields, and they went into reserved4[3] rather than onto the end for the
+	    reason every field above did: the hardware checklist in docs/retroachievements.md reads
+	    these by offset out of a hex viewer, so a shifted offset silently invalidates every
+	    reading anyone has ever photographed. Three spare bytes at an odd address take exactly
+	    one u8 and one aligned u16, and the struct stays 0xA0.
+	*/
+	CHECK(__builtin_offsetof(raSnapshot, rcFirstTriggered) == 0x9D);
+	CHECK(__builtin_offsetof(raSnapshot, rcInitTotal) == 0x9E);
 	CHECK(sizeof(raSnapshot) == 0xA0);
 
 	*DISPCNT = 0x1F40;

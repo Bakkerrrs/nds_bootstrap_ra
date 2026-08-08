@@ -102,6 +102,14 @@ static u32 peeksThisFrame;
 static u32 peeksRejected;
 static u32 triggeredCount;
 static u32 eventCount;
+/*
+    Which definition unlocked first, and how expensive the one-time parse was. Statics rather
+    than locals because the event handler has no user-data pointer and because ra_rc_init()
+    reports through the snapshot it is handed rather than owning one.
+*/
+static u8  firstTriggered;
+static u8  initMaxLines;
+static u32 initTotalLines;
 static u8  rcStage;
 static u8  linesMax;
 
@@ -169,6 +177,18 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
 	eventCount++;
 	if (runtimeEvent->type == RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED) {
 		triggeredCount++;
+		/*
+		    The first one only, and recorded as a line number rather than an id so it can be
+		    looked up in the file by eye. With one definition loaded a counter was enough; with
+		    fifty-six, "something fired" is not a reading -- the set's first definition is
+		    `1=1.300.` and should unlock about five seconds in, so this is what turns that into
+		    a prediction that can be wrong.
+		*/
+		if (firstTriggered == 0) {
+			const unsigned line = runtimeEvent->id - RA_TEST_ACHIEVEMENT_ID + 1;
+
+			firstTriggered = (u8)((line > 255) ? 255 : line);
+		}
 	}
 }
 
@@ -482,17 +502,47 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 		snapshot->rcActivated = 0;
 		for (i = 0; i < count; i++) {
 			int one;
+			u16 startLine;
+			u16 spent;
+
 			if (lines[i][0] == 'W' && (lines[i][1] == ':' || lines[i][1] == '2')) {
 				continue;   /* a watch, handled above */
 			}
+
+			/*
+			    Timed one definition at a time, and that is the only way this total can be
+			    right. A single VCOUNT delta around the whole loop is taken modulo 263, so a
+			    parse that spans four frames reports the remainder and a slow init reads as a
+			    fast one -- and there is no way to count frames from inside a handler that is
+			    not being re-entered. Per-definition deltas sum correctly as long as no single
+			    activation exceeds one frame, and initMaxLines is what says whether that held.
+			*/
+			startLine = RA_VCOUNT;
 			one = rc_runtime_activate_achievement(
 				&runtime, RA_TEST_ACHIEVEMENT_ID + i, lines[i], 0, 0);
+			spent = (u16)((RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME)
+			              % RA_SCANLINES_PER_FRAME);
+
+			initTotalLines += spent;
+			if (spent > initMaxLines) {
+				initMaxLines = (u8)((spent > 255) ? 255 : spent);
+			}
+
 			if (one == RC_OK) {
 				snapshot->rcActivated++;
 			} else if (activate == RC_OK) {
 				activate = one;
 				snapshot->rcBadLine = i + 1;
 			}
+			/*
+			    Published as the loop runs, not after it. Fifty-six definitions is the first
+			    time this has been slow enough to hang in, and a snapshot that only becomes
+			    true at the end is exactly the snapshot you do not get from a hang -- so a RAM
+			    viewer can see how far it reached.
+			*/
+			snapshot->rcInitLines = initMaxLines;
+			snapshot->rcInitTotal = (u16)((initTotalLines > 0xFFFF) ? 0xFFFF
+			                                                        : initTotalLines);
 		}
 		snapshot->rcActivate = (s8)activate;
 		/*
@@ -534,15 +584,13 @@ void ra_rc_tick(raSnapshot* snapshot) {
 
 	if (rcStage == RA_RC_NONE) {
 		/*
-		    The one-time parse, timed on its own so it does not masquerade as the
-		    steady-state cost.
+		    The one-time parse. Timed *inside* ra_rc_init(), one definition at a time, rather
+		    than wrapped here -- see rcInitLines in ra.h. A single delta around this call is
+		    taken modulo 263 and therefore reports the remainder of a multi-frame parse, which
+		    was correct for three definitions and is not for fifty-six.
 		*/
-		startLine = RA_VCOUNT;
-		rcStage   = ra_rc_init(snapshot);
-		lines     = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
-
-		snapshot->rcInitLines = (u8)((lines > 255) ? 255 : lines);
-		snapshot->rcStage     = rcStage;
+		rcStage           = ra_rc_init(snapshot);
+		snapshot->rcStage = rcStage;
 		if (rcStage != RA_RC_ACTIVE) {
 			return;
 		}
@@ -572,6 +620,7 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	snapshot->rcStage         = rcStage;
 	snapshot->rcTriggerState  = trigger ? trigger->state : RC_TRIGGER_STATE_INACTIVE;
 	snapshot->rcTriggered     = triggeredCount;
+	snapshot->rcFirstTriggered = firstTriggered;
 	/*
 	    Latched at the last active reading rather than copied blindly. rcheevos reports
 	    measured progress only while a trigger is active, so both of these go back to zero
