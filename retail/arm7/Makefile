@@ -120,8 +120,19 @@ endif
 .PHONY: $(BUILD) clean
 
 #---------------------------------------------------------------------------------
+# RA_LAUNCHER_WIFI changes compiler flags and the library list, not the source list, so make
+# cannot see it change: flipping it and rebuilding reuses every object and produces a .nds
+# that looks built and has no probe in it, with a build log that says it worked. That is the
+# failure shape this project fears most, and it happened on the first attempt to use the
+# switch -- so the mode is stamped in the build directory and a change of mode wipes it.
+#---------------------------------------------------------------------------------
+RA_WIFI_MODE	:=	$(if $(filter 1,$(RA_LAUNCHER_WIFI)),on,off)
+RA_WIFI_STAMP	:=	$(BUILD)/.ra_launcher_wifi-$(RA_WIFI_MODE)
+
 $(BUILD):
+	@[ -f $(RA_WIFI_STAMP) ] || rm -fr $@ $(TARGET).elf
 	@[ -d $@ ] || mkdir -p $@
+	@touch $(RA_WIFI_STAMP)
 	@$(MAKE) -C $(BUILD) -f $(CURDIR)/Makefile
 
 #---------------------------------------------------------------------------------

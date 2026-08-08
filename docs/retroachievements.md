@@ -56,12 +56,12 @@ network, so **open question #1 (transport) is now the critical path with nothing
 it** — and its first rung has already passed in isolation. What is untested is whether any
 of it survives inside nds-bootstrap, where the ARM7 belongs to the game.
 
-**Written but not yet run: step 2 of the ladder.** dsiwifi's ARM7 half now links into
+**Built but not yet run: step 2 of the ladder.** dsiwifi's ARM7 half now links into
 nds-bootstrap's own launcher behind `RA_LAUNCHER_WIFI`, so the chip can be brought up in the
-one context where no game is competing for the ARM7. It is **unbuilt and untried** — there
-was no devkitARM in the session that wrote it — so the next thing anyone does with it is
-build it and run it once. See *Step two, wired* below for what it measures, what it
-deliberately leaves to step 3, and the three things writing it turned up.
+one context where no game is competing for the ARM7. It **compiles and links on the pinned
+toolchain** and the space question is answered — the ARM7 fits with 18 KB of IWRAM spare —
+but no console has run it, so there is no reading yet. The next thing anyone does with it is
+flash it once and send back `/ra_wifi_launcher.log`. See *Step two, wired* below.
 
 The ARM9 cardengine has **412 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
@@ -457,9 +457,10 @@ chip, launches its firmware, brings WMI up, associates and does the WPA2 handsha
 line it narrates is written verbatim to `/ra_wifi_launcher.log` next to the probe's
 `/wifiprobe.log`. Then it stops.
 
-**None of this has been built or run.** It was written in a session with no devkitARM and no
-console, so treat every claim below as a design decision with its reasoning attached rather
-than as a result. The first hardware run is the result.
+**It builds, on the pinned toolchain, and it has never been run.** devkitARM r65 / gcc 14.2.0
+/ libnds 1.8.0, from `devkitpro/devkitarm:20241104` — the same pin upstream CI uses. Both
+modes link, the switch adds nothing when it is off, and the sizes are below. What has not
+happened is a console: no reading exists yet, so nothing here is a result about hardware.
 
 When you do run it: **send `/ra_wifi_launcher.log`, not a photograph of it.** The screen shows
 the same text, but the line that explains a failure is never the last one, and the file is
@@ -552,6 +553,46 @@ handed, which is correct only for a buffer the ARM9 supplied through `INITBUFS`,
 probe supplies none — so stamping would corrupt the ARM7's own mbox header. Nothing is lost,
 because the WPA2 handshake is EAPOL and never comes that way.
 
+#### The ARM7 was supposed to be the wall. It is not, and the reason is a section name
+
+The one thing this could not be reasoned about was space. dsiwifi's ARM7 half is ~13,000
+lines, a good part of it mbedTLS for the WPA2 handshake, and the launcher's ARM7 links into
+libnds' stock 96 KB of IWRAM. The honest expectation was that it would not fit.
+
+It fits, and comfortably, because most of it never goes to IWRAM at all:
+
+| Region | Baseline | With the probe | Of |
+| --- | --- | --- | --- |
+| ARM7 `iwram` `0x037F8000` | 17,856 | **80,300** | 98,304 — **18,004 spare** |
+| ARM7 `twl_iwram` `0x03000000` | 1,660 | 43,100 | 262,144 — 219,044 spare |
+| ARM9 `ewram` `0x02280000` | 350,940 | 356,572 | 753,664 — the rest is heap |
+
+**dsiwifi names its DSi-only sources `*.twl.c`, and devkitARM compiles those into a `.twl`
+section that libnds places in `twl_iwram` — 256 KB of DSi-only ARM7 WRAM at `0x03000000`.**
+The SDIO driver, WMI and the whole crypto slice land there, not in the 96 KB everything else
+shares. That is not a lucky accident; it is what the naming convention is for, and it is why
+a driver this size was ever viable on the ARM7.
+
+IWRAM still went from 18% to 82% full, so it is *tight* rather than roomy, and step 4 —
+running this beside a game, where the cardengine's own ARM7 hooks are also resident — has 18
+KB to work in, not 80. That is a number worth having before that step rather than during it.
+
+The ARM9 grew by 5,632 bytes and is irrelevant, which is the point of putting no library on
+that side.
+
+#### And the lwip number is now measured rather than argued
+
+The claim above was that dsiwifi's lwip does not fit in the launcher. Linked, it is not an
+estimate: `memp_memory_PBUF_POOL_base` is **784,387 bytes** of `.bss` on its own, and the
+probe's ARM9 — which does link lwip — carries **840,160 bytes** of `.bss` in total. The
+launcher's whole link region is **753,664 bytes**, of which about **397 KB** is free after
+its own code and data.
+
+So the pool alone is larger than the entire region, and step 3 cannot simply link the library
+and see. Of the three options listed earlier, that measurement makes the first one the obvious
+first try: `PBUF_POOL_SIZE 512` is 512 × 1,516, and one HTTP GET at a time does not need 512
+buffers.
+
 #### The one part a host can check, and it is checked
 
 `raWifiVerdict` reads how the chip arrived out of dsiwifi's **printf text**, because the chip
@@ -582,6 +623,15 @@ The probe reports the console's configured WiFi slots, to tell "no network confi
 from "the chip failed". This does not, deliberately: the probe already established that this
 console has a WPA2-PSK DSi slot, and the log explains a failure without it. One fewer FIFO
 channel and one fewer struct for a fact already in hand.
+
+And one trap this build set for itself, found by walking into it. `RA_LAUNCHER_WIFI` changes
+compiler flags and the library list, **not the source list**, so make cannot see it change:
+flipping the switch and rebuilding reused every object and produced a `.nds` that looked
+built and had no probe in it. Every line of the build log said it had worked. That is the
+same failure shape as `0xH08e43c=0x38` — a thing that reports success and does nothing — so
+it is fixed rather than written down: both launcher Makefiles stamp the mode into their build
+directory and wipe it when the mode changes. Flipping the switch either way now rebuilds, and
+that was checked by flipping it three times and looking for the symbol.
 
 And `libs/dsiwifi` moved out of `tools/wifiprobe/`, because two builds consume it now. That
 does not weaken the probe as a control — what a control must not share is *nds-bootstrap's*
@@ -652,14 +702,12 @@ the test fails rather than this table going quietly stale.
   needed, and the Atheros comes up on this console. What is untested is whether any of that
   survives inside nds-bootstrap, where the ARM7 belongs to the game. See *#1f — the rest of
   the ladder*.
-- **Step 2 is written and has never been compiled.** `RA_LAUNCHER_WIFI=1` was authored in a
-  session with no devkitARM and no console, so the first thing it needs is a build — the ARM7
-  IWRAM budget in particular is a hard wall that only the linker can settle, since dsiwifi's
-  ARM7 half carries ~13,000 lines including a slice of mbedTLS for the WPA2 handshake. The
-  probe fits it alongside the libnds template; whether it fits alongside nds-bootstrap's
-  ARM7 is not something this session could check.
+- **Step 2 builds and has never run on hardware.** One flash and one log file settle it, and
+  until then nothing is known about how the chip behaves under our boot path. The space
+  question that looked like the risk is closed: the ARM7 fits with 18 KB of IWRAM to spare.
 - **Where the IP stack lives is undecided**, and step 3 cannot start without deciding it.
-  dsiwifi's lwip is ~800 KB of static pools; the launcher's ARM9 has a 736 KB link region.
+  Measured: lwip's pbuf pool is 784,387 bytes of `.bss` and the launcher's ARM9 link region is
+  753,664 bytes in total. Shrinking `PBUF_POOL_SIZE` is the first thing to try.
 - **Reporting an unlock has never been attempted.** Evaluation is done; `r=awardachievement`
   is not written, and neither is `r=patch`. Both wait on the transport above.
 - **Game identification.** Nothing yet computes the RetroAchievements hash for a DS ROM, so
@@ -713,22 +761,28 @@ git submodule update --init --recursive   # libs/dsiwifi
 make RA_LAUNCHER_WIFI=1                   # still serial, still needs lzss
 ```
 
+Verified on `devkitpro/devkitarm:20241104` — devkitARM r65, gcc 14.2.0, libnds 1.8.0, the pin
+upstream CI uses. Both modes link, and `hb/` ignores the variable: only the **retail**
+launcher grows the probe.
+
 `RA_LAUNCHER_WIFI` is a make variable, not a header switch, because it decides what gets
 *linked* and not only what gets compiled: the retail ARM7 gains `libs/dsiwifi/lib/libdsiwifi7.a`
 and both CPUs gain `-DRA_LAUNCHER_WIFI=1`. Set on the command line it reaches every sub-make
-on its own. Only the **retail** launcher grows the probe; `hb/` ignores the variable.
+on its own.
 
-Two details worth knowing before the first build:
+Three details worth knowing:
 
 - The submodule's include directory carries its own `netdb.h`, `sys/socket.h` and
   `netinet/`, and this ARM9 builds mbedtls and polarssl next door. Both Makefiles add it
   with **`-iquote`**, not `-I`, so `<sys/socket.h>` still means newlib's. That is the same
   choice `tools/wifiprobe/arm7/Makefile` makes.
-- The ARM7 IWRAM budget is the risk nobody has measured. dsiwifi's ARM7 half is ~13,000
-  lines, a good part of it mbedTLS for the WPA2 handshake, and the launcher's ARM7 links with
-  the stock `ds_arm7.specs`. If it does not fit, the linker says so — which is the good
-  failure. The bad one would have been fitting and being silently truncated, and the ARM7 is
-  not copied by hand the way `cardenginei_arm9_ra` is, so that cannot happen here.
+- **It fits, and the numbers are in *Step two, wired*.** ARM7 IWRAM goes from 18% to 82%
+  full; most of dsiwifi lands in `twl_iwram` instead, because its DSi-only sources are named
+  `*.twl.c`. Worth knowing before step 4 rather than during it.
+- **Flipping `RA_LAUNCHER_WIFI` no longer needs a manual clean**, but only because both
+  launcher Makefiles stamp the mode and wipe their build directory when it changes. If you
+  add a third mode-dependent flag, stamp it the same way — make cannot see a flag change on
+  its own, and the failure is a binary that looks built and does nothing.
 
 ## Phase 0 — reading the game's RAM every frame
 

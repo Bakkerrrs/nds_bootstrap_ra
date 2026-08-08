@@ -125,8 +125,17 @@ export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 .PHONY: $(BUILD) clean
 
 #---------------------------------------------------------------------------------
+# See the same stamp in retail/arm7/Makefile. RA_LAUNCHER_WIFI changes flags and not the
+# source list, so make cannot see it change; without this, flipping it reuses stale objects
+# and produces a .nds that looks built and has no probe in it.
+#---------------------------------------------------------------------------------
+RA_WIFI_MODE	:=	$(if $(filter 1,$(RA_LAUNCHER_WIFI)),on,off)
+RA_WIFI_STAMP	:=	$(BUILD)/.ra_launcher_wifi-$(RA_WIFI_MODE)
+
 $(BUILD):
+	@[ -f $(RA_WIFI_STAMP) ] || rm -fr $@ $(TARGET).elf
 	@[ -d $@ ] || mkdir -p $@
+	@touch $(RA_WIFI_STAMP)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 #---------------------------------------------------------------------------------
