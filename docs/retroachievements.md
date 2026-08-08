@@ -255,14 +255,29 @@ be the dullest available: **the code notes are for *Space Invaders Extreme 2*, a
 cartridge being played was the first game**, which has no achievement set at all. Right
 memory map, wrong cartridge.
 
-Worth separating the two results, because they are independent and only one of them was a
-bug. The 24-bit masking fix was correct on its own evidence -- our walker and rcheevos
-disagreed about one word, and the library was right. It stays. What it bought was a chain
-that resolves; what it revealed was that there was nothing at the end of it.
+**And the 24-bit masking "fix" was reasoned wrongly, which the correct cartridge then
+proved.** Running the same watches against Extreme 2, the raw word at `0x02159164` reads
+`0x02159158` — a perfectly ordinary DS address with `0x02` in the top byte. Masking it to
+24 bits and adding main RAM's base gives `0x02159158` again. **The mask changes nothing
+here.**
 
-And this is where the file format earned itself. Both of those rounds cost a text edit and
-ten minutes of play. Neither cost a build, a flash, or a rebuild of anything -- which is
-what the definitions file was introduced to avoid, one round before it was needed.
+So the disagreement that motivated it was never about masking semantics. It was about a
+null pointer: unmasked, `0 + 0x9c` is `0x9c`, outside main RAM, and the walker correctly
+refused; masked, `0 + 0x02000000 + 0x9c` is `0x0200009C`, inside main RAM, and the walker
+happily resolved to nothing. **The mask turned a visible failure into a false success**, and
+that is worth stating plainly rather than filing under "harmless".
+
+The code stays, because it is what RetroAchievements means and what rcheevos does — a game
+that stores flags in the top byte of a pointer would need it, and the DS map is
+console-relative by definition. But it was added for a reason that turned out to be wrong,
+and its only observed effect so far has been to hide a null pointer. The host test that
+came with it still pins the semantics; what it does not do is justify the change on this
+game's evidence, because this game does not need it.
+
+This is where the file format earned itself. Three diagnostic rounds — the wrong cartridge,
+the mask, and the correct cartridge — cost a text edit and ten minutes of play each.
+None cost a build or a flash, which is what the definitions file was introduced to avoid,
+one round before it turned out to be needed.
 
 ### The next task: a real achievement, from a real game
 
