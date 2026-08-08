@@ -128,6 +128,47 @@ set +e
 "$out/ra_launcher_test" || status=1
 set -e
 
+#---------------------------------------------------------------------------------
+# Does a real achievement set fit the cardengine's arena?
+#
+# A third binary, and for a concrete reason rather than tidiness: this one *replaces* malloc,
+# realloc, calloc and free for its whole link, in order to count what rcheevos asks for. The
+# first binary above does the opposite on purpose -- RA_ALLOC_NO_LIBC_NAMES keeps the
+# cardengine's allocator from ending up underneath printf -- so the two arrangements cannot
+# share a link.
+#
+# The arena's lower bound is the cardengine's __bss_end, which moves with every change to that
+# binary, so it is read out of the built .elf when one exists instead of being carried as a
+# constant. Without a build the test falls back to the value the measured binary had, and says
+# which it used.
+#---------------------------------------------------------------------------------
+echo
+wram_elf=retail/cardenginei/arm9_ra/build/cardenginei_arm9_ra.elf
+bss_end_flag=
+if [ -f "$wram_elf" ] && command -v arm-none-eabi-nm >/dev/null 2>&1; then
+	bss_end=$(arm-none-eabi-nm "$wram_elf" | awk '$3 == "__bss_end" { print $1 }')
+	if [ -n "$bss_end" ]; then
+		bss_end_flag="-DRA_WRAM_BSS_END=0x${bss_end}uL"
+		echo "arena floor from $wram_elf: __bss_end = 0x$bss_end"
+	fi
+fi
+if [ -z "$bss_end_flag" ]; then
+	echo "no cardengine .elf built -- using the recorded __bss_end"
+fi
+
+$CC -std=gnu99 -Wall -O1 \
+	$bss_end_flag \
+	-I"$out/include" -Iretail/common/include -I"$RC/include" -I"$RC/src" \
+	tools/ra_fit_test.c \
+	$rc_runtime_sources \
+	"$RC"/src/rc_util.c "$RC"/src/rc_compat.c "$RC"/src/rc_version.c \
+	"$RC"/src/rhash/md5.c \
+	-lm -o "$out/ra_fit_test"
+
+set +e
+"$out/ra_fit_test" || status=1
+set -e
+
 # The other half of pinning step two's log classifier.
 #
 # ra_wifi_verdict.c decides how the Atheros chip arrived by matching dsiwifi's printf text,

@@ -70,16 +70,20 @@ Confirmed on hardware, in order of when each was settled:
     the server rather than by eye. Log at `docs/logs/ra_wifi_launcher_gameid-3ds.log`.
 
 11. **The achievement set arriving from the server** — step 3d, `reached stage 12 of 12`:
-    **87,747 bytes** of `r=patch` JSON streamed off the socket, **51 published definitions**
+    **87,747 bytes** of `r=patch` JSON streamed off the socket, **56 published definitions**
     staged for the cardengine, 3 unofficial ones filtered out, and **zero bytes of heap
-    allocated** — `top 02327000` identical before and after. Log at
-    `docs/logs/ra_wifi_launcher_patch-3ds.log`.
+    allocated** — `top 02329000` identical before and after. It took two runs: the first used a
+    2 KB carry buffer against a set whose largest definition is **6,264 bytes** and lost five of
+    them. Logs at `docs/logs/ra_wifi_launcher_patch{,2}-3ds.log`, and the set itself at
+    `docs/logs/ra_definitions-14856.txt`, written by the console.
+12. **The set fits, and rcheevos accepts all of it.** `28,585 of 32,759` bytes in the staging
+    block, and `tools/ra_fit_test.c` activates **56 of 56** definitions through
+    `rc_runtime_activate_achievement()` in **128,352 of the arena's 158,132 bytes** — 29,780 to
+    spare. Both numbers were open questions until this ran.
 
-**But that run also found its own bug, and one number step 3 needs is still unknown.** The carry
-buffer was 2,047 bytes and the largest definition in the set is **6,264**, so five real
-achievements were dropped. The buffer is 8,192 now — the point is that `block 6791 of 32759`
-looked comfortable *because the five largest definitions were missing from it*, so **"does a real
-set fit the 32 KB block" is still open.** See *First hardware run of stage 12* below.
+**Step 3 is finished.** The launcher logs in, identifies the ROM, fetches the published set and
+stages it where the game will find it, allocating nothing. What has never been tried is *running*
+those definitions — that is step 4, and the cheapest first move is below.
 
 Everything from the game's RAM up to a fired trigger is done, and the launcher now reaches the
 RetroAchievements API. **So open question #1 is closed for context A, and nothing in front of
@@ -99,7 +103,7 @@ The five things a new session needs that are not obvious from the source:
 | Branch | `claude/fase-1-retroachievements-1phq4i` (was `claude/fase-1-avance-965hk5`) |
 | Snapshot address | `tools/ra_snapshot_addr.sh` — currently `0x027FED50` for `cardenginei_arm9`, which is the variant a retail DS game loads on a 3DS. **Re-run it after every build**; it moves. |
 | Magic to look for | ASCII `RA2S` (`52 41 32 53`). `RA1S`/`RA0S` means a stale address from an older build. |
-| Host test | `./tools/ra_reader_test.sh` — no toolchain, no hardware, seconds. Run it before anything. |
+| Host test | `./tools/ra_reader_test.sh` — no toolchain, no hardware, seconds. Builds and runs **three** binaries: the reader/watchlist, the launcher's pure logic, and `ra_fit_test` (a real 56-definition set against the cardengine's arena). Run it before anything. |
 | Full build | `make` from the top level, **serially**, with `lzss` on `PATH`. See *Building*. |
 | WiFi build | `make RA_LAUNCHER_WIFI=1` — the network diagnostic, now 12 rungs: the chip, DHCP, DNS, HTTP, the ROM's hash, `r=login`, `r=gameid` and `r=patch`. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
 | RA config | `sd:/_nds/nds-bootstrap/ra.cfg`, odelot's format — copy `tools/ra.example.cfg`. Username and password, in the clear, by decision; see *Step 3c*. |
@@ -112,21 +116,20 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **a second hardware run of stage 12**, with the 8 KB carry buffer, and
-it answers the one thing step 3 still does not know. Two artifacts come back from it:
+The immediate next step is **step 4**, and it splits into two failures that are worth keeping
+apart, because they have different fixes.
 
-| | |
-| --- | --- |
-| `block X of 32759 used, Y wanted` | **the size question.** `Y > X` means the block is the limit for the first time, and `CARDENGINEI_ARM9_RA_DEFS_MAX` becomes step 4's problem |
-| `sd:/ra_definitions.txt` | every staged definition, one per line, checkable against the set's page. This is what settles whether `1=1.300.` was a real achievement or a fragment |
-| `memaddr length ... of 8191` | whether 8 KB is enough, or whether another game will need more |
-| `heap after patch ... safe` | the number step 4 inherits. The static floor rose 35 KB across 3b–3d |
+**First, and it needs no network at all:** copy `docs/logs/ra_definitions-14856.txt` to
+`sd:/_nds/nds-bootstrap/ra_achievements.txt` and boot Super Mario 64 DS with a **normal** build.
+That is the server's own 56 definitions going through `loadRaDefinitions()` into the cardengine,
+and it answers "can rcheevos run a real set on this hardware" on its own. The host says the memory
+fits with 29,780 bytes to spare; what it cannot say is whether **1,946 conditions per frame** are
+fast enough. `rcLinesMax` is the number to read — it was 1 scanline of 263 for three definitions.
 
-`RA_DEFS_MAX_LINES` was raised from 8 to **128** for this, and 59 `MemAddr` keys came back for
-GameID 14856 — so the line count is not the constraint. The block is, or is not, and `wanted` says
-which.
-
-After that, step 4: the same code beside a running game, where the ARM7 belongs to the game.
+**Then the network beside a game**, which is the part *#1g* has always flagged as the real unknown:
+in context B the ARM7 belongs to the game, and the launcher's ARM7 has 18 KB of IWRAM spare with
+dsiwifi in it while the cardengine's own ARM7 hooks are also resident. `safe 61440` is the launcher
+heap step 4 inherits — the static floor rose 35 KB across steps 3b–3d.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -1407,14 +1410,109 @@ keeps the reading. It is also the same format the launcher already *reads* from
 `ra_achievements.txt`, so copying it to `sd:/_nds/nds-bootstrap/` boots the game with the server's
 own set and no network at all — useful while step 4 is still being built.
 
+#### Second run, with the 8 KB buffer: the set is whole, and it fits
+
+```
+body was         87747 bytes
+definitions      56 kept, 3 unofficial
+block            28585 of 32759 used, 28585 wanted
+memaddr length   8 shortest, 6264 longest, of 8191
+def 1     8      1=1.300.
+def 2  1226      R:0xH09cab4>0_R:0xH09cab5>0_R:0xH09cab6>0_R:0xH09cab7>0_
+def 3  6264      0xT0009caa8=0.100._P:0x 0017e874=64.1._P:0x 00189074=64.
+definitions to   sd:/ra_definitions.txt
+```
+
+Log at `docs/logs/ra_wifi_launcher_patch2-3ds.log`, and the set itself at
+`docs/logs/ra_definitions-14856.txt` — 28,585 bytes written by the console.
+
+**56 + 3 = 59, the same 59 the first run found**, with no `lost` line at all this time: nothing
+too long, nothing cut, nothing dropped for space. The five definitions the 2 KB buffer ate are
+back, and the two largest are 6,264 bytes each.
+
+**`block 28585 of 32759 used`** — the size question step 3 existed to answer. **It fits, with 4,174
+bytes to spare**, and that is 87.3% full. Tight rather than roomy: a set 15% larger than this one
+would not fit, and the counters that would say so (`dropped`, `wanted`) are the ones already in the
+log.
+
+And `1=1.300.` was real. The dump's first line is exactly those eight characters, its second line
+begins `R:0xH09cab4>0` as a definition should, and the file's byte count matches `used` to the byte:
+
+| | |
+| --- | --- |
+| bytes in `ra_definitions.txt` | 28,585 |
+| `block ... used` in the log | 28,585 |
+| lines | 56 |
+| sum of line lengths + one newline each | 28,585 |
+
+So no definition was split, spliced or lost. Which retires the ambiguity honestly: the scanner is
+right, and that set genuinely opens with an eight-character achievement.
+
+#### rcheevos agrees, which is the check that actually matters
+
+Text that looks like memaddr is not the same as memaddr. A scanner that dropped one character,
+decoded an escape wrongly, or joined two definitions would still produce plausible-looking lines —
+and rcheevos is the only thing that can say they are *valid*.
+
+`tools/ra_fit_test.c` hands all 56 to `rc_runtime_activate_achievement()`:
+
+> **56 of 56 activated, 0 refused.**
+
+That is what makes the streaming extraction trustworthy rather than merely well-tested against
+fixtures written by the person who wrote the scanner.
+
+The same test answers step 4's opening question, which is whether the set fits the *arena* rather
+than the block:
+
+| | |
+| --- | --- |
+| arena (`__bss_end` `0x0375164C` → the defs block at `0x03778000`) | 158,132 bytes |
+| `rc_runtime_init()` | 1,480 |
+| peak, 71 blocks + their 8-byte headers | **128,352** |
+| **margin** | **29,780 bytes — 81.2% used** |
+
+**And a correction worth recording, because it pointed the wrong way.** The first attempt at this
+measurement used `rc_trigger_size()` and reported **101.7% — that the set did not fit.** It is
+wrong by 33 KB: `rc_trigger_size()` sizes a *standalone* trigger, so it counts memrefs inside
+every definition, while `rc_runtime_activate_achievement()` passes the runtime's communal pool as
+`existing_memrefs` and each trigger only pays for what is new. The path that runs on hardware is
+the runtime one. The test measures that path, and prints the margin rather than asserting a
+threshold, because the margin is a property of the set.
+
+`tools/ra_fit_test.c` is a **third** host binary, and the reason is concrete rather than tidiness:
+it replaces `malloc`, `realloc`, `calloc` and `free` for its whole link in order to count them,
+while `tools/ra_reader_test.c` does the exact opposite on purpose — `RA_ALLOC_NO_LIBC_NAMES` is
+there to keep the cardengine's allocator from ending up underneath `printf`. The two arrangements
+cannot share a link. The arena's lower bound is read out of the built `.elf` with `nm` rather than
+carried as a constant, because every byte the cardengine's `.bss` gains comes straight out of that
+29,780.
+
+#### What step 3 leaves for step 4
+
+Copying `ra_definitions.txt` to `sd:/_nds/nds-bootstrap/ra_achievements.txt` makes a **normal**
+build boot the game with the server's own 56 definitions and no network involved. That is the
+cheapest possible first move for step 4: it separates "rcheevos runs a real set on hardware" from
+"the network works beside a game", and those are two different failures with two different fixes.
+
+What is not answered, and is honestly step 4's:
+
+- **1,946 conditions evaluated per frame.** The host says they fit; nothing says they are fast
+  enough. The measurement already exists — `rcLinesMax`, which read 1 scanline of 263 for three
+  definitions.
+- **The ARM7 beside a game.** The launcher's ARM7 has 18 KB of IWRAM spare with dsiwifi in it; the
+  cardengine's own ARM7 hooks are resident too in context B.
+- **`safe 61440`.** The launcher's static floor has risen 35 KB across steps 3b–3d and that is
+  what step 4 inherits.
+
 #### The static floor rose, and that is the cost worth naming
 
 Steps 3b, 3c and 3d took the launcher's static side from **569,136 to 604,844** of 753,664 —
 response buffers, the config, the hash's streaming window, and the scanner's 8 KB carry buffer.
-Every one of those raises the floor the heap starts from, and the first stage-12 run measured the
-result: `safe` fell from 77,824 at `r=login` to **69,632**, and the 6 KB the buffer just gained
-takes another bite. It does not matter for *this* rung, which allocates nothing. It matters for
-step 4, and the number to watch is `safe`, not `free`.
+Every one of those raises the floor the heap starts from, and the two stage-12 runs measured the
+result: `safe` fell from **77,824** at `r=login` to **69,632** with the 2 KB buffer and **61,440**
+with the 8 KB one. It does not matter for *this* rung, which allocates nothing — `top 02329000` is
+identical before and after the largest request in the project. It matters for step 4, and the
+number to watch is `safe`, not `free`.
 
 #### The screen gets a heartbeat, and the card gets nothing
 
