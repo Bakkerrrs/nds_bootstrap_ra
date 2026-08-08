@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <unistd.h>
 
 /* dsiwifi's IPC contract, header-only. The library itself stays on the ARM7. */
 #include "dsiwifi_cmds.h"
@@ -61,18 +62,104 @@
 #define RA_WIFI_WAIT_ARM7   3
 #define RA_WIFI_WAIT_CHIP   20
 #define RA_WIFI_WAIT_LINK   40
+#define RA_WIFI_WAIT_TAIL   8   /* after the summary: dsiwifi keeps narrating */
+
+/*
+    dsiwifi's narration is captured into RAM by the interrupt and written out by the main
+    loop. Both halves of that split were learned from the first hardware run:
+
+    The interrupt must not touch the card. On the DSi the SD is driven by the *ARM7*, over
+    the FIFO -- so an fputs() inside a FIFO datamsg handler means FIFO traffic from inside a
+    FIFO interrupt, against an ARM7 that is at that moment running a WiFi stack. The first
+    run got away with it twice. That is not the same as it being safe, and step 4 puts the
+    same code next to a game.
+
+    16K because a full run of the probe narrates two or three. An overflow is counted and
+    reported rather than silently wrapping: a log with a hole in it that does not say so is
+    worse than a short one.
+*/
+#define RA_WIFI_TEXT_MAX 0x4000
 
 static FILE*         logFile;
 static raWifiVerdict verdict;
 
+static char          textBuf[RA_WIFI_TEXT_MAX];
+static volatile u32  textHead;      /* written only by the interrupt */
+static u32           textTail;      /* read only by the main loop */
+static volatile u32  textDropped;
+
 /*
-    Everything goes to both the screen and the file, for the reason the probe found the hard
-    way: the interesting line in a stack log is never the last one, and forty lines is where
-    photographing a screen stops being reasonable.
+    Make what has been written survive a power-off, without closing the file.
+
+    fflush() is not enough and the first hardware run proved it the expensive way: the run
+    reached stage 5 of 5 on screen and left a **zero-byte** log. fflush() only pushes
+    newlib's stdio buffer down into libfat's write(), which does write the data clusters --
+    but a FAT file's length lives in its *directory entry*, and libfat only writes that from
+    _FAT_syncToDisc(), reached from close() and fsync() and nothing else. This probe halts
+    deliberately and never closes anything, so the bytes were on the card and the metadata
+    said the file was empty.
+
+    fsync() is therefore not a tidiness call, it is the fix. It also has to be per-write
+    rather than at the end, because the thing most worth logging is a run that hangs:
+    dsiwifi has two untimed loops in its bring-up, and a log that only becomes real at the
+    end is exactly the log you do not get.
+*/
+static void raWifiSync(void) {
+	if (logFile) {
+		fflush(logFile);
+		fsync(fileno(logFile));
+	}
+}
+
+/*
+    Move whatever the interrupt captured to the screen and the card. Main loop only.
+
+    Copied out in bounded pieces because textBuf holds raw bytes with no terminator: the
+    interrupt stores the string contents and not the NUL, so there is nothing to print until
+    a piece is terminated here.
+*/
+static void raWifiDrain(void) {
+	const u32 head = textHead;        /* snapshot: the interrupt may advance it as we go */
+	char      piece[129];
+	bool      moved = false;
+
+	while (textTail < head) {
+		u32 n = head - textTail;
+
+		if (n > sizeof(piece) - 1) {
+			n = sizeof(piece) - 1;
+		}
+		memcpy(piece, textBuf + textTail, n);
+		piece[n] = 0;
+		textTail += n;
+
+		iprintf("%s", piece);
+		if (logFile) {
+			fputs(piece, logFile);
+		}
+		/*
+		    Classified here rather than in the interrupt, so the handler stays a memcpy.
+		    Reassembly across pieces is raWifiVerdictChunk()'s job either way, and the
+		    boundaries it has to survive are the FIFO's, not this buffer's.
+		*/
+		raWifiVerdictChunk(&verdict, piece);
+		moved = true;
+	}
+
+	if (moved) {
+		raWifiSync();
+	}
+}
+
+/*
+    Our own lines. Drains first so the file reads in the order things happened rather than
+    with the summary interleaved into whatever dsiwifi was mid-sentence about.
 */
 static void raWifiLog(const char* fmt, ...) {
 	char    line[192];
 	va_list args;
+
+	raWifiDrain();
 
 	va_start(args, fmt);
 	vsniprintf(line, sizeof(line), fmt, args);
@@ -81,20 +168,26 @@ static void raWifiLog(const char* fmt, ...) {
 	iprintf("%s", line);
 	if (logFile) {
 		fputs(line, logFile);
-		fflush(logFile);
 	}
+	raWifiSync();
 }
 
 /*
-    dsiwifi's narration, unedited. This is the channel that answers the question, so it is
-    passed through rather than summarised -- the summary is derived from it afterwards and
-    can be checked against it.
+    dsiwifi's narration, unedited, captured from the interrupt. This is the channel that
+    answers the question, so it is passed through rather than summarised -- the summary is
+    derived from it afterwards and can be checked against it.
+
+    No I/O here. See RA_WIFI_TEXT_MAX for why that matters more than it looks.
 */
-static void raWifiLogRaw(const char* text) {
-	iprintf("%s", text);
-	if (logFile) {
-		fputs(text, logFile);
-		fflush(logFile);
+static void raWifiCapture(const char* text) {
+	u32 i;
+
+	for (i = 0; text[i]; i++) {
+		if (textHead >= sizeof(textBuf)) {
+			textDropped++;
+			return;
+		}
+		textBuf[textHead++] = text[i];
 	}
 }
 
@@ -110,8 +203,7 @@ static void raWifiMsgHandler(int bytes, void* userdata) {
 	switch (msg.cmd) {
 		case WIFI_IPCINT_DBGLOG:
 			msg.log_str[sizeof(msg.log_str) - 1] = 0;
-			raWifiLogRaw(msg.log_str);
-			raWifiVerdictChunk(&verdict, msg.log_str);
+			raWifiCapture(msg.log_str);
 			break;
 
 		case WIFI_IPCINT_CONNECT:
@@ -184,6 +276,12 @@ static bool raWifiWaitArm7(void) {
 	return false;
 }
 
+/* Drain once per frame, so a hang leaves everything up to it already on the card. */
+static void raWifiIdle(void) {
+	swiWaitForVBlank();
+	raWifiDrain();
+}
+
 /*
     Wait for a rung, and give up rather than hang -- every step below can fail by never
     completing, and a probe that hangs teaches nothing. The point of the run is to come back
@@ -203,7 +301,7 @@ static bool raWifiWaitStage(int wanted, int seconds, const char* what) {
 		if (raWifiVerdictStage(&verdict) >= wanted) {
 			return true;
 		}
-		swiWaitForVBlank();
+		raWifiIdle();
 	}
 	raWifiLog("\x1b[31mno %s after %ds\x1b[37m\n", what, seconds);
 	return false;
@@ -264,6 +362,19 @@ void raWifiProbe(bool sdFound) {
 	raWifiWaitStage(RA_WIFI_STAGE_READY, RA_WIFI_WAIT_LINK, "link");
 
 done:
+	/*
+	    Give the tail a chance before the summary rather than after it. dsiwifi narrates
+	    asynchronously and keeps talking once the last rung is decided -- the probe's first
+	    hardware run printed the line naming the access point and its security mode *after*
+	    its own summary. Draining here means those lines land above the summary they inform,
+	    and the summary is computed from a log that is actually finished.
+	*/
+	{
+		int frames = RA_WIFI_WAIT_TAIL * 60;
+		while (frames-- > 0) {
+			raWifiIdle();
+		}
+	}
 	raWifiVerdictFlush(&verdict);
 	stage = raWifiVerdictStage(&verdict);
 
@@ -282,6 +393,10 @@ done:
 		raWifiLog("\x1b[31mthe ARM7 could not allocate its mboxes\x1b[37m\n");
 	}
 	raWifiLog("log lines        %u\n", verdict.lines);
+	if (textDropped) {
+		raWifiLog("\x1b[31m%lu chars dropped: the log has a hole\x1b[37m\n",
+		          (unsigned long)textDropped);
+	}
 
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);
 	raWifiLog(stage >= RA_WIFI_STAGE_READY
@@ -289,12 +404,13 @@ done:
 	          : "stopped here -- see the log above.\n");
 
 	/*
-	    The file stays open, for the reason the probe learned by losing exactly the lines
-	    that mattered: dsiwifi narrates asynchronously and keeps talking after the last rung
-	    is decided. The first hardware run of the probe printed the line naming the access
-	    point and its security mode *after* its summary.
+	    Said explicitly because the first run could not say it, and the run was wasted for
+	    exactly that reason: the log is fsync()'d, so it is complete on the card right now,
+	    with the file still open. Powering off here does not lose it.
 	*/
-	raWifiLog("\nthis build does not boot games.\n");
+	raWifiSync();
+	raWifiLog("\nlog written and synced -- safe to power off.\n"
+	          "this build does not boot games.\n");
 
 	/*
 	    And it stops here. The ARM7 may be sitting in one of dsiwifi's untimed `while`
@@ -302,9 +418,14 @@ done:
 	    and for WMI -- with a timer IRQ and an AUX IRQ live besides. Handing that to the
 	    bootloader, which is about to overwrite the ARM7's code, is not something to do for
 	    a measurement. See RA_LAUNCHER_WIFI in ra_wifi.h.
+
+	    Kept draining rather than spinning idle, so a line dsiwifi emits a minute from now
+	    still reaches the card. The file is deliberately never closed -- with fsync() per
+	    write there is nothing a close would add, and closing would silently drop exactly
+	    those late lines.
 	*/
 	while (1) {
-		swiWaitForVBlank();
+		raWifiIdle();
 	}
 }
 

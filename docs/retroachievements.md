@@ -51,17 +51,15 @@ Confirmed on hardware, in order of when each was settled:
 5. **WiFi** — `tools/wifiprobe/` associated to WPA2-PSK and got RetroAchievements to answer
    over plain HTTP from this exact 3DS, stage 6 of 6.
 
-Everything from the game's RAM up to a fired trigger is done. Everything past the trigger is
-network, so **open question #1 (transport) is now the critical path with nothing in front of
-it** — and its first rung has already passed in isolation. What is untested is whether any
-of it survives inside nds-bootstrap, where the ARM7 belongs to the game.
+6. **WiFi inside nds-bootstrap's launcher** — step 2 of the ladder, `reached stage 5 of 5` on
+   a 3DS. Chip, firmware, WMI, association and the WPA2 handshake, with nds-bootstrap's own
+   ARM7 rather than the libnds template. Read off the screen: the log was lost to a bug of
+   ours, so the detail still has to be re-run. See *Step two passed on hardware* below.
 
-**Built but not yet run: step 2 of the ladder.** dsiwifi's ARM7 half now links into
-nds-bootstrap's own launcher behind `RA_LAUNCHER_WIFI`, so the chip can be brought up in the
-one context where no game is competing for the ARM7. It **compiles and links on the pinned
-toolchain** and the space question is answered — the ARM7 fits with 18 KB of IWRAM spare —
-but no console has run it, so there is no reading yet. The next thing anyone does with it is
-flash it once and send back `/ra_wifi_launcher.log`. See *Step two, wired* below.
+Everything from the game's RAM up to a fired trigger is done, and the network now comes up in
+the launcher too. **So open question #1 no longer has an unknown in front of it — only work.**
+What remains untested is context **B**, inside the game, where the ARM7 belongs to the game;
+the plan does not need that to work (see *#1g*).
 
 The ARM9 cardengine has **412 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
@@ -87,10 +85,15 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is one hardware run: build `RA_LAUNCHER_WIFI=1`, launch it, and send
-back `/ra_wifi_launcher.log`. That is step 2 of *#1f — the rest of the ladder*, the code for
-it is written, and the reading it produces is a diff against the probe's own
-`/wifiprobe.log`.
+The immediate next step is **step 3**: the launcher fetching a definition set instead of
+reading one off the card. Step 2 passed on hardware — the chip comes up in the launcher and
+reaches a usable link — so what is in front of step 3 is a decision, not an unknown: dsiwifi's
+lwip does not fit the launcher's link region as configured, and *Step two, wired* has the
+number and the three options.
+
+One cheap thing is owed first: re-run `RA_LAUNCHER_WIFI=1` and send `/ra_wifi_launcher.log`.
+The first two runs reached stage 5 but wrote a zero-byte log, so *how* the chip came up — warm
+or cold, and identically to the control or not — is still unread.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -457,15 +460,55 @@ chip, launches its firmware, brings WMI up, associates and does the WPA2 handsha
 line it narrates is written verbatim to `/ra_wifi_launcher.log` next to the probe's
 `/wifiprobe.log`. Then it stops.
 
-**It builds, on the pinned toolchain, and it has never been run.** devkitARM r65 / gcc 14.2.0
-/ libnds 1.8.0, from `devkitpro/devkitarm:20241104` — the same pin upstream CI uses. Both
-modes link, the switch adds nothing when it is off, and the sizes are below. What has not
-happened is a console: no reading exists yet, so nothing here is a result about hardware.
+Built on the pinned toolchain — devkitARM r65 / gcc 14.2.0 / libnds 1.8.0, from
+`devkitpro/devkitarm:20241104`, the same pin upstream CI uses.
 
-When you do run it: **send `/ra_wifi_launcher.log`, not a photograph of it.** The screen shows
-the same text, but the line that explains a failure is never the last one, and the file is
-meant to be diffed against `/wifiprobe.log` from the step-1 run. That diff *is* the reading —
-two runs of the same driver, and any difference between them is nds-bootstrap.
+### Step two passed on hardware, and the log of it was lost to a bug in the logging
+
+**`reached stage 5 of 5`, read off the screen on a 3DS, twice.** All five rungs: the chip
+answered on SDIO, the firmware launched, WMI came up, it associated to the AP, and the WPA2
+four-way handshake completed with the GTK installed — **inside nds-bootstrap's launcher, with
+nds-bootstrap's own ARM7**. Two things follow immediately, and they were the two open
+questions of step 2:
+
+- **The SCFG state nds-bootstrap inherits does expose the WiFi SDIO block.** The launcher
+  writes SCFG nowhere, and the concern was that the extended TWL I/O might not be open on the
+  path the loader arrives by. It is.
+- **Sharing the ARM7 with `my_sdmmc` and NDMA slot 0 does not stop the driver.** The
+  neighbouring-controller contention argued about under *#1d* did not bite in the launcher.
+
+That is the whole of what the ARM7 can do, working as a guest. **Live unlocks are reachable
+from context A**, and open question #1 no longer has an unknown in front of it — only work.
+
+**And the run still has to be repeated, because the log came back zero bytes.** Both times.
+The cause is entirely ours and it is worth writing down because the reasoning that produced
+it looked careful:
+
+> `fflush()` does not make a file real on libfat. It pushes newlib's stdio buffer down into
+> libfat's `write()`, which does write the data clusters — but a FAT file's **length lives in
+> its directory entry**, and libfat writes that only from `_FAT_syncToDisc()`, reached from
+> `close()` and `fsync()` and nothing else. This probe halts deliberately and never closes
+> anything, so the bytes were on the card and the metadata said the file was empty.
+
+The comment justifying the never-closed file was inherited from `tools/wifiprobe/`, where it
+is correct — that program `fclose()`s when you press START, so its log has content. Carrying
+the reasoning across without carrying the `fclose()` is what left a 40-line answer
+unreadable. `fsync()` after every write is the fix, and it is better than a close: it makes
+the log durable *line by line*, which is what a run that hangs in one of dsiwifi's untimed
+loops actually needs.
+
+**A second thing the run exposed, which had not failed yet.** The log was being written from
+inside the FIFO interrupt handler. On the DSi the SD card is driven by the **ARM7**, over the
+FIFO — so that was FIFO traffic from inside a FIFO interrupt, against an ARM7 that was at
+that moment running a WiFi stack. It got away with it twice. The handler is now a `memcpy`
+into a 16 K buffer and the main loop does all the I/O, which is both safer and the right
+shape for step 4, where the same code runs next to a game.
+
+So the reading to send is still `/ra_wifi_launcher.log`, and now there will be one:
+**send the file, not a photograph.** The screen shows the same text, but the line that
+explains a failure is never the last one, and the file is meant to be diffed against
+`/wifiprobe.log` from the step-1 run. That diff is what turns "stage 5" into an account of
+*how* the chip came up — warm or cold, and identically to the control or not.
 
 #### What it actually asks, which is not quite what the plan said
 
@@ -696,15 +739,15 @@ the test fails rather than this table going quietly stale.
 
 ### Still open, and one of them is now the critical path
 
-- **Open question #1, the network transport** — the critical path, and step one of the
-  ladder **passed on hardware**: `tools/wifiprobe/` associated to a WPA2-PSK network and got
-  RetroAchievements to answer over plain HTTP, stage 6 of 6. So WPA2 works, TLS is not
-  needed, and the Atheros comes up on this console. What is untested is whether any of that
-  survives inside nds-bootstrap, where the ARM7 belongs to the game. See *#1f — the rest of
-  the ladder*.
-- **Step 2 builds and has never run on hardware.** One flash and one log file settle it, and
-  until then nothing is known about how the chip behaves under our boot path. The space
-  question that looked like the risk is closed: the ARM7 fits with 18 KB of IWRAM to spare.
+- **Open question #1, the network transport** — steps one and two of the ladder have both
+  **passed on hardware**. `tools/wifiprobe/` reached RetroAchievements over plain HTTP, stage
+  6 of 6, so WPA2 works and TLS is not needed; and `RA_LAUNCHER_WIFI=1` brought the chip up to
+  a usable WPA2 link *inside nds-bootstrap's launcher*, stage 5 of 5. What is untested is
+  context **B**, inside the game, where the ARM7 belongs to the game — and #1g is the argument
+  for why the plan does not need it. See *#1f — the rest of the ladder*.
+- **Step 2 passed, but its log has never been read.** Stage 5 of 5 twice, off the screen; the
+  file was zero bytes both times. Everything the summary would have said about *how* the chip
+  arrived is still unknown, and that is one flash away.
 - **Where the IP stack lives is undecided**, and step 3 cannot start without deciding it.
   Measured: lwip's pbuf pool is 784,387 bytes of `.bss` and the launcher's ARM9 link region is
   753,664 bytes in total. Shrinking `PBUF_POOL_SIZE` is the first thing to try.
@@ -1235,10 +1278,12 @@ untouched:
 | TLS required for `dorequest.php` | **Gone.** Plain HTTP, confirmed end to end from the console. |
 | WEP-only, so unusable on modern routers | **Gone.** WPA2-PSK with AES, associated and DHCP'd. |
 | Atheros firmware must be uploaded from eMMC | **Gone.** The upload path is `#if 0` and the chip starts from BMI alone. |
-| SD/SDIO controller contention | **Reduced.** Separate controllers, separate NDMA slots, and no eMMC read for firmware. |
-| The ARM7 belongs to the game | **Untouched.** Nothing above ran anywhere near nds-bootstrap. |
+| SD/SDIO controller contention | **Gone in the launcher.** Step 2 ran the driver on nds-bootstrap's ARM7, alongside `my_sdmmc` and with NDMA slot 0 taken, and reached a WPA2 link. |
+| The ARM7 belongs to the game | **Still untouched.** Step 2 is the launcher; no game exists yet. Context **B** only. |
 
-That last row is now the whole of open question #1.
+That last row is now the whole of open question #1 — and per *#1g* the plan does not need it.
+Everything above it has been settled on this console: the last row was the whole of it before
+step 2, and step 2 moved the SDIO-contention row with it.
 
 One thing the run improved about the probe itself. `dsiwifi` narrates asynchronously and
 kept printing after the summary — the `WMI_BSSINFO` line arrived *after* "log written".
@@ -1294,7 +1339,7 @@ things to test. So the order is not "build the client":
 
 1. ~~**Outside the game entirely.**~~ **Done, and it passed — `tools/wifiprobe/`, stage 6
    of 6 on hardware.** See *The probe's answer* below.
-2. **The chip's bring-up under our boot path** — **written, not yet run.**
+2. **The chip's bring-up under our boot path** — **passed, stage 5 of 5 on hardware.**
    `make RA_LAUNCHER_WIFI=1` links dsiwifi's ARM7 half into the launcher and brings the chip
    up to the WPA2 handshake before any game exists. The question turned out not to be
    `WLANFIRM` — the probe had already answered that, and dsiwifi relaunches the firmware
