@@ -92,6 +92,17 @@ static void expect_status(const char* what, int index, u8 want) {
 	}
 }
 
+/*
+    True when a DS address has no console address in the RetroAchievements DS map. Stated
+    here rather than in the reader because nothing in the shipped code needs to ask any
+    more -- the self-test no longer points at our own memory -- but the property is what
+    the anchor choice rests on, so it is worth pinning.
+*/
+static int ra_rc_console_unmapped(u32 dsAddress) {
+	return !(dsAddress >= RA_DS_SYSTEM_RAM_BASE
+	      && dsAddress <  RA_DS_SYSTEM_RAM_BASE + RA_DS_SYSTEM_RAM_SIZE);
+}
+
 /* Words inside main RAM the test can point chains at. */
 static u32 target = 0xDEADBEEF;
 static u32 targetPtr;
@@ -414,39 +425,24 @@ int main(void) {
 	    mask fixes it, but only where the region really is a mirror, so it is proved rather
 	    than assumed.
 	*/
-	printf("\na snapshot in a RAM mirror still has a console address\n");
-	{
-		/*
-		    MIRROR_HIGH and MIRROR_LOW are backed by the same memory 8M apart, which is what
-		    a DS main RAM mirror actually is -- so the positive case is tested against a real
-		    mirror rather than against a claim that one exists. APART is mapped but its own
-		    memory, and masks to the same console address, so it is the case that must be
-		    refused.
-		*/
-		/* Inside the mapped 4M: a plain subtraction, nothing written. */
-		CHECK(ra_rc_console_address(MIRROR_LOW + 0x54) == 0x54);
-
-		/*
-		    Past the 4M window but genuinely mirrored. This is the case that disabled the
-		    achievement on hardware: the cardengine sits at 0x027FC000, inside main RAM's
-		    second mirror, and the plain subtraction gave 0x7Fxxxx.
-		*/
-		*(volatile u32*)(MIRROR_HIGH + 0x54) = 0xC0FFEE00;
-		CHECK(*(volatile u32*)(MIRROR_LOW + 0x54) == 0xC0FFEE00);   /* really a mirror */
-		CHECK(ra_rc_console_address(MIRROR_HIGH + 0x54) == 0x54);
-		CHECK(*(volatile u32*)(MIRROR_HIGH + 0x54) == 0xC0FFEE00);  /* sentinel cleaned up */
-
-		/*
-		    Past the window and *not* a mirror, which is the twlsdk case where main RAM
-		    really is 16M. Masking would name a different word, so it must refuse.
-		*/
-		*(volatile u32*)(APART + 0x54) = 0x12345678;
-		CHECK(ra_rc_console_address(APART + 0x54) == 0);
-		CHECK(*(volatile u32*)(APART + 0x54) == 0x12345678);
-		/* Not main RAM at all, and misaligned, are refusals too. */
-		CHECK(ra_rc_console_address(0x09000000) == 0);
-		CHECK(ra_rc_console_address(MIRROR_HIGH + 0x55) == 0);
-	}
+	/*
+	    The self-test definition is anchored at console address 0 -- the first word of the
+	    game's own RAM -- because the snapshot has no console address on real hardware. Main
+	    RAM there is 16M and RetroAchievements maps 4M, so the cardengine at 0x027FC000 is
+	    eight megabytes past the end of the map, and not a mirror of 0x023FC000 either: that
+	    was tested directly on hardware with a sentinel and they are separate memory.
+	*/
+	printf("\nthe self-test definition is anchored where the map reaches\n");
+	CHECK(ra_rc_translate(0, 1) == RA_DS_SYSTEM_RAM_BASE);
+	CHECK(ra_rc_validate_address(0) != 0);
+	/*
+	    And the reason it is anchored there: an address eight megabytes into main RAM --
+	    where the cardengine actually lives on hardware -- has no console address at all.
+	    The snapshot in this test links low enough to be inside the map, which the target's
+	    never is.
+	*/
+	CHECK(ra_rc_console_unmapped(0x027FED54));
+	CHECK(ra_rc_validate_address(0x027FED54 - RA_DS_SYSTEM_RAM_BASE) == 0);
 
 	printf("\nthe definition's address translates to the snapshot's own ticks\n");
 	CHECK(ra_rc_translate(0, 4) == RA_DS_SYSTEM_RAM_BASE);
@@ -684,25 +680,31 @@ int main(void) {
 	    Last, because it advances snapshot.ticks and every assertion above about the
 	    counters depends on how many times ra_wram_tick() has run.
 	*/
-	printf("\nmeasured progress climbs one per frame while the value changes\n");
+	/*
+	    Last, because it advances the frame count and every assertion above about the
+	    counters depends on how many times ra_wram_tick() has run.
+	*/
+	printf("\nmeasured progress climbs one per frame, and triggers at the target\n");
 	{
-		u32 startMeasured;
-		snapshot.ticks = 1;
-		ra_wram_tick(&snapshot);
-		startMeasured = snapshot.rcMeasured;
+		const u32 startMeasured = snapshot.rcMeasured;
 		for (i = 0; i < 5; i++) {
-			snapshot.ticks++;
 			ra_wram_tick(&snapshot);
 		}
-		CHECK(snapshot.rcMeasured == startMeasured + 5);
-		CHECK(snapshot.rcTriggered == 0);          /* 600 frames away yet */
 		/*
-		    And stops climbing when the value stops changing, which is what makes this a
-		    test of the delta memref rather than of the frame counter.
+		    One hit per frame regardless of what memory does, which is what the always-true
+		    comparison buys: the count is a property of rcheevos running, not of the game.
 		*/
-		ra_wram_tick(&snapshot);
-		ra_wram_tick(&snapshot);
 		CHECK(snapshot.rcMeasured == startMeasured + 5);
+		CHECK(snapshot.rcTarget == 600);
+		CHECK(snapshot.rcTriggered == 0);          /* still short of 600 */
+		CHECK(snapshot.rcPeeks > 0);               /* and it really is reading memory */
+
+		/* Run it out to the target and check the trigger actually fires. */
+		while (snapshot.rcMeasured < snapshot.rcTarget && snapshot.rcTriggered == 0) {
+			ra_wram_tick(&snapshot);
+		}
+		CHECK(snapshot.rcTriggered == 1);
+		CHECK(snapshot.rcEvents > 0);
 		/* Only the refusal forced by hand above; nothing in normal operation was denied. */
 		CHECK(snapshot.rcPeeksRejected == 1);
 	}

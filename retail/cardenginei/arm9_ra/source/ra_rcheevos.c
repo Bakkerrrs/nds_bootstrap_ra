@@ -57,7 +57,6 @@
     a definition from the server does not get a weaker one than a hand-written watch.
 */
 extern bool ra_readable(u32 addr, u32 len);
-extern bool ra_in_main_ram(u32 addr, u32 len);
 extern u32  ra_read(u32 addr, u8 size);
 
 /* VCOUNT, read directly -- the game owns every hardware timer. See raSnapshot.linesLast. */
@@ -169,119 +168,34 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
 	}
 }
 
-/* Small string building, because sprintf() would cost more than everything else here. */
-static char memaddrBuffer[48];
-
-static char* ra_put(char* p, const char* s) {
-	while (*s) {
-		*p++ = *s++;
-	}
-	return p;
-}
-
-static char* ra_put_hex6(char* p, u32 value) {
-	int shift;
-	for (shift = 20; shift >= 0; shift -= 4) {
-		const u32 nybble = (value >> shift) & 0xF;
-		*p++ = (char)(nybble < 10 ? ('0' + nybble) : ('a' + (nybble - 10)));
-	}
-	return p;
-}
-
 /*
-    The definition to evaluate, in the server's own syntax, built against the snapshot's
-    tick counter:
+    The definition to evaluate, in the server's own syntax:
 
-        M:0xX{ticks}!=d0xX{ticks}.600.
+        M:0xH000000>=0.600.
 
-    Read as: measured, the 32-bit value at {ticks} differs from its value last frame,
-    six hundred times. Which is true once per frame while the reader is running, so it
-    unlocks after 600 frames -- about ten seconds.
+    Read as: measured, the byte at console address 0 is at least zero, six hundred times.
+    The comparison is always true, so it counts one hit per frame and unlocks after 600
+    frames -- about ten seconds.
 
-    This is a real definition, not a stub. It exercises a 32-bit memref, a delta memref,
-    a hit target and the measured flag, which between them are most of what an actual DS
-    achievement uses. And it is checkable in the field for the same reason the chain
-    self-tests were: rcMeasured climbs one per frame, so the snapshot shows rcheevos
-    working rather than merely present.
+    It is anchored at console address 0, and that is the interesting part.
 
-    The snapshot lives in the cardengine's .bss at 0x027Fxxxx, which is inside DS system
-    RAM, so it has a console address like any game variable would -- that is what lets a
-    definition point at it at all.
+    The obvious anchor would have been the snapshot's own tick counter, and that is what
+    this was until hardware said otherwise. It does not work, for a reason worth writing
+    down: RetroAchievements maps 4M of DS system RAM, and on this hardware main RAM is 16M.
+    The cardengine lives at 0x027FC000 -- eight megabytes in -- so the snapshot has no
+    console address at all. It is not a mirror of 0x023FC000 either; that was tested
+    directly, by writing a sentinel through one address and reading at the other, and they
+    are separate memory.
+
+    Console address 0 is the first word of the game's own RAM. Always mapped, always
+    readable, never written by us.
+
+    What this covers: a memref read, a comparison, a hit target, the measured flag, the
+    trigger, and rc_runtime_do_frame() reaching memory every frame. What it does not cover
+    is the delta memref, which needs a value that changes and therefore a game address
+    nobody can name in advance. The first real achievement will exercise it.
 */
-/*
-    A DS address back to a console address, which is not the subtraction it looks like.
-
-    Main RAM on a DS is 4M and the ARM9 sees it mirrored every 4M up to 0x03000000. The
-    cardengine lives at 0x027FC000 -- inside the *second* mirror -- so subtracting the base
-    gives 0x7Fxxxx, which is past the 4M RetroAchievements maps and is refused. That is
-    what disabled the test achievement on the first hardware run, and the validation pass
-    catching it is the system working rather than failing.
-
-    Masking into the 4M window fixes it for this variant and would be wrong for the twlsdk
-    ones, where main RAM really is 16M and 0x02FDxxxx is its own memory rather than a
-    mirror of 0x003Dxxxx. So the mirror is proved rather than assumed: a sentinel is written
-    through one address and read back through the other, and if they do not agree there is
-    no console address for this snapshot and the caller is told so.
-
-    Returns 0 if the address cannot be expressed as a console address. Console address 0 is
-    a real address, but it is main RAM's first word and never where the snapshot lands.
-
-    The sentinel is written through the address being translated, not through some other
-    field of the snapshot: proving that one region mirrors says nothing about another, and
-    an earlier version of this made exactly that mistake.
-*/
-static u32 ra_rc_console_address(u32 dsAddress) {
-	u32 console;
-	u32 mirrored;
-	u32 saved;
-	bool mirrors;
-	volatile u32* here;
-	volatile u32* there;
-
-	if (dsAddress >= RA_DS_SYSTEM_RAM_BASE
-	 && dsAddress <  RA_DS_SYSTEM_RAM_BASE + RA_DS_SYSTEM_RAM_SIZE) {
-		return dsAddress - RA_DS_SYSTEM_RAM_BASE;
-	}
-
-	if ((dsAddress & 3) || !ra_in_main_ram(dsAddress, 4)) {
-		return 0;
-	}
-	console  = (dsAddress - RA_DS_SYSTEM_RAM_BASE) & (RA_DS_SYSTEM_RAM_SIZE - 1);
-	mirrored = RA_DS_SYSTEM_RAM_BASE + console;
-
-	/*
-	    The proof, on the address actually being translated rather than on some other one
-	    that happens to be nearby: write a sentinel through it and read at the candidate
-	    mirror. Twice, with different values, so a word that already happened to hold the
-	    first sentinel cannot pass. The original is restored either way.
-	*/
-	here  = (volatile u32*)dsAddress;
-	there = (volatile u32*)mirrored;
-	saved = *here;
-
-	*here   = 0x5A3C69A5;
-	mirrors = (*there == 0x5A3C69A5);
-	if (mirrors) {
-		*here   = 0xA5693C5A;
-		mirrors = (*there == 0xA5693C5A);
-	}
-	*here = saved;
-
-	return mirrors ? console : 0;
-}
-
-static const char* ra_rc_build_test_definition(u32 consoleAddress) {
-	char* p = memaddrBuffer;
-
-	p = ra_put(p, "M:0xX");
-	p = ra_put_hex6(p, consoleAddress);
-	p = ra_put(p, "!=d0xX");
-	p = ra_put_hex6(p, consoleAddress);
-	p = ra_put(p, ".600.");
-	*p = 0;
-
-	return memaddrBuffer;
-}
+#define RA_TEST_DEFINITION "M:0xH000000>=0.600."
 
 /*
     Bring rcheevos up, once, and report how far it got. Returns the stage reached.
@@ -308,22 +222,8 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 		return RA_RC_NO_MEMREFS;
 	}
 
-	{
-		const u32 consoleAddress = ra_rc_console_address((u32)&snapshot->ticks);
-		if (consoleAddress == 0) {
-			/*
-			    This snapshot has no console address -- it is outside the 4M
-			    RetroAchievements maps and not a mirror of it. Real achievements are
-			    unaffected, since they point at game memory; only this self-test needs an
-			    address it can name.
-			*/
-			return RA_RC_NO_ADDRESS;
-		}
-		activate = rc_runtime_activate_achievement(
-			&runtime, RA_TEST_ACHIEVEMENT_ID,
-			ra_rc_build_test_definition(consoleAddress),
-			0, 0);
-	}
+	activate = rc_runtime_activate_achievement(
+		&runtime, RA_TEST_ACHIEVEMENT_ID, RA_TEST_DEFINITION, 0, 0);
 
 	snapshot->rcActivate = (s8)activate;
 	if (activate != RC_OK) {
