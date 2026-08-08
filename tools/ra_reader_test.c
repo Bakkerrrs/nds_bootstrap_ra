@@ -372,13 +372,21 @@ static void test_wifi_verdict(void) {
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_CONNECTED);
 	v.apiOk = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_ANSWERED);
-	/* Step 3c's rung: r=login returning a token, which is also the top of the ladder today. */
+	/* Step 3c's rung: r=login returning a token. */
 	v.loggedIn = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_LOGGED_IN);
 	/* And r=gameid, which is unauthenticated and so does not depend on the rung below it. */
 	v.identified = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_IDENTIFIED);
-	CHECK(RA_WIFI_STAGE_IDENTIFIED == RA_WIFI_STAGE_MAX);
+	/*
+	    Step 3d's rung, and the top of the ladder: r=patch put real definitions in the staging
+	    block. The last rung is pinned against RA_WIFI_STAGE_MAX so adding one without extending
+	    the summary's wording fails here rather than reporting "stage 12 of 12" for a run that
+	    stopped at 12 of 13.
+	*/
+	v.patched = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_PATCHED);
+	CHECK(RA_WIFI_STAGE_PATCHED == RA_WIFI_STAGE_MAX);
 
 	/*
 	    The step-3 run, which reached stage 9. Its narration carries the same five rungs and

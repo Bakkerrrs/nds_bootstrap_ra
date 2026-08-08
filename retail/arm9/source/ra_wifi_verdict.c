@@ -167,6 +167,9 @@ void raWifiVerdictChunk(raWifiVerdict* v, const char* chunk) {
     never associates reports 3, which is the useful answer.
 */
 int raWifiVerdictStage(const raWifiVerdict* v) {
+	if (v->patched) {
+		return RA_WIFI_STAGE_PATCHED;
+	}
 	if (v->identified) {
 		return RA_WIFI_STAGE_IDENTIFIED;
 	}

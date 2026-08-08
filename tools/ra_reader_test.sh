@@ -119,6 +119,7 @@ $CC -std=gnu99 -Wall -O1 \
 	-I"$out/include" -Iretail/common/include -I"$RC/include" -I"$RC/src" \
 	tools/ra_launcher_test.c \
 	retail/arm9/source/ra_hash.c retail/arm9/source/ra_cfg.c \
+	retail/arm9/source/ra_patch.c \
 	"$RC"/src/rhash/md5.c "$RC"/src/rhash/hash.c "$RC"/src/rhash/hash_rom.c \
 	"$RC"/src/rc_util.c "$RC"/src/rc_compat.c \
 	-o "$out/ra_launcher_test"

@@ -122,6 +122,12 @@ static raWifiVerdict verdict;
 static u32           syncPending;
 /* Stage 0b computes it; stage 11 asks the server about it. */
 static char          romHash[33];
+/*
+    Stage 10 gets it; stage 12 spends it. Hoisted out of raWifiLogin() for that reason and for
+    no other -- and it is the one static in this file that must never be logged. See
+    raConfigRedact(): a token is the account.
+*/
+static char          raToken[64];
 static char          textBuf[RA_WIFI_TEXT_MAX];
 static volatile u32  textHead;      /* written only by the interrupt */
 static u32           textTail;      /* read only by the main loop */
@@ -290,10 +296,15 @@ static bool raWifiWaitArm7(void) {
 /*
     How much heap is left, at the moments it changes.
 
-    Reported because it is the number step 3d will run into: `r=patch` returns a whole
-    achievement set, lwip's send path allocates from the same malloc as libfat and the
-    launcher's own strings, and the static side of the region is already 569,136 of 753,664.
-    Better to have the figure from a run that worked than to discover it from one that did not.
+    Reported because it is the number the ladder keeps spending: lwip's send path allocates from
+    the same malloc as libfat and the launcher's own strings, and the static side of the region
+    has grown from 569,136 to 598,220 of 753,664 across steps 3b, 3c and 3d -- every static
+    response buffer and the scanner's carry buffer raises the floor the heap starts from. Better
+    to have the figure from a run that worked than to discover it from one that did not.
+
+    Step 3d turned out to need none of it: the set is streamed into the staging block and the
+    recv() window is static, so the largest reply in this project allocates nothing. That was
+    the design intent and this line is how it gets checked rather than assumed.
 */
 static void raWifiReportHeap(const char* when) {
 	/*
@@ -457,7 +468,6 @@ static void raWifiLogin(const raConfig* cfg) {
 	char          user[3 * sizeof(cfg->username)];
 	char          pass[3 * sizeof(cfg->password)];
 	char          path[320];
-	char          token[64];
 	raNetProgress p;
 	int           got;
 
@@ -489,9 +499,9 @@ static void raWifiLogin(const raConfig* cfg) {
 	}
 	raWifiLog("%d bytes back\n", got);
 
-	if (raNetJsonString(response, "Token", token, sizeof(token))) {
+	if (raNetJsonString(response, "Token", raToken, sizeof(raToken))) {
 		verdict.loggedIn = 1;
-		raWifiLog("\x1b[32mlogged in, token %s\x1b[37m\n", raConfigRedact(token));
+		raWifiLog("\x1b[32mlogged in, token %s\x1b[37m\n", raConfigRedact(raToken));
 		return;
 	}
 
@@ -577,6 +587,168 @@ static void raWifiIdentify(void) {
 
 	verdict.identified = 1;
 	raWifiLog("\x1b[32mGameID           %lu\x1b[37m\n", (unsigned long)gameId);
+}
+
+/*
+    Stage 12: r=patch -- fetch the real achievement set, and put it where the game will find it.
+
+    This is the rung the whole ladder was for. Everything below it was a measurement; this
+    produces the artifact, and it produces it into the same staging block a hand-written
+    ra_achievements.txt already goes to -- CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION, with the
+    same header, written by the same rules. The bootloader copies that into DSi WRAM and the
+    cardengine's reader splits it into lines. None of that path is new, which is the point of
+    having built it for a file first.
+
+    The reply is never held. See ra_patch.c: it is over 100 K for this game, the heap has about
+    85 K left, and the destination is 32 K -- so the definitions are pulled out of the byte
+    stream as it arrives and the rest is discarded going past.
+
+    Two things this deliberately does not do. It does not log the reply, because logging what
+    does not fit in memory to a card over a live WiFi link is the one thing #1d says not to do,
+    and because the definitions themselves are the evidence. And it does not log the token: the
+    request carries it, the log records that a request was made.
+*/
+/*
+    A heartbeat on the screen while the set streams in, and screen *only*.
+
+    The recv() loop cannot yield -- it blocks on the socket -- so nothing else can report
+    progress while a hundred kilobytes come down, and a run that stalls halfway would look
+    identical to one that never started. A dot every 8 K makes the difference visible without a
+    single SD transaction: iprintf() here is writes to the console's own memory, where
+    raWifiLog() would be libfat and an fsync() over the FIFO to the ARM7 that is at that moment
+    running the WiFi stack. That combination is what froze a v6 run.
+*/
+static u32 patchProgress;
+
+static void raWifiPatchSink(void* ctx, const char* data, int length) {
+	raPatchFeed(ctx, data, length);
+
+	patchProgress += (u32)length;
+	if (patchProgress >= 8192) {
+		patchProgress = 0;
+		iprintf(".");
+	}
+}
+
+static void raWifiFetchPatch(const raConfig* cfg) {
+	static raPatch patch;
+	char           user[3 * sizeof(cfg->username)];
+	char           path[384];
+	char* const    block = (char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
+	                               + CARDENGINEI_ARM9_RA_DEFS_HEADER);
+	const u32      blockMax = CARDENGINEI_ARM9_RA_DEFS_MAX
+	                          - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1;
+	raNetProgress  p;
+	int            got;
+
+	if (!verdict.gameId) {
+		raWifiLog("\x1b[33mno GameID; the set cannot be asked for\x1b[37m\n");
+		return;
+	}
+	if (!raToken[0]) {
+		/*
+		    r=patch is the first request in this ladder that needs credentials. Said plainly
+		    because the previous rung succeeds without them, so "the server knew the ROM but the
+		    set did not arrive" would otherwise look like a server problem.
+		*/
+		raWifiLog("\x1b[33mno token; r=patch needs a login\x1b[37m\n");
+		return;
+	}
+	if (!raNetUrlEncode(cfg->username, user, sizeof(user))) {
+		raWifiLog("\x1b[31musername too long to encode\x1b[37m\n");
+		return;
+	}
+	/*
+	    The token goes in unencoded. RA's tokens are alphanumeric, and encoding one would be
+	    fine -- but it would mean copying a secret into a second buffer for no reason, and this
+	    file is careful about how many places hold one.
+	*/
+	if (sniprintf(path, sizeof(path), "/dorequest.php?r=patch&u=%s&t=%s&g=%lu",
+	              user, raToken, (unsigned long)verdict.gameId) >= (int)sizeof(path)) {
+		raWifiLog("\x1b[31mpatch request too long\x1b[37m\n");
+		return;
+	}
+
+	raWifiLog("asking for       game %lu\n", (unsigned long)verdict.gameId);
+	/*
+	    Zeroed before the request rather than after it, so a reply that never comes leaves the
+	    block invalid instead of leaving whatever was there looking valid.
+	*/
+	*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
+	raPatchReset(&patch, block, blockMax);
+	patchProgress = 0;
+
+	memset(&p, 0, sizeof(p));
+	got = raNetHttpGetStream(RA_NET_HOST, path, raWifiPatchSink, &patch, &p);
+	raPatchFinish(&patch);
+	iprintf("\n");
+
+	if (got < -1000) {
+		raWifiLog("\x1b[31mthe server answered HTTP %d\x1b[37m\n", -got - 1000);
+		return;
+	}
+	if (got < 0) {
+		raWifiLog("\x1b[31mpatch HTTP failed at step %d\x1b[37m\n", -got);
+		return;
+	}
+
+	raWifiLog("body was         %d bytes\n", got);
+	raWifiLog("definitions      %u kept, %u unofficial\n",
+	          patch.kept, patch.unofficial);
+	if (patch.dropped || patch.tooLong || patch.cutShort || patch.empty
+	 || patch.oddFlags || patch.noFlags) {
+		/*
+		    Printed only when there is something to print, and printed in full when there is:
+		    a set that lost thirty definitions to a full block looks exactly like a set with
+		    thirty fewer achievements, from the block alone.
+		*/
+		raWifiLog("lost             %u full, %u too long, %u cut, %u empty\n",
+		          patch.dropped, patch.tooLong, patch.cutShort, patch.empty);
+		if (patch.oddFlags || patch.noFlags) {
+			raWifiLog("odd              %u other flags, %u no flags\n",
+			          patch.oddFlags, patch.noFlags);
+		}
+	}
+	raWifiLog("block            %lu of %lu used, %lu wanted\n",
+	          (unsigned long)patch.used, (unsigned long)blockMax,
+	          (unsigned long)patch.wanted);
+	raWifiLog("longest memaddr  %lu of %d\n",
+	          (unsigned long)patch.longest, RA_PATCH_MEMADDR_MAX - 1);
+
+	if (!patch.kept) {
+		raWifiLog("\x1b[31mno definitions in the reply\x1b[37m\n");
+		return;
+	}
+
+	/*
+	    The first definition, verbatim and clipped, because it is the cheapest possible check
+	    that these are memaddr strings rather than 30 K of something else that happened to sit
+	    between quotes. It should start with an address or a condition flag.
+	*/
+	{
+		char first[65];
+		u32  i;
+
+		for (i = 0; i < sizeof(first) - 1 && block[i] && block[i] != '\n'; i++) {
+			first[i] = block[i];
+		}
+		first[i] = 0;
+		raWifiLog("first            %s\n", first);
+	}
+
+	/*
+	    Header last, and the magic last of all -- the same order loadRaDefinitions() uses, for
+	    the same reason: the bootloader copies this block unconditionally and decides whether to
+	    believe it by the magic alone, so a magic written before the length would make a
+	    half-finished block indistinguishable from a finished one.
+	*/
+	*(u32*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + 4) = patch.used;
+	*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION       = CARDENGINEI_ARM9_RA_DEFS_MAGIC;
+
+	verdict.patched   = 1;
+	verdict.defsKept  = patch.kept;
+	verdict.defsBytes = patch.used;
+	raWifiLog("\x1b[32mstaged %u definitions for the cardengine\x1b[37m\n", patch.kept);
 }
 
 void raWifiProbe(bool sdFound, const char* ndsPath) {
@@ -712,6 +884,16 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	raWifiIdentify();
 	raWifiReportHeap("after gameid");
 
+	/*
+	    And the last rung, which is the first one that leaves something behind: the set is
+	    written to the staging block the bootloader copies into DSi WRAM. This build still does
+	    not boot a game -- see RA_LAUNCHER_WIFI -- so what it proves is that the definitions
+	    arrive and fit, which is the question. Running them is step 4.
+	*/
+	raWifiLog("\n-- stage 12: fetch the set --\n");
+	raWifiFetchPatch(&config);
+	raWifiReportHeap("after patch");
+
 done:
 	/*
 	    Give the tail a chance before the summary rather than after it. dsiwifi narrates
@@ -762,6 +944,12 @@ done:
 	} else {
 		raWifiLog("GameID           %s\n", verdict.gameId == 0 ? "unknown to the server" : "not asked");
 	}
+	if (verdict.patched) {
+		raWifiLog("definitions      %u in %lu bytes\n",
+		          verdict.defsKept, (unsigned long)verdict.defsBytes);
+	} else {
+		raWifiLog("definitions      none\n");
+	}
 	if (verdict.mboxAllocFailed) {
 		raWifiLog("\x1b[31mthe ARM7 could not allocate its mboxes\x1b[37m\n");
 	}
@@ -772,7 +960,9 @@ done:
 	}
 
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);
-	if (stage >= RA_WIFI_STAGE_IDENTIFIED) {
+	if (stage >= RA_WIFI_STAGE_PATCHED) {
+		raWifiLog("the set is staged for the cardengine.\n");
+	} else if (stage >= RA_WIFI_STAGE_IDENTIFIED) {
 		raWifiLog("logged in, and the server knows the ROM.\n");
 	} else if (stage >= RA_WIFI_STAGE_LOGGED_IN) {
 		raWifiLog("logged in from the launcher.\n");

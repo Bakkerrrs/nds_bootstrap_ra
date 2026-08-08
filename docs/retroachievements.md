@@ -69,6 +69,12 @@ Confirmed on hardware, in order of when each was settled:
     **`GameID 14856`** for `c3b1916756737f2c4117cc95c1d51ac7`. The hash question is closed by
     the server rather than by eye. Log at `docs/logs/ra_wifi_launcher_gameid-3ds.log`.
 
+**Written but not yet run on hardware:** step 3d, `r=patch` — stage 12, the achievement set
+streamed out of a 100 KB reply into the staging block. Everything it depends on is confirmed
+above, and its two state machines are checked on a host at every byte boundary, but *nothing in
+this list is a hardware result until a log says so*. See *Step 3d — `r=patch`* below for what the
+run is expected to report and what would make it interesting.
+
 Everything from the game's RAM up to a fired trigger is done, and the launcher now reaches the
 RetroAchievements API. **So open question #1 is closed for context A, and nothing in front of
 the remaining work is a question about the platform** — the hash, `r=login` and `r=patch` are
@@ -89,7 +95,8 @@ The five things a new session needs that are not obvious from the source:
 | Magic to look for | ASCII `RA2S` (`52 41 32 53`). `RA1S`/`RA0S` means a stale address from an older build. |
 | Host test | `./tools/ra_reader_test.sh` — no toolchain, no hardware, seconds. Run it before anything. |
 | Full build | `make` from the top level, **serially**, with `lzss` on `PATH`. See *Building*. |
-| WiFi build | `make RA_LAUNCHER_WIFI=1` — the network diagnostic, now 9 rungs through DHCP, DNS and one HTTP GET. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
+| WiFi build | `make RA_LAUNCHER_WIFI=1` — the network diagnostic, now 12 rungs: the chip, DHCP, DNS, HTTP, the ROM's hash, `r=login`, `r=gameid` and `r=patch`. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
+| RA config | `sd:/_nds/nds-bootstrap/ra.cfg`, odelot's format — copy `tools/ra.example.cfg`. Username and password, in the clear, by decision; see *Step 3c*. |
 
 Two working habits this document was largely written by, both of which were learned by
 paying for them:
@@ -99,14 +106,22 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **`r=patch`**, and it is the last piece of step 3. The whole network
-path below it is proven on hardware — chip, link, DHCP, DNS, HTTP, the ROM's hash, a real login,
-and the server returning `GameID 14856` for that hash.
+The immediate next step is **one hardware run of stage 12**, which is the last reading step 3
+needs. `r=patch` is written; what it has never done is run. The four numbers to read off the log,
+in the order they decide things:
 
-What it needs is not more network. It needs `RA_DEFS_MAX_LINES` raised from **8** — a limit chosen
-when the definitions file was hand-typed — and the reply streamed rather than buffered, against a
-measured 85,656 bytes of heap and a 32,760-byte destination. See *It answered GameID 14856* below
-for both numbers.
+| Line | What it settles |
+| --- | --- |
+| `definitions      N kept, M unofficial` | whether the set arrives at all, and how much of it is published |
+| `block            X of 32751 used, Y wanted` | **the size question this whole step exists to answer.** `Y > X` means the block is the limit, not the ladder |
+| `longest memaddr  L of 2047` | whether the 2 KB carry buffer is the right size for a real set |
+| `heap after patch ... safe` | the number step 4 inherits. The static floor rose 29 KB across 3b–3d |
+
+`RA_DEFS_MAX_LINES` was raised from 8 to **128** for this, and the block holds 32,751 bytes of
+text — so 128 definitions average 255 bytes each before the *block* becomes the limit rather than
+the line count. Whether that is enough is exactly what `wanted` reports.
+
+After that, step 4: the same code beside a running game, where the ARM7 belongs to the game.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -691,7 +706,9 @@ ARM9.
 
 Which means **3b, 3c and 3d are work and not questions.** Nothing above this line needs another
 platform experiment: the hash, `r=login` and `r=patch` are code, and the block they feed is
-already proven to fire real achievements.
+already proven to fire real achievements. That reading held — all three are written, and the only
+one of them that turned out to have a genuine unknown in it is `r=patch`, where the unknown is a
+*size* rather than a platform behaviour.
 
 #### The hang after `request sent`, which was the one place a probe could still block
 
@@ -1041,17 +1058,17 @@ question at all.** It is a size question, and it has two numbers:
 | --- | --- |
 | heap available while lwip is up | 85,656 bytes |
 | the definitions block the set has to land in | **32,760 bytes of text** |
-| definitions the WRAM binary will parse | **`RA_DEFS_MAX_LINES` is 8** |
+| definitions the WRAM binary will parse | **`RA_DEFS_MAX_LINES` was 8** |
 
-The 8 is the one that matters, and it is not a bug — it was chosen when the definitions file was
-a hand-typed line or three, and `docs` has said so since. A real set is a hundred or more
-achievements. So `r=patch` cannot be written without raising it, which means touching
-`ra_rcheevos.c` — code that is proven on hardware and fires real achievements — so it is worth
-doing deliberately rather than as a side effect of a fetch.
+The 8 was the one that mattered, and it was not a bug — it was chosen when the definitions file
+was a hand-typed line or three, and `docs` has said so since. A real set is a hundred or more
+achievements, so `r=patch` could not be written without raising it, which meant touching
+`ra_rcheevos.c` — code that is proven on hardware and fires real achievements. It is **128** now;
+see *Step 3d* below for what that cost and what it broke on the way.
 
 The 32,760 is probably enough and has never been checked: RA `MemAddr` strings run from tens to a
 few hundred characters, so a hundred of them is plausibly 20-25 K. The measurement to take is the
-one `r=patch` itself provides.
+one `r=patch` itself provides, and stage 12 reports it as `wanted`.
 
 #### `r=gameid`: the one question only the server can answer
 
@@ -1194,6 +1211,140 @@ generate `include/dswifi_version.h` — only the submodule's `all` target does, 
 source that includes `dsiwifi7.h` needs it. A fresh clone therefore failed the probe's build
 too, from inside a third-party Makefile, on a missing header. Both entry points now ask for
 that file by name first.
+
+### Step 3d — `r=patch`, and reading a reply that does not fit in memory
+
+The last rung of the ladder, and the first one that leaves something behind. Every rung before
+it was a measurement — the chip came up, the API answered, the server knew the ROM. This one
+takes RetroAchievements' own definitions and writes them into the staging block the cardengine
+already reads, which closes the loop the document has described since phase 0:
+launcher → staging → DSi WRAM.
+
+The interesting part is not the request. It is that **the reply cannot be held.**
+
+| | |
+| --- | --- |
+| `r=patch` for GameID 14856 | over 100 KB of JSON |
+| heap available with lwip up | 85,656 bytes (measured, *It answered `GameID 14856`* above) |
+| the destination block | 32,760 bytes, of which 32,751 is text |
+
+So there is no buffer to read it into, and a JSON parser needs the document. The reply is
+therefore read *through*: `recv()` into a 1 KB static window, hand each window to a scanner,
+forget it. Nothing accumulates and nothing is allocated — the largest reply in this project
+costs **zero bytes of heap**, which the run's own heap line is there to check rather than assume.
+
+#### Why a scanner is sound here and not merely convenient
+
+The scanner looks for the eleven bytes `"MemAddr":"` and copies to the closing quote. That is
+not a parser and does not pretend to be one, so the question worth answering is what it can get
+wrong.
+
+It cannot be fooled by a value, and the reason is a property of JSON rather than of RA: **a
+quote inside a string must be escaped as `\"`**, so those eleven bytes cannot occur inside one.
+An achievement whose title is literally `"MemAddr":"` arrives as `\"MemAddr\":\"` — byte nine is
+a backslash where the needle wants a quote, and it does not match. `tools/ra_launcher_test.c`
+carries exactly that achievement in its fixture rather than leaving the argument unchecked.
+
+What it genuinely does not know is **which object the key belonged to**. Today `MemAddr` is an
+achievement field and nothing else — leaderboards carry `Mem`, rich presence carries
+`RichPresencePatch` — so this reads the achievement set and only that. If RA ever adds a
+`MemAddr` elsewhere in the reply, this would read that too. That is a limitation, written down
+rather than left to be found.
+
+#### Chunked transfer encoding, which is the failure this step would have shipped
+
+An HTTP/1.1 reply may arrive with its body cut into chunks, each prefixed by a **hex length
+written into the byte stream**. Every reply this project has read so far came back unchunked —
+the bodies in the logs start at `{` — but each of those was one packet, and whether a CDN chunks
+is a decision about size. A `1a2f\r\n` landing inside a memaddr string would corrupt **exactly
+one definition out of a hundred**, and nothing anywhere would say so: the set would load, most
+achievements would work, and one would silently never fire.
+
+That is the same failure shape as the zero-byte log and the `recv()` hang — something that
+reports success and is wrong — so the framing is undone in code that a host can test rather
+than hoped about. `raNetStreamFeed()` strips headers and chunk framing as a byte-fed state
+machine, and the test feeds each fixture **at every one of its byte boundaries** and once a byte
+at a time, requiring the same body every time. A boundary between the `\r` and the `\n` of a
+chunk header is an ordinary split to a network and a silent corruption to code that assumes
+otherwise.
+
+#### Unofficial achievements, and why a definition is held before it is committed
+
+RA sends unofficial achievements in the same array as published ones, distinguished only by
+`"Flags"`: **3 is core, 5 is unofficial.** Counting them would inflate the one number this rung
+exists to produce — "does a real set fit 32 KB" — with achievements no player is scored on.
+
+`Flags` arrives *after* `MemAddr` in each object, so filtering means the definition cannot be
+written the moment it is read. It waits in a 2 KB carry buffer until its flag arrives, or until
+the next `MemAddr` or the end of the document says none is coming. Which in turn is why
+`raPatchFinish()` exists as its own call: the last achievement in the reply is the one whose
+`Flags` is followed by the end of the document instead of by another key, so without it a set is
+always exactly one definition short — an off-by-one that a hundred-achievement set hides
+perfectly.
+
+Three more decisions, all of the same kind:
+
+- **`\/` is unescaped back to `/`.** RA escapes forward slashes and memaddr syntax uses `/` as
+  its division operator, so leaving the pair intact would make every divide a parse error.
+  `\\` and `\"` are handled because JSON allows them; anything else keeps its backslash rather
+  than inventing a decoder for an escape a memaddr cannot contain.
+- **A definition longer than the carry buffer is dropped, never clipped.** A truncated memaddr
+  is not a shorter achievement, it is a *different* one — rcheevos would either refuse it or,
+  worse, parse the surviving prefix into a condition that triggers when it should not.
+- **A reply cut off mid-value is counted separately from one that overran the buffer**, because
+  the two say opposite things about what to do next: one is a buffer to enlarge, the other is a
+  request to repeat.
+
+Every outcome is counted and reported, because a set that lost thirty definitions to a full
+block looks exactly like a set with thirty fewer achievements from the block alone.
+
+#### `RA_DEFS_MAX_LINES`: 8 → 128, and the host-test landmine it set off
+
+The reader would only ever split **eight** lines out of the 32 KB block. That was the right
+number while the definitions came from a hand-typed file, and this document has said so since;
+`r=patch` makes the server the source, so it had to follow. The 128 pointers are `static` rather
+than automatic because `ra_rc_init()` is reached from the cardengine's own context and 512 bytes
+of that stack is not this binary's to spend.
+
+Raising it fired a landmine in `tools/ra_reader_test.c` for the **third** time, and this time it
+is fixed rather than documented. That file defined `__bss_start`, `__bss_end` and `__vram_top`
+as 1-byte dummies, and the cardengine takes their *addresses* — so the allocator's arena was
+whatever the linker's ordering of three symbols happened to make it. Adding rcheevos' `hash.c`
+to the link once made the span **−1**; 512 bytes of new statics in the same file did it again.
+Both times the suite **passed at `-O0` and segfaulted at `-O1`**, in tests unrelated to the
+change.
+
+They now come from `--defsym` as absolute addresses inside the real WRAM window, which the test
+mmaps in full instead of only the definitions block at the top of it. The arena is *chosen*
+rather than inherited, and nothing added to that file can move it again. The scratch window the
+direct `ra_startup()` tests use is one buffer with offsets for the same reason — `fakeBss` and
+`fakeArena` were contiguous only by the linker's good manners.
+
+Two smaller things fell out. The over-limit fixture was `char many[256]`, hand-sized for twelve
+12-byte lines; at 128 it overflowed and glibc's fortify check caught it, so it is derived from
+the constant now. And a fixture length miscounted by one in the new patch tests cut a
+`"Flags":5` to `"Flags":`, turning a test about unofficial achievements into a test about
+missing flags — which then failed for the right reason on the wrong grounds. Both are the same
+lesson: **a fixture whose size has to be re-derived by hand is a fixture that will eventually
+measure wrong.**
+
+#### The static floor rose, and that is the cost worth naming
+
+Steps 3b, 3c and 3d took the launcher's static side from **569,136 to 598,220** of 753,664 —
+response buffers, the config, the hash's streaming window, the scanner's carry buffer. Every one
+of those raises the floor the heap starts from, so the 85,656 bytes measured at `r=gameid` will
+read smaller on the next run. It does not matter for *this* rung, which allocates nothing, and
+the heap line reports the figure either way. It matters for step 4, and the number to watch is
+`safe`, not `free`.
+
+#### The screen gets a heartbeat, and the card gets nothing
+
+The `recv()` loop blocks, so nothing can report progress while a hundred kilobytes come down —
+a run that stalls halfway would look identical to one that never started. So the sink prints a
+dot every 8 KB, and **only to the screen**: `iprintf()` is writes to console memory, where
+`raWifiLog()` is libfat plus an `fsync()` over the FIFO to the ARM7 that is at that moment
+running the WiFi stack. That combination is what froze a v6 run, and #1d is where it is
+discussed. A dot costs nothing and makes the difference visible.
 
 ### How you know it worked
 

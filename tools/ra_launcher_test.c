@@ -28,6 +28,8 @@
 #include <string.h>
 
 #include "ra_wifi.h"
+/* For the staging block's size, which step 3d's scanner has to fit a real set into. */
+#include "locations.h"
 
 /*
     raNetUrlEncode() and raNetJsonString() are string logic; the rest of ra_net.c is lwip
@@ -312,10 +314,375 @@ static void test_config(void) {
 	remove(path);
 }
 
+/*
+    ------------------------------------------------------------------------------------
+    Step 3d. Two state machines that are fed a socket's byte stream, which means the one thing
+    they must survive is arriving in pieces -- and pieces of a size nothing here chooses.
+
+    That is why the tests below do not check one split: they check *every* split. Feeding a
+    fixture as two pieces at each of its byte boundaries, and again one byte at a time, and
+    requiring the result to be identical every time, is the only form of this test that is worth
+    running. A boundary falling between the `\r` and the `\n` of a chunk header, or in the
+    middle of `"MemAddr":"`, or between a backslash and the slash it escapes, are all just
+    ordinary splits to a network and all silently produce a wrong answer to code that assumes
+    otherwise.
+    ------------------------------------------------------------------------------------
+*/
+
+/* Where the streaming reader's sink puts what it is given, so a test can look at it. */
+static char sunk[8192];
+static u32  sunkLength;
+
+static void sinkAppend(void* ctx, const char* data, int length) {
+	(void)ctx;
+	if (sunkLength + (u32)length < sizeof(sunk)) {
+		memcpy(sunk + sunkLength, data, (size_t)length);
+		sunkLength += (u32)length;
+	}
+	sunk[sunkLength] = 0;
+}
+
+/*
+    Feed one reply at every possible split and require the body to come out the same each time.
+    Returns 0 when every split agreed, or the split point that did not.
+*/
+static int streamEverySplit(const char* reply, const char* expectBody, u16 expectStatus) {
+	const int    total = (int)strlen(reply);
+	raNetStream  s;
+	int          split;
+
+	for (split = 0; split <= total; split++) {
+		raNetStreamReset(&s, sinkAppend, NULL);
+		sunkLength = 0;
+		sunk[0]    = 0;
+
+		raNetStreamFeed(&s, reply, split);
+		raNetStreamFeed(&s, reply + split, total - split);
+
+		if (strcmp(sunk, expectBody) != 0 || s.status != expectStatus
+		 || s.bodyBytes != strlen(expectBody)) {
+			return split + 1;
+		}
+	}
+
+	/* And once byte by byte, which is the same test taken to its limit. */
+	raNetStreamReset(&s, sinkAppend, NULL);
+	sunkLength = 0;
+	sunk[0]    = 0;
+	for (split = 0; split < total; split++) {
+		raNetStreamFeed(&s, reply + split, 1);
+	}
+	if (strcmp(sunk, expectBody) != 0 || s.status != expectStatus) {
+		return -1;
+	}
+	return 0;
+}
+
+static void test_stream(void) {
+	printf("\nthe streaming reader strips headers and chunk framing at any split\n");
+
+	/*
+	    Identity encoding, which is what every reply this project has read so far came back as.
+	    Proven here rather than assumed, because the two paths have to agree.
+	*/
+	CHECK(streamEverySplit("HTTP/1.1 200 OK\r\n"
+	                       "Content-Type: application/json\r\n"
+	                       "\r\n"
+	                       "{\"Success\":true}",
+	                       "{\"Success\":true}", 200) == 0);
+
+	/*
+	    Chunked, which is the reason this file exists. A hex length written into the byte stream
+	    would otherwise land inside a definition, and exactly one achievement out of a hundred
+	    would be quietly wrong.
+	*/
+	CHECK(streamEverySplit("HTTP/1.1 200 OK\r\n"
+	                       "Transfer-Encoding: chunked\r\n"
+	                       "\r\n"
+	                       "4\r\nabcd\r\n"
+	                       "2\r\nef\r\n"
+	                       "0\r\n\r\n",
+	                       "abcdef", 200) == 0);
+
+	/* A chunk longer than sixteen bytes, so the hex actually has to be hex. */
+	CHECK(streamEverySplit("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	                       "1a\r\nabcdefghijklmnopqrstuvwxyz\r\n0\r\n\r\n",
+	                       "abcdefghijklmnopqrstuvwxyz", 200) == 0);
+
+	/* Header names are case-insensitive and a server owes nobody a particular spelling. */
+	CHECK(streamEverySplit("HTTP/1.1 200 OK\r\nTRANSFER-ENCODING: Chunked\r\n\r\n"
+	                       "3\r\nxyz\r\n0\r\n\r\n",
+	                       "xyz", 200) == 0);
+
+	/* Chunk extensions are legal and nothing here wants them. */
+	CHECK(streamEverySplit("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	                       "3;name=value\r\nxyz\r\n0\r\n\r\n",
+	                       "xyz", 200) == 0);
+
+	/* A trailer after the last chunk is read and discarded, not handed on as body. */
+	CHECK(streamEverySplit("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	                       "3\r\nxyz\r\n0\r\nExpires: never\r\n\r\n",
+	                       "xyz", 200) == 0);
+
+	/*
+	    A status other than 200 has to be *readable*, because that is how "the token expired"
+	    stops looking like "the set is empty".
+	*/
+	CHECK(streamEverySplit("HTTP/1.1 404 Not Found\r\n\r\nno", "no", 404) == 0);
+	CHECK(streamEverySplit("HTTP/1.1 401 Unauthorized\r\n"
+	                       "Transfer-Encoding: chunked\r\n\r\n"
+	                       "2\r\nno\r\n0\r\n\r\n",
+	                       "no", 401) == 0);
+
+	/* An empty body is a body. */
+	CHECK(streamEverySplit("HTTP/1.1 204 No Content\r\n\r\n", "", 204) == 0);
+
+	/* Headers alone, with the reply cut off before the blank line, must produce nothing. */
+	{
+		raNetStream s;
+
+		raNetStreamReset(&s, sinkAppend, NULL);
+		sunkLength = 0;
+		sunk[0]    = 0;
+		raNetStreamFeed(&s, "HTTP/1.1 200 OK\r\nContent-Type: text", 35);
+		CHECK(sunkLength == 0 && s.status == 200);
+	}
+}
+
+/*
+    An r=patch reply, shaped like the real one: an object per achievement, MemAddr before Flags,
+    forward slashes escaped, and unofficial achievements in the same array as published ones.
+
+    The third achievement's title is the adversarial case and it is not hypothetical enough to
+    leave out -- it contains the scanner's own needle, as a JSON string would have to write it.
+    Because JSON escapes an interior quote as `\"`, the eleven bytes the scanner looks for cannot
+    occur in a value, and this fixture is what says so rather than the argument in ra_patch.c.
+*/
+static const char patchReply[] =
+	"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+	"{\"Success\":true,\"PatchData\":{\"ID\":14856,\"Title\":\"Super Mario 64 DS\","
+	"\"ConsoleID\":18,\"Achievements\":["
+	"{\"ID\":1,\"MemAddr\":\"0xH0a1b2c=1_d0xH0a1b2c=0\",\"Title\":\"First Star\","
+	"\"Description\":\"Get it\",\"Points\":5,\"Author\":\"someone\",\"Flags\":3,\"Type\":null},"
+	"{\"ID\":2,\"MemAddr\":\"A:0xX123456=1_I:0xH99\\/2\",\"Title\":\"Unofficial\","
+	"\"Points\":0,\"Flags\":5},"
+	"{\"ID\":3,\"MemAddr\":\"0xH000010>d0xH000010\","
+	"\"Title\":\"They wrote \\\"MemAddr\\\":\\\" in the title\",\"Flags\":3}"
+	"],\"Leaderboards\":[{\"ID\":9,\"Mem\":\"STA:0xH1=1::CAN:0=1\",\"Format\":\"SCORE\"}],"
+	"\"RichPresencePatch\":\"Display:\\nStars: @Number(0xH1)\"}}";
+
+/* The two published definitions, one per line, with the escaped slash decoded. */
+#define PATCH_EXPECT "0xH0a1b2c=1_d0xH0a1b2c=0\n0xH000010>d0xH000010\n"
+
+/*
+    A whole fixture into the scanner in one call.
+
+    A helper rather than a length at each call site, and that is not tidiness: the first version
+    of these tests passed hand-counted byte counts, one of which was short by one. It cut a
+    `"Flags":5` to `"Flags":` and turned a test about unofficial achievements into a test about
+    missing flags -- which then failed for the right reason on the wrong grounds. A fixture that
+    has to be measured by hand is a fixture that will eventually measure wrong.
+*/
+static void patchFeedAll(raPatch* p, const char* text) {
+	raPatchFeed(p, text, (int)strlen(text));
+}
+
+/* One reply through the reader and the scanner together, split at one point. */
+static void patchRun(raPatch* patch, char* block, u32 blockMax, const char* reply, int split) {
+	const int   total = (int)strlen(reply);
+	raNetStream s;
+
+	raPatchReset(patch, block, blockMax);
+	raNetStreamReset(&s, raPatchFeed, patch);
+	raNetStreamFeed(&s, reply, split);
+	raNetStreamFeed(&s, reply + split, total - split);
+	raPatchFinish(patch);
+}
+
+static void test_patch(void) {
+	static char block[4096];
+	raPatch     patch;
+
+	printf("\nthe patch scanner pulls the published set out of a streaming reply\n");
+
+	patchRun(&patch, block, sizeof(block) - 1, patchReply, 0);
+	CHECK(strcmp(block, PATCH_EXPECT) == 0);
+	CHECK(patch.kept == 2);
+	CHECK(patch.unofficial == 1);
+	CHECK(patch.dropped == 0 && patch.tooLong == 0 && patch.cutShort == 0);
+	CHECK(patch.empty == 0 && patch.oddFlags == 0 && patch.noFlags == 0);
+	CHECK(patch.used == strlen(PATCH_EXPECT));
+	CHECK(patch.wanted == strlen(PATCH_EXPECT));
+	/* Decoded length, so the escaped slash counts as the one character it becomes. */
+	CHECK(patch.longest == strlen("0xH0a1b2c=1_d0xH0a1b2c=0"));
+
+	/*
+	    Every split, because the boundary the network chooses is not ours -- and the interesting
+	    ones are inside `"MemAddr":"`, between a backslash and the slash it escapes, and between
+	    the digits of a Flags value.
+	*/
+	printf("\n...and does it identically at every split point\n");
+	{
+		const int total = (int)strlen(patchReply);
+		int       bad   = 0;
+		int       split;
+
+		for (split = 0; split <= total; split++) {
+			patchRun(&patch, block, sizeof(block) - 1, patchReply, split);
+			if (strcmp(block, PATCH_EXPECT) != 0 || patch.kept != 2
+			 || patch.unofficial != 1 || patch.dropped || patch.tooLong
+			 || patch.cutShort || patch.noFlags || patch.oddFlags) {
+				bad = split + 1;
+				break;
+			}
+		}
+		CHECK(bad == 0);
+	}
+
+	/* And one byte at a time, which is the same requirement taken to its limit. */
+	{
+		raNetStream s;
+		const int   total = (int)strlen(patchReply);
+		int         i;
+
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		raNetStreamReset(&s, raPatchFeed, &patch);
+		for (i = 0; i < total; i++) {
+			raNetStreamFeed(&s, patchReply + i, 1);
+		}
+		raPatchFinish(&patch);
+		CHECK(strcmp(block, PATCH_EXPECT) == 0 && patch.kept == 2);
+	}
+
+	printf("\nthe needle restarts correctly, and escapes decode\n");
+	{
+		/*
+		    A doubled quote is the one case restart-and-retest has to get right, and the reason
+		    ra_patch.c can use it instead of a failure function: the only character that repeats
+		    in `"MemAddr":"` is the quote, at length one.
+		*/
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "{\"\"MemAddr\":\"0xH1=1\",\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && strcmp(block, "0xH1=1\n") == 0);
+
+		/* `\/` is the escape that matters: division is a memaddr operator. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "\"MemAddr\":\"0xH1\\/0xH2\\/2\",\"Flags\":3");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && strcmp(block, "0xH1/0xH2/2\n") == 0);
+
+		/* An unknown escape keeps its backslash rather than being invented away. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "\"MemAddr\":\"a\\tb\",\"Flags\":3");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && strcmp(block, "a\\tb\n") == 0);
+
+		/* A value ending the document, with no Flags field ever arriving, still lands. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "\"MemAddr\":\"0xH7=7\"}]}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.noFlags == 1 && strcmp(block, "0xH7=7\n") == 0);
+
+		/* Two definitions with no Flags between them: the first commits when the second opens. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "\"MemAddr\":\"a=1\",\"MemAddr\":\"b=2\"");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 2 && patch.noFlags == 2 && strcmp(block, "a=1\nb=2\n") == 0);
+
+		/* An empty value is not a definition, and is counted rather than written. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "\"MemAddr\":\"\",\"Flags\":3");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 0 && patch.empty == 1 && block[0] == 0);
+
+		/* A flag value nobody knows is kept and said out loud. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "\"MemAddr\":\"a=1\",\"Flags\":7");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.oddFlags == 1);
+
+		/*
+		    An unofficial definition is not written but is still measured. That matters for the
+		    one number this rung is for: `longest` sizes the scanner's carry buffer, and a
+		    buffer sized only by what got kept would be the wrong size for the next reply.
+		*/
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "\"MemAddr\":\"0xH1=1_0xH2=2_0xH3=3\",\"Flags\":5");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 0 && patch.unofficial == 1 && block[0] == 0);
+		CHECK(patch.longest == strlen("0xH1=1_0xH2=2_0xH3=3"));
+	}
+
+	printf("\nnothing is truncated: a short definition is a different definition\n");
+	{
+		static char big[RA_PATCH_MEMADDR_MAX + 256];
+		u32         i;
+
+		/* A memaddr past the buffer is dropped and counted, never clipped and kept. */
+		strcpy(big, "\"MemAddr\":\"");
+		for (i = strlen(big); i < RA_PATCH_MEMADDR_MAX + 100; i++) {
+			big[i] = 'a';
+		}
+		strcpy(big + i, "\",\"Flags\":3");
+
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		raPatchFeed(&patch, big, (int)strlen(big));
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 0 && patch.tooLong == 1 && block[0] == 0);
+		CHECK(patch.longest > RA_PATCH_MEMADDR_MAX);
+
+		/* A reply cut off inside a value is a prefix, and a prefix goes nowhere. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "\"MemAddr\":\"0xH1=1_0xH");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 0 && patch.cutShort == 1 && block[0] == 0);
+	}
+
+	printf("\na full block stops cleanly and says how much it wanted\n");
+	{
+		/*
+		    Room for the first definition and not the second. What matters is that the block
+		    holds whole lines only -- a half-written memaddr would parse as a real one -- and
+		    that `wanted` reports what a complete set would have needed. That number is the
+		    measurement step 3d exists to take.
+		*/
+		char small[26];
+
+		patchRun(&patch, small, sizeof(small) - 1, patchReply, 0);
+		CHECK(strcmp(small, "0xH0a1b2c=1_d0xH0a1b2c=0\n") == 0);
+		CHECK(patch.kept == 1 && patch.dropped == 1);
+		CHECK(patch.used == 25 && patch.wanted == strlen(PATCH_EXPECT));
+		CHECK(patch.used <= sizeof(small) - 1);
+
+		/* No room at all: nothing is written and everything is accounted for. */
+		patchRun(&patch, small, 0, patchReply, 0);
+		CHECK(patch.kept == 0 && patch.dropped == 2);
+		CHECK(patch.wanted == strlen(PATCH_EXPECT));
+	}
+
+	printf("\nthe real block is big enough for the set this fork is aiming at\n");
+	/*
+	    The two constants that have to agree, pinned where a change to either is visible: the
+	    reader splits at most RA_DEFS_MAX_LINES definitions out of a block of
+	    CARDENGINEI_ARM9_RA_DEFS_MAX bytes, so the average definition length that fits is what
+	    decides whether a real set arrives whole. tools/ra_reader_test.c pins the same pair from
+	    the reader's side; this is the writer's.
+	*/
+	/* 128 is RA_DEFS_MAX_LINES, which lives in the cardengine and is pinned to that value there. */
+	CHECK((CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1)
+	      / 128 >= 200);
+	/* And a single definition can be as long as the scanner will carry. */
+	CHECK(RA_PATCH_MEMADDR_MAX
+	      < CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER);
+}
+
 int main(void) {
 	test_rom_hash();
 	test_url_encode();
 	test_config();
+	test_stream();
+	test_patch();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",
 	       failures, failures == 1 ? "" : "s");

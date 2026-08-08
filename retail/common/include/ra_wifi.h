@@ -78,7 +78,8 @@
 #define RA_WIFI_STAGE_ANSWERED    9  /* the API replied, and the reply looks like the API */
 #define RA_WIFI_STAGE_LOGGED_IN   10 /* r=login returned a token for the configured user */
 #define RA_WIFI_STAGE_IDENTIFIED  11 /* r=gameid turned the ROM's hash into a GameID */
-#define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_IDENTIFIED
+#define RA_WIFI_STAGE_PATCHED     12 /* r=patch put real definitions in the staging block */
+#define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_PATCHED
 
 /*
     What dsiwifi's narration said about how the chip arrived.
@@ -113,6 +114,9 @@ typedef struct raWifiVerdict {
 	u8   apiOk;
 	u8   loggedIn;         /* r=login returned a token */
 	u8   identified;       /* r=gameid returned a non-zero GameID */
+	u8   patched;          /* r=patch produced at least one definition */
+	u16  defsKept;         /* ...this many */
+	u32  defsBytes;        /* and this much of the staging block */
 	u32  gameId;           /* ...this one. Zero means the server does not know the dump */
 	u32  ip;               /* as DSiWifi_GetIP() returns it */
 	char chip[16];         /* "AR6014", as dsiwifi named it */
@@ -196,6 +200,100 @@ typedef struct raNetProgress {
 } raNetProgress;
 
 /*
+    Step 3d's reader. `r=login` and `r=gameid` fit in a 2 K buffer; `r=patch` returns a whole
+    achievement set, which for a big game is over 100 K -- more than the launcher's remaining
+    heap and more than three times the staging block it is destined for. So it is never held:
+    the bytes are handed to a sink as they arrive off the socket, and what survives the call is
+    the definitions, not the reply.
+
+    Two things sit between the socket and the sink, and both are why this is a struct rather
+    than a callback:
+
+      The HTTP headers have to be skipped, and their length is not known in advance -- so the
+      boundary can fall anywhere, including between the `\r\n` and the `\r\n`.
+
+      A 1.1 reply may be **chunked**, and a chunk header is a hex length written *into the byte
+      stream*. The small replies this project has already read came back unchunked, which
+      proves nothing about a 100 K one -- and a `1a2f\r\n` landing in the middle of a memaddr
+      string would corrupt exactly one definition, silently. So the framing is undone here,
+      where it can be tested on a host, rather than hoped about.
+*/
+typedef void (*raNetSink)(void* ctx, const char* data, int length);
+
+#define RA_NET_LINE_MAX 128
+
+#define RA_NET_STREAM_STATUS  0  /* the response line */
+#define RA_NET_STREAM_HEADER  1  /* header lines, until a blank one */
+#define RA_NET_STREAM_BODY    2  /* identity encoding: everything left is body */
+#define RA_NET_STREAM_SIZE    3  /* chunked: reading a hex chunk length */
+#define RA_NET_STREAM_DATA    4  /* chunked: inside a chunk */
+#define RA_NET_STREAM_CRLF    5  /* chunked: the CRLF that follows a chunk */
+#define RA_NET_STREAM_TRAILER 6  /* the last chunk was empty; nothing more is body */
+
+typedef struct raNetStream {
+	raNetSink sink;
+	void*     ctx;
+	u8        state;
+	u8        chunked;
+	u16       status;      /* the HTTP status line's code, 0 if it did not parse */
+	u32       chunkLeft;
+	u32       bodyBytes;   /* how much reached the sink -- the body's real length */
+	u16       lineLength;
+	char      line[RA_NET_LINE_MAX];
+} raNetStream;
+
+/*
+    Step 3d's scanner: pull every `"MemAddr":"..."` out of an `r=patch` reply, as it arrives,
+    straight into the staging block the cardengine reads.
+
+    Not a JSON parser, and the reason is not laziness -- it is that a parser for this reply
+    needs the reply, and the reply does not fit. What makes the shortcut sound rather than
+    lucky is that JSON escapes any quote inside a string as `\"`, so the eleven bytes
+    `"MemAddr":"` cannot occur *inside* a value: an achievement titled `"MemAddr":"` arrives as
+    `\"MemAddr\":\"` and does not match. The needle can therefore only be a key.
+
+    What it does not do is know which object the key was in. Today `MemAddr` appears only on
+    achievements -- leaderboards use `Mem`, rich presence `RichPresencePatch` -- so this takes
+    the achievement set and nothing else. If RA ever adds a `MemAddr` elsewhere, this would
+    take that too, and that is a limitation rather than a bug to find later.
+*/
+#define RA_PATCH_MEMADDR_MAX 2048
+
+#define RA_PATCH_SCAN   0
+#define RA_PATCH_VALUE  1
+#define RA_PATCH_FLAGS  2
+
+typedef struct raPatch {
+	char* block;          /* where the definitions go, one per line */
+	u32   blockMax;       /* bytes for text, terminator excluded */
+	u32   used;
+
+	u16   kept;           /* written to the block */
+	u16   unofficial;     /* dropped: Flags 5, not part of the published set */
+	u16   oddFlags;       /* kept, but Flags was neither 3 nor 5 */
+	u16   noFlags;        /* kept, and no Flags field ever arrived */
+	u16   tooLong;        /* dropped: longer than RA_PATCH_MEMADDR_MAX */
+	u16   cutShort;       /* dropped: the stream ended in the middle of the value */
+	u16   empty;          /* dropped: the value was "" */
+	u16   dropped;        /* dropped: the block was full */
+	u32   wanted;         /* bytes the kept and block-full definitions needed between them */
+	u32   longest;        /* longest memaddr seen, decoded */
+
+	/* Scanner state. Carried across chunks, which is the whole point of it being here. */
+	u8    state;
+	u8    memAt;
+	u8    flagsAt;
+	u8    escape;
+	u8    pendingOpen;    /* a value has started, so there is something to commit */
+	u8    pendingBad;     /* ...and it overran RA_PATCH_MEMADDR_MAX */
+	u8    flagsSeen;
+	u32   flags;
+	u32   pendingSeen;    /* decoded length, whether or not it was stored */
+	u32   pendingLength;  /* how much of it is in pending[] */
+	char  pending[RA_PATCH_MEMADDR_MAX];
+} raPatch;
+
+/*
     Step 3b. What the launcher had to allocate to compute the hash, reported so the margin
     against the heap is a measurement rather than a hope: rc_hash_nintendo_ds() takes
     max(0xA00, arm9Size, arm7Size) in one block, and the launcher has ~352 K of heap before
@@ -232,6 +330,21 @@ int         raNetHttpGet(const char* host, const char* path, char* out, int outS
 const char* raNetBody(const char* response);
 bool        raNetJsonString(const char* json, const char* key, char* out, size_t outSize);
 bool        raNetJsonNumber(const char* json, const char* key, u32* out);
+
+/*
+    Step 3d. The streaming half: reset, feed the socket's bytes in whatever sizes they arrive,
+    and the sink sees the body with the headers and any chunk framing already gone.
+    raNetStreamFeed() has no I/O in it and is checked on a host at every split point.
+*/
+void raNetStreamReset(raNetStream* s, raNetSink sink, void* ctx);
+void raNetStreamFeed(raNetStream* s, const char* data, int length);
+int  raNetHttpGetStream(const char* host, const char* path, raNetSink sink, void* ctx,
+                        raNetProgress* p);
+
+/* Step 3d. The scanner. Also pure, also fed in arbitrary pieces. */
+void raPatchReset(raPatch* p, char* block, u32 blockMax);
+void raPatchFeed(void* p, const char* data, int length);
+void raPatchFinish(raPatch* p);
 
 /* The ARM7 half: hand this CPU to dsiwifi. One call, and where it goes matters. */
 void raWifiInstall(void);
