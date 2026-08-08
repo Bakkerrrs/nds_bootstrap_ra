@@ -155,15 +155,11 @@ the test fails rather than this table going quietly stale.
 
 ### Still open, and one of them is now the critical path
 
-- **Open question #1, the network transport** — the critical path now, and down to a single
-  unknown: **is the DSi's Atheros WiFi chip reachable from nds-bootstrap's ARM7 while a
-  DS-mode game runs?** Everything around it got answered by reading and measuring rather
-  than asking. TLS is *not* required — plain HTTP against `dorequest.php` returns identical
-  JSON to HTTPS, and `rcheevos` has a first-class non-SSL host for exactly this. DS mode is
-  WEP-or-open in hardware. WPA in a DS title is an open, unassigned nds-bootstrap issue.
-  Every one of odelot's real-hardware adapters puts networking on a separate processor. And
-  being 3DS-only does not help: a 3DS running a DS game is in DS mode, so its own WiFi stack
-  is not running. See the open questions section.
+- **Open question #1, the network transport** — the critical path now, and answered as far
+  as reading and measuring can take it. The next move is **not** to build the client: it is
+  a plain DSi-mode homebrew that proves `dsiwifi` can associate and POST on this actual 3DS,
+  followed by checking whether the Atheros firmware is even loaded under our boot path. The
+  risk is concentrated there, and that is the cheapest thing on the list to test. See the open questions section.
 - **CI has never run on this repository.** The workflow exists and the build is verified
   to pass on the pinned toolchain, but Actions appears disabled for the fork, so the host
   test and the space-budget report added to it have never executed. Enabling it is a repo
@@ -501,21 +497,93 @@ is the fallback: the companion that owns the network can be a **3DS-mode homebre
 same console**, with WPA2 and TLS from the 3DS's own stack. No extra hardware, unlike every
 adapter above.
 
-### #1d — the one question left, and why it is now worth asking
+### #1d — the one question left, and what it actually costs
 
 Before this research, live server contact needed two things to go right: reachable WiFi
-*and* a way around TLS. TLS turned out not to be in the way. So exactly one unknown decides
-it:
+*and* a way around TLS. TLS turned out not to be in the way. So one unknown decides it:
 
 > **Is the DSi's Atheros WiFi chip reachable from nds-bootstrap's ARM7 while an NTR game
 > runs, and is there room and CPU time there for a stack?**
 
-If yes, achievements unlock live, on the console, over plain HTTP, with no companion app. If
-no, the legacy Mitsumi core means WEP-only, which in practice means the deferred 3DS-mode
-companion — which is a good design anyway, and the one the prior art validates.
+That question was put to people who know the hardware, and the answer came back "possible,
+but at the edge of realistic". Three obstacles, none of which is CPU or RAM. Recorded here
+with what this repository's own source could confirm or correct, marked as such, because a
+second-hand answer about our own code is worth checking against our own code.
 
-That question is worth putting to the DS-Homebrew Discord. It is the only one left that
-cannot be answered by reading or measuring.
+**The bus exists, and the same SCFG bit opens it.** The Atheros is not on the NTR WiFi ports
+at `0x0480xxxx`; it is on an SDIO controller at ARM7 ports `0x04004A00`–`0x04004BFF`. That
+block is part of the extended TWL I/O whose availability depends on exactly the SCFG bit
+nds-bootstrap keeps open to give us the DSi WRAM window. The same state that pays for this
+project's 256 KB is, on paper, the state that exposes the WiFi bus.
+
+**Corrected: the SD card and the WiFi are not on the same controller.** The answer we got
+warned that the WiFi SDIO shares its controller with SD/eMMC, and that nds-bootstrap is
+already using that subsystem to serve ROM reads — making it the most likely source of
+conflict in the whole project. Our own source says otherwise:
+`retail/cardenginei/arm7/source/patcher/my_sdmmc.h` puts the card at
+`SDMMC_BASE 0x04004800`, and the WiFi SDIO is at `0x04004A00`. Two instances of the same IP
+block, `0x200` apart, not one controller with two consumers. The contention is for ARM7 time
+and possibly DMA, not for the controller itself.
+
+**Corrected: the NDMA slots do not collide either.** `driveInitialize()` in the ARM7
+cardengine calls `sdmmc_set_ndma_slot(0)` — slot **0** — and has an `ndmaDisabled` path that
+calls `sdmmc_lock_ndma_slot()` to fall back. libnds' WiFi uses NDMA channel 3. Different
+slots.
+
+**Still standing, and the real structural cost: the ARM7 is not ours.** nds-bootstrap does
+not run beside the game's ARM7 as a clean second thread. Our code would hang off the
+interrupt hooks nds-bootstrap already inserted into the ARM7 that is running the game. A
+WiFi stack expects regular ARM7 attention, claims a hardware timer, and does its association
+and WMI/SDIO work asynchronously — and none of that can block, because blocking the ARM7
+means missing the game's frame pacing. A non-blocking state machine advancing a little per
+VBlank is feasible, but it is a rewrite of how `dsiwifi` waits today, not an integration.
+
+Worth noting what this costs against what we measured: rcheevos evaluates in under one
+scanline of 263. A WiFi stack in the same hook is a different order of work entirely, and
+the budget headroom that looks generous now is generous *for rcheevos*.
+
+**Still standing, and the highest risk: the WLAN firmware may not be loaded.** The
+AR6002/AR6013/AR6014 keeps no firmware in flash — the Xtensa core's code is uploaded to RAM
+on every boot, and the system menu is what does the uploading. Booting through
+ntrboot/nds-bootstrap does not necessarily pass through the TWL menu, so the chip's state on
+arrival is unknown: it may be up and need only WMI init, or it may be cold and need the full
+BMI bootloader plus a firmware upload out of eMMC. `dsiwifi` assumes a starting point. If our
+boot path leaves the chip somewhere else, the stack will not simply connect.
+
+**And the driver is least proven on exactly our hardware.** `dsiwifi` is confirmed on real
+DSi; the 3DS's DWM-W028 / AR6014 is far less tested, the library is not in a finished state,
+and it does not work with every router for reasons that are not fully understood. Some WMI
+commands are remapped on DSi/3DS relative to the stock Atheros reference.
+
+**One more thing this project did to itself.** `wramSize` feeds `isROMLoadableInRAM()`, and
+taking 256 KB of DSi WRAM lowered that budget — see *What reserving space actually costs*.
+Games that no longer fit in RAM read from SD during play, on the ARM7, which is precisely
+where a network stack would want to live. We made the contention slightly worse before we
+knew we would care about it.
+
+### #1e — the experiment ladder, in cost order
+
+The risk is concentrated in the firmware-state question, and that is also among the cheapest
+things to test. So the order is not "build the client":
+
+1. **Outside the game entirely.** A plain DSi-mode homebrew `.nds`, launched by ntrboot, no
+   cardengine involved: does `dsiwifi` associate and complete a plain HTTP POST on *this*
+   3DS's actual WiFi board? If that fails, the answer is in without touching nds-bootstrap
+   at all.
+2. **The chip's state under our boot path.** Coming in through nds-bootstrap, is `WLANFIRM`
+   already uploaded? A WMI init that succeeds versus one that needs BMI plus an upload
+   distinguishes them.
+3. **Only if both pass**, integrate behind the VBlank hook as a non-blocking state machine,
+   and watch for ARM7 contention with the SD path.
+
+If 1 or 2 goes badly, the deferred design is the sensible answer rather than the consolation
+one: a 3DS-mode companion has an ARM11, a mature network stack, WPA2, TLS, and no contest for
+the game's ARM7. Unlocks get written to a log on the SD card during play and synced
+afterwards. It loses "live" and gains weeks.
+
+**The honest read:** live unlocks are reachable, but probably three to four times the work
+that having rcheevos already running would suggest — and the risk sits almost entirely in
+the WLAN firmware state under our boot path, which is the cheapest thing on the list to test.
 
 ## Phase 1 — the watchlist and pointer chains
 
