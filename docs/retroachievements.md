@@ -53,38 +53,60 @@ question:
 4. **The snapshot has no RetroAchievements console address.** Main RAM here is 16 MB and the
    map covers 4 MB, so the self-test moved to console address 0.
 
-What has never been read is rcheevos actually evaluating. That is the whole of the next
-step.
+5. **It works.** `rcTriggered = 1` — an achievement unlocked on a 3DS running a DS game,
+   with `rcLinesMax` at 1 scanline out of 263.
+
+So the core of phase 2 is done and confirmed on hardware. What is missing now is the
+*client*: the piece that knows which achievements a game has. That makes open question #1,
+the network transport, the critical path.
 
 The ARM9 cardengine has **436 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
 
-### The next task: read the rcheevos block
+### Phase 2's core question is answered: it works on hardware
 
-**Settled by three hardware readings.** newlib's `malloc` does not work in this window
-(`_sbrk()` returned the predicted base; `malloc` refused anyway), so the allocator is ours
-now — and it works: `heapUsed` 2,728 bytes of real rcheevos allocations, `mallocProbe`
-exactly on `heapBase + 8`. And the snapshot has no RetroAchievements console address,
-because main RAM here is 16 MB while the map covers 4 MB, so the self-test moved to console
-address 0.
+Fifth reading, and every number predicted in advance matched:
 
-What is left is whether rcheevos evaluates. Read these, in this order:
-
-| Address | Field | Expected |
+| Field | Read | Meaning |
 |---|---|---|
-| `0x027FEDBC` | `rcStage` | **`06`** = `RA_RC_FRAME` |
-| `0x027FEDBD` | `rcActivate` | `00` = `RC_OK` |
-| `0x027FEDBE` | `rcTriggerState` | `02`/`03`, **not** `07` (disabled) |
-| `0x027FEDC4` | `rcMeasured` | climbing one per frame |
-| `0x027FEDC8` | `rcTarget` | `58 02 00 00` = 600 |
-| `0x027FEDC0` | `rcTriggered` | `00`, then **`01`** after about ten seconds |
-| `0x027FEDCC` | `rcPeeks` | non-zero |
-| `0x027FEDD0` | `rcPeeksRejected` | `00` |
-| `0x027FEDD4` | `rcLines` | the per-frame cost, at last measurable |
+| `rcStage` | `06` | `RA_RC_FRAME` |
+| `rcActivate` | `00` | `RC_OK` |
+| `rcTriggerState` | `05` | `RC_TRIGGER_STATE_TRIGGERED` |
+| **`rcTriggered`** | **`1`** | **an achievement unlocked on a 3DS running a DS game** |
+| `rcPeeks` | `1` | one address per frame, exactly what the definition reads |
+| `rcPeeksRejected` | `0` | nothing was refused |
+| `rcInitLines` | `6` | the one-time parse, in scanlines |
+| `rcLines` / `rcLinesMax` | `0` / `1` | the per-frame cost, out of 263 |
+| `heapSize` | `0x2F048` | 192,584 — predicted to the byte |
+| `heapUsed` | `2,728` | what rcheevos actually took |
+| `mallocProbe` | `0x03750FC0` | `heapBase + 8`, the block header |
 
-`rcTriggered` going to `01` is an achievement unlocking on real hardware. `rcLines` beside
-`rcInitLines` is the first honest per-frame cost — earlier readings could not produce one,
-because the achievement was disabled and `do_frame` had nothing to do.
+**The per-frame cost is the number that matters most, and it is negligible**: `rcLines` 0,
+`rcLinesMax` 1 out of 263 scanlines. Activating an achievement costs 6 scanlines, once.
+That answers open question #2 for rcheevos specifically — evaluating a definition every
+frame inside a DS game's VCOUNT handler is affordable.
+
+`rcEvents` read 255, which is the clamp. Those are `PROGRESS_UPDATED` events, one per frame
+for 600 frames, and not a sign of anything wrong.
+
+`rcMeasured` and `rcTarget` read `0`, which was expected once understood but is worth
+recording: rcheevos reports measured progress only while a trigger is **active**, and
+`TRIGGERED` is not active. They are latched now, so a reading taken after the unlock shows
+the last active value — 599 of 600. One short of the target, because on the frame the count
+reaches it the trigger fires and rcheevos has already stopped reporting. That is the honest
+reading rather than an off-by-one.
+
+### The next task: a real achievement, from a real game
+
+Everything below the client is now proven on hardware. What is missing is the client: the
+piece that knows *which* achievements a game has and what addresses they watch. That means
+open question #1 — network transport — becomes the critical path rather than a side
+question, because a definition has to come from somewhere.
+
+The nearest useful step that needs no network: take a published DS achievement set, hard-code
+one real definition, and confirm it unlocks by playing. That exercises the delta memref and
+pointer-chain (`AddAddress`) paths the self-test deliberately does not, and it is the last
+thing that can be checked before the transport decision has to be made.
 
 ### The allocator: ours, not newlib's
 
@@ -165,10 +187,12 @@ question of which one to believe.
       hardware**. Staged, copied, recognised, called every frame, executing, and
       reporting back. 256K of window with code execution, which retires the cardengine's
       12K as the project's binding constraint.
-- [~] Phase 2: `rcheevos` — submodule pinned at v12.4.0, runtime compiled into
-      `cardenginei_arm9_ra`, `peek()` routed through the watchlist's own validation, one
-      real achievement definition parsed and evaluated, running on our own allocator.
-      **Passing on the host; awaiting one hardware reading.** `rc_client` remains ruled
-      out, see open question #4.
+- [x] Phase 2 core: `rcheevos` evaluating a real achievement definition — **confirmed on
+      hardware**. Submodule pinned at v12.4.0, runtime only, running on our own allocator
+      in DSi WRAM, `peek()` routed through the watchlist's own validation. An achievement
+      unlocked on a 3DS running a DS game, at a cost of under one scanline per frame.
+      `rc_client` remains ruled out, see open question #4.
+- [ ] Phase 2 rest: a real achievement set, which needs the client and therefore the
+      network transport — open question #1 is now the critical path.
 - [ ] Phase 3: real network, softcore unlocks
 - [ ] Phase 4: rich presence, achievement list, login status

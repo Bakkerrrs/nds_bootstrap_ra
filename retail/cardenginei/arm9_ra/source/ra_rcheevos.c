@@ -293,8 +293,22 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	snapshot->rcStage         = rcStage;
 	snapshot->rcTriggerState  = trigger ? trigger->state : RC_TRIGGER_STATE_INACTIVE;
 	snapshot->rcTriggered     = triggeredCount;
-	snapshot->rcMeasured      = measured;
-	snapshot->rcTarget        = target;
+	/*
+	    Latched at the last active reading rather than copied blindly. rcheevos reports
+	    measured progress only while a trigger is active, so both of these go back to zero
+	    the moment the achievement fires -- which would leave a snapshot taken after the
+	    unlock showing a pair of zeros and no sign of how it got there -- which is what the
+	    first successful hardware reading did show.
+
+	    The latched value is the last one reported while the trigger was active, so it is
+	    one short of the target: on the frame the count reaches it, the trigger fires and
+	    rcheevos has already stopped reporting. 599 of 600 beside rcTriggered = 1 is the
+	    honest reading, not an off-by-one.
+	*/
+	if (target != 0) {
+		snapshot->rcMeasured = measured;
+		snapshot->rcTarget   = target;
+	}
 	snapshot->rcPeeks         = peeksThisFrame;
 	snapshot->rcPeeksRejected = peeksRejected;
 	snapshot->rcLines         = (u8)lines;

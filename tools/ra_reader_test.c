@@ -705,6 +705,14 @@ int main(void) {
 		}
 		CHECK(snapshot.rcTriggered == 1);
 		CHECK(snapshot.rcEvents > 0);
+		/*
+		    rcheevos stops reporting progress once a trigger fires, so these are latched.
+		    Without that a snapshot read after the unlock shows two zeros and no evidence
+		    of how it got there -- which is exactly what the first hardware reading showed.
+		*/
+		CHECK(snapshot.rcTarget == 600);
+		/* The last value reported while active, which is the frame before it fired. */
+		CHECK(snapshot.rcMeasured == snapshot.rcTarget - 1);
 		/* Only the refusal forced by hand above; nothing in normal operation was denied. */
 		CHECK(snapshot.rcPeeksRejected == 1);
 	}
