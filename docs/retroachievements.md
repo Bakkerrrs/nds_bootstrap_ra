@@ -365,17 +365,60 @@ than the built-in fallback, four watches installed, and the total still inside t
 eight-line split limit. Seconds instead of an evening, and it fails on the syntax error that
 motivated it.
 
-### The next task: a real achievement, from a real game
+### It fired. Three real definitions, on hardware, from published code notes
 
-Everything below the client is now proven on hardware. What is missing is the client: the
-piece that knows *which* achievements a game has and what addresses they watch. That means
-open question #1 — network transport — becomes the critical path rather than a side
-question, because a definition has to come from somewhere.
+Two readings settled it, and every field agreed.
 
-The nearest useful step that needs no network: take a published DS achievement set, hard-code
-one real definition, and confirm it unlocks by playing. That exercises the delta memref and
-pointer-chain (`AddAddress`) paths the self-test deliberately does not, and it is the last
-thing that can be checked before the transport decision has to be made.
+**Main menu.** `results[0]` resolved to `0x0208E43C` and read **`0x37`** — the exact byte the
+notes predict for the Main Menu, from a set of addresses this project had never touched
+before. That single value ended the question the previous three rounds could not answer.
+
+| Offset | Field | Menu | Bob-omb Battlefield |
+| --- | --- | --- | --- |
+| `+0x34` | Screen ID `0x8e43c` | **`0x37`** — Main Menu | `0x3A` |
+| `+0x40` | Map ID `0x9f2f8` | `0` — no map loaded | **`0x06`** — Bob-omb Battlefield |
+| `+0x4C` | Coins `0x9f358` | `0` | `5` |
+| `+0x58` | character pointer `0x9b450` | `0` — nobody loaded | **`0x02188A38`** |
+| `+0x70` | `rcTriggered` | `0` | **`3`** |
+| `+0x86` | `rcEvents` | `3` | `6` |
+
+All four watches reported `status = 2` (`RA_WATCH_OK`) in both readings, at the addresses
+they were asked for. `rcFromFile = 1`, `rcActivated = 3`, `rcBadLine = 0`, `rcActivate = 0`
+(`RC_OK`), `rcDefLength = 0x1291` — the file was read off the SD card, all three definitions
+parsed, none was rejected.
+
+**`rcTriggered = 3`: every definition fired, and each for its own reason.** Reaching File
+Select, entering Bob-omb Battlefield, and the guarded pointer chain finding Mario loaded.
+`rcEvents` going `3 → 6` is the corroboration: three triggers left WAITING at activation,
+and three later reached TRIGGERED — two events each, no spurious ones.
+
+The pointer chain is the part worth dwelling on. `rcPeeks = 4` with `rcPeeksRejected = 0` in
+both readings says `AddAddress` was walked every frame and never once produced an address
+outside the map. On the menu the pointer read `0` and the guard held the definition false;
+in the level it read `0x02188A38` and the chain resolved. That is exactly the null the
+24-bit mask hid one round earlier, now behaving correctly because the guard is in the
+definition where it belongs.
+
+Cost: `rcLinesMax = 2` scanlines of 263, unchanged from the self-test, and `heapUsed = 3128`
+bytes for the runtime plus three achievements.
+
+**What this proves and what it does not.** Published code notes → real memaddr syntax →
+rcheevos evaluating against a running retail DS game on a 3DS → triggers firing on the right
+frames. Delta memrefs and `AddAddress` both exercised against real game state, which the
+self-test deliberately could not do. What it is *not* is an unlock: nothing has been sent
+anywhere. The trigger fired locally, which is the entire client-side half of an achievement.
+
+### The next task: telling the server
+
+Everything below the client is now proven on hardware, and so is the evaluation itself. What
+is missing is the two ends around it: knowing *which* achievements a game has, and reporting
+that one fired. Both are network, so open question #1 — transport — is now the critical
+path with nothing left in front of it.
+
+The WiFi probe already reached RetroAchievements over plain HTTP from this exact 3DS
+(stage 6/6, WPA2-PSK). What remains is moving that from a standalone DSi-mode homebrew into
+nds-bootstrap's launcher, and deciding how a definition set travels from `r=patch` to the
+definitions block that this round proved works.
 
 ### How you know it worked
 
