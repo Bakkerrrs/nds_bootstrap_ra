@@ -56,11 +56,15 @@ Confirmed on hardware, in order of when each was settled:
    ARM7 rather than the libnds template. The bring-up is **identical to the standalone
    control, value for value**, and the SCFG the launcher inherits is the exact word the probe
    writes by hand. Log at `docs/logs/ra_wifi_launcher-3ds.log`.
+7. **The launcher reaching RetroAchievements** — step 3a, `reached stage 9 of 9`: lwip cut to
+   fit, DHCP, DNS, TCP and one HTTP GET to `dorequest.php`, with the API's own
+   `invalid_credentials` coming back. Log at `docs/logs/ra_wifi_launcher_http-3ds.log`.
 
-Everything from the game's RAM up to a fired trigger is done, and the network now comes up in
-the launcher too. **So open question #1 no longer has an unknown in front of it — only work.**
-What remains untested is context **B**, inside the game, where the ARM7 belongs to the game;
-the plan does not need that to work (see *#1g*).
+Everything from the game's RAM up to a fired trigger is done, and the launcher now reaches the
+RetroAchievements API. **So open question #1 is closed for context A, and nothing in front of
+the remaining work is a question about the platform** — the hash, `r=login` and `r=patch` are
+code. What remains untested is context **B**, inside the game, where the ARM7 belongs to the
+game; the plan does not need that to work (see *#1g*).
 
 The ARM9 cardengine has **412 bytes** left. It had 28 before the watchlist moved out, which
 is the constraint behind almost every decision in this document.
@@ -86,11 +90,13 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **one hardware run of step 3a**: build `RA_LAUNCHER_WIFI=1` again
-and send `/ra_wifi_launcher.log`. The ladder now runs to **9 rungs** — the same build carries
-lwip, DHCP, DNS and one HTTP GET to the RA API, so a run either reaches the server from the
-launcher or says which rung it stopped on. It compiles, links, and fits; nothing about it has
-touched a console yet. See *Step 3a — lwip in the launcher* below.
+The immediate next step is **3b, the RetroAchievements hash for a DS ROM**. Nothing computes
+it yet, so the launcher cannot ask the server *which* set to fetch — and it is the last part of
+step 3 that can be done without handling a password. After it, `r=login` (3c) and `r=patch`
+(3d) are transport that is already proven, plus JSON.
+
+No platform question is open in front of any of that. Step 3a reached the API from the launcher
+on hardware: see *Step 3a — lwip in the launcher* below.
 
 ### Phase 2's core question is answered: it works on hardware
 
@@ -647,7 +653,60 @@ The ladder therefore grows from 5 rungs to 9: `IP` (DHCP), `resolved`, `connecte
 `answered` on top of step 2's five. Everything at or below rung 5 is already proven on
 hardware, which is what makes a failure above it unambiguous — it is the new code.
 
-**Built and unrun.** It compiles, links and fits; no console has seen it.
+#### It reached the server. `stage 9 of 9`, from nds-bootstrap's launcher
+
+```
+IP               192.168.0.112
+resolved         retroachievements.org
+its address      104.26.2.251
+connected        port 80
+request sent
+994 bytes back
+the API answered over plain HTTP
+body: {"Success":false,"Status":401,"Code":"invalid_credentials", ...}
+```
+
+Full log at `docs/logs/ra_wifi_launcher_http-3ds.log`. **Open question #1 — the network
+transport — is closed for context A, end to end**: DHCP, DNS, TCP and HTTP from inside
+nds-bootstrap's launcher, to RetroAchievements' own API, with the API's own error code coming
+back rather than a captive portal's idea of one.
+
+`994 bytes back` is the same byte count the standalone probe got, which is the kind of
+corroboration worth noticing: same endpoint, same reply, different program. The address differs
+(`104.26.2.251` here, `104.26.3.251` there) because Cloudflare has more than one edge, and the
+lease differs (`.112` against `.111`) because it is a different lease. Everything about the
+chip is unchanged from the step-2 log — same `Mfg`, same cold arrival, same firmware version,
+same MAC, same BSSID — from a build that had since had an entire IP stack linked into the same
+ARM9.
+
+Which means **3b, 3c and 3d are work and not questions.** Nothing above this line needs another
+platform experiment: the hash, `r=login` and `r=patch` are code, and the block they feed is
+already proven to fire real achievements.
+
+#### The one alarming line in the log, which is not ours and is not a problem
+
+```
+netif is not up, old style port?WMI_CONNECT_EVENT len ca
+```
+
+Worth chasing rather than shrugging at, and it turns out to be an operator-precedence bug
+upstream. `wifi_host_tick()` reads:
+
+```c
+if (host_bLwipInitted && ath_netif.ip_addr.addr == 0xFFFFFFFF || ath_netif.ip_addr.addr == 0x0)
+```
+
+which groups as `(a && b) || c`. `ath_netif` is a zeroed static, so `addr == 0` is true **before
+lwip has been initialised at all** — and the guard that was meant to prevent exactly that,
+`host_bLwipInitted`, is on the wrong side of the `||`. The tick runs at 1 kHz from timer 3 with
+a once-per-second gate, so about a second after `wifi_host_init()` it calls `dhcp_start()` on a
+netif that was never added or brought up, and lwip's own `LWIP_ERROR` says so. That is exactly
+where the line lands in the log: just before association.
+
+Harmless: `dhcp_start()` validates and returns `ERR_ARG`, and once there is an address the
+condition goes false, so the prodding upstream *intended* still works. Left alone rather than
+patched, because it is in the submodule and it costs nothing — but pinned by the host test, so
+if a bump ever fixes the precedence this note can go rather than quietly becoming wrong.
 
 #### The pool was bigger than the region, so the pool was cut
 
@@ -866,21 +925,23 @@ the test fails rather than this table going quietly stale.
 
 ### Still open, and one of them is now the critical path
 
-- **Open question #1, the network transport** — steps one and two of the ladder have both
-  **passed on hardware**. `tools/wifiprobe/` reached RetroAchievements over plain HTTP, stage
-  6 of 6, so WPA2 works and TLS is not needed; and `RA_LAUNCHER_WIFI=1` brought the chip up to
-  a usable WPA2 link *inside nds-bootstrap's launcher*, stage 5 of 5. What is untested is
-  context **B**, inside the game, where the ARM7 belongs to the game — and #1g is the argument
-  for why the plan does not need it. See *#1f — the rest of the ladder*.
+- **Open question #1, the network transport** — steps one, two and 3a have all **passed on
+  hardware, and for context A it is closed.** `tools/wifiprobe/` reached RetroAchievements over
+  plain HTTP standalone, so WPA2 works and TLS is not needed; `RA_LAUNCHER_WIFI=1` brought the
+  chip up to a usable WPA2 link inside nds-bootstrap's launcher; and the same build then did
+  DHCP, DNS, TCP and an HTTP GET to `dorequest.php` and got the API's own reply. What is
+  untested is context **B**, inside the game, where the ARM7 belongs to the game — and #1g is
+  the argument for why the plan does not need it. See *#1f — the rest of the ladder*.
 - **The control has never been re-run in full.** Step 2's log is complete and matches every
   value the probe's *recorded excerpt* holds, but the probe's own log from a fresh run never
   came back, so the diff is one-sided. Cheap to close if it ever matters: run
   `tools/wifiprobe/` and keep `/wifiprobe.log` next to
   `docs/logs/ra_wifi_launcher-3ds.log`.
-- **Step 3a builds and has never run.** lwip now fits the launcher -- 833,410 bytes of static
-  `.bss` cut to 75,674 -- and the ladder runs to 9 rungs, through DHCP, DNS and one HTTP GET.
-  Whether any of it works is one flash away, and the heap it leaves behind, 191 KB, is the
-  number to watch when it does.
+- **The 191 KB of heap left after lwip has never been under pressure.** Step 3a's run did one
+  GET; `r=patch` returns a whole achievement set, and lwip's send path allocates from the same
+  `malloc` as libfat and the launcher's own strings. It is the number to watch in 3d.
+- **Nothing computes the RetroAchievements hash for a DS ROM** (3b), so the launcher cannot ask
+  which set to fetch. Today's definitions still come from a file the user edits.
 - **Reporting an unlock has never been attempted.** Evaluation is done; `r=awardachievement`
   is not written, and neither is `r=patch`. Both wait on the transport above.
 - **Game identification.** Nothing yet computes the RetroAchievements hash for a DS ROM, so
@@ -1034,7 +1095,8 @@ encoding) and it looked as though nothing was being read. Liveness is proved by
 | `retail/arm9/source/ra_wifi.c` | Step two on the ARM9: one IPC message, the log, the summary |
 | `retail/arm9/source/ra_wifi_verdict.c` | Reads how the chip arrived out of dsiwifi's log text. Host-tested |
 | `retail/arm7/source/ra_wifi7.c` | Step two on the ARM7: `installWifiFIFO()`, and where it goes |
-| `docs/logs/ra_wifi_launcher-3ds.log` | The step-two run that passed. Evidence, and the host test's fixture |
+| `docs/logs/ra_wifi_launcher-3ds.log` | The step-two run that passed. Evidence, and a host-test fixture |
+| `docs/logs/ra_wifi_launcher_http-3ds.log` | The step-3a run that reached the API. Same |
 | `retail/dsiwifi9/` | dsiwifi's ARM9 half rebuilt with lwip's pools cut to fit the launcher |
 | `retail/dsiwifi9/include/lwipopts_ndsbs.h` | The sizing, and why no `-I` path could have done it |
 | `libs/dsiwifi` | The driver, a submodule, shared with `tools/wifiprobe/` |
@@ -1473,7 +1535,7 @@ things to test. So the order is not "build the client":
 1. ~~**Outside the game entirely.**~~ **Done, and it passed — `tools/wifiprobe/`, stage 6
    of 6 on hardware.** See *The probe's answer* below.
 2. **The chip's bring-up under our boot path** — **passed, stage 5 of 5, and identical to the
-   control.**
+   control.** Superseded by 3a below, which goes further from the same build.
    `make RA_LAUNCHER_WIFI=1` links dsiwifi's ARM7 half into the launcher and brings the chip
    up to the WPA2 handshake before any game exists. The question turned out not to be
    `WLANFIRM` — the probe had already answered that, and dsiwifi relaunches the firmware
@@ -1485,9 +1547,9 @@ things to test. So the order is not "build the client":
    proven end to end on hardware, since three real definitions came through it and fired. Four
    parts, and only the first is a question about the platform rather than work:
 
-   - **3a, the IP stack — written, not yet run.** lwip in the launcher, cut to fit, reaching
-     the RA API over plain HTTP with no credentials. The ladder runs to 9 rungs. See
-     *Step 3a — lwip in the launcher*.
+   - **3a, the IP stack — done, `stage 9 of 9` on hardware.** lwip in the launcher, cut to
+     fit, reaching the RA API over plain HTTP with no credentials. See *Step 3a — lwip in the
+     launcher*.
    - **3b, game identification.** Nothing yet computes the RetroAchievements hash for a DS
      ROM, so the launcher cannot ask *which* set to fetch.
    - **3c, `r=login`.** A token, and the first time this project handles a real password —

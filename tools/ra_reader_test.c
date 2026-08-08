@@ -142,16 +142,17 @@ static u32 targetPtrPtr;
     bytes. The summary block in the file says `arrived cold` and `chip AR6014`, and the
     assertions below derive exactly that from the narration above it.
 */
-#define WIFI_LOG_PATH "docs/logs/ra_wifi_launcher-3ds.log"
+#define WIFI_LOG_PATH      "docs/logs/ra_wifi_launcher-3ds.log"
+#define WIFI_LOG_HTTP_PATH "docs/logs/ra_wifi_launcher_http-3ds.log"
 
 static char  wifiLogText[8192];
 static size_t wifiLogLength;
 
-static int wifi_load_log(void) {
-	FILE* f = fopen(WIFI_LOG_PATH, "rb");
+static int wifi_load_log(const char* path) {
+	FILE* f = fopen(path, "rb");
 
 	if (!f) {
-		printf("  cannot open %s -- run from the repository root\n", WIFI_LOG_PATH);
+		printf("  cannot open %s -- run from the repository root\n", path);
 		failures++;
 		return 0;
 	}
@@ -201,7 +202,7 @@ static void wifi_feed_lines(raWifiVerdict* v, const char* const* lines) {
 static void test_wifi_verdict(void) {
 	raWifiVerdict v;
 
-	if (!wifi_load_log()) {
+	if (!wifi_load_log(WIFI_LOG_PATH)) {
 		return;
 	}
 
@@ -335,6 +336,45 @@ static void test_wifi_verdict(void) {
 	v.apiOk = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_ANSWERED);
 	CHECK(RA_WIFI_STAGE_ANSWERED == RA_WIFI_STAGE_MAX);
+
+	/*
+	    The step-3 run, which reached stage 9. Its narration carries the same five rungs and
+	    nothing more -- the four above them are lwip's, and lwip does not narrate -- so this
+	    is where the split between text and return values gets pinned against a real run
+	    rather than against an argument about the design.
+
+	    It also re-checks the bring-up: the same chip, the same cold arrival, from a build
+	    that had linked an entire IP stack into the same ARM9 since the last log was taken.
+	*/
+	printf("\nthe step-3 log: the same five rungs in the text, nine in the summary\n");
+	if (wifi_load_log(WIFI_LOG_HTTP_PATH)) {
+		wifi_feed_chunked(&v, 59);
+		CHECK(strcmp(v.chip, "AR6014") == 0);
+		CHECK(v.coldStart == 1);
+		CHECK(v.wmiReady == 1);
+		CHECK(v.associated == 1);
+		CHECK(v.linkReady == 1);
+		CHECK(v.mboxAllocFailed == 0);
+		/* Five from the text, and the text cannot know about the rest. */
+		CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_READY);
+		CHECK(v.gotIp == 0);
+		CHECK(v.dnsOk == 0);
+		/* What the console itself concluded once lwip had answered. */
+		CHECK(strstr(wifiLogText, "reached stage 9 of 9") != NULL);
+		CHECK(strstr(wifiLogText, "DNS / TCP / API  ok / ok / ok") != NULL);
+		CHECK(strstr(wifiLogText, "invalid_credentials") != NULL);
+		/*
+		    dsiwifi's wifi_host_tick() reads
+		        if (host_bLwipInitted && addr == 0xFFFFFFFF || addr == 0x0)
+		    which groups as (a && b) || c -- so before lwip is initialised at all, the
+		    zeroed netif's addr == 0 fires it on its own and dhcp_start() complains. Pinned
+		    here because the line looks alarming in an otherwise clean log and is not:
+		    dhcp_start() validates and returns, and the condition goes false once there is
+		    an address. If a submodule bump fixes the precedence, this fails and the note in
+		    docs/retroachievements.md can go.
+		*/
+		CHECK(strstr(wifiLogText, "netif is not up, old style port?") != NULL);
+	}
 
 	/*
 	    A chip name it cannot parse must leave the field empty rather than half-filled: the
