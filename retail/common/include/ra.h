@@ -107,8 +107,24 @@ typedef struct raWatch {
 	u8  depth;                  /* +0x14  indirections to walk; 0 = direct */
 	u8  size;                   /* +0x15  bytes to read: 1, 2 or 4 */
 	u8  status;                 /* +0x16  RA_WATCH_* */
-	u8  reserved;               /* +0x17 */
+	u8  flags;                  /* +0x17  RA_WATCH_FLAG_* */
 } raWatch;                      /*        0x18 bytes */
+
+/*
+    Treat each pointer read mid-chain as a 24-bit console pointer rather than a DS address:
+    mask to 24 bits and add main RAM's base.
+
+    This is not a convenience, it is what RetroAchievements means. Its DS memory map is
+    console-relative, so a pointer stored by the game as 0x02xxxxxx is documented and used
+    as its low 24 bits -- which is why the published code notes for a DS game say
+    "[24-Bit Pointer]" rather than "pointer".
+
+    Reading such a word as a 32-bit DS address is what the walker did first, and hardware
+    said no: three direct watches resolved and the one chain came back BAD_TARGET, while
+    rcheevos -- which does mask -- reported no refusal for the same location. The two
+    disagreeing is what identified the model as wrong rather than the address.
+*/
+#define RA_WATCH_FLAG_PTR24 0x01
 
 /*
     What the snapshot carries per watch, as opposed to what the watchlist keeps.

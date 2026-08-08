@@ -128,7 +128,7 @@ u32 ra_read(u32 addr, u8 size) {
     not here -- because a chain that resolves now may not resolve next frame, and the
     walker has to survive that either way.
 */
-int ra_watch_add(u32 base, u8 size, u8 depth, const u32* offsets) {
+int ra_watch_add_flags(u32 base, u8 size, u8 depth, const u32* offsets, u8 flags) {
 	raWatch* w;
 	u8 d;
 
@@ -149,12 +149,16 @@ int ra_watch_add(u32 base, u8 size, u8 depth, const u32* offsets) {
 	for (d = 0; d < depth; d++) {
 		w->offsets[d] = offsets[d];
 	}
-	w->address  = 0;
-	w->value    = 0;
-	w->reserved = 0;
-	w->status   = RA_WATCH_PENDING;
+	w->address = 0;
+	w->value   = 0;
+	w->flags   = flags;
+	w->status  = RA_WATCH_PENDING;
 
 	return watchCount++;
+}
+
+int ra_watch_add(u32 base, u8 size, u8 depth, const u32* offsets) {
+	return ra_watch_add_flags(base, size, depth, offsets, 0);
 }
 
 void ra_watch_clear(void) {
@@ -184,7 +188,17 @@ static void ra_watch_eval(raWatch* w) {
 			w->status = d ? RA_WATCH_BAD_POINTER : RA_WATCH_BAD_BASE;
 			return;
 		}
-		addr = *(const vu32*)addr + w->offsets[d];
+		/*
+		    A pointer the game stores is a DS address; a pointer RetroAchievements documents
+		    is its low 24 bits. Which one this is has to be told to the walker, because both
+		    are plausible words and picking wrong yields either an unresolvable chain or --
+		    worse -- a resolvable one pointing somewhere meaningless.
+		*/
+		if (w->flags & RA_WATCH_FLAG_PTR24) {
+			addr = ((*(const vu32*)addr) & 0x00FFFFFF) + RA_MAIN_RAM_START + w->offsets[d];
+		} else {
+			addr = *(const vu32*)addr + w->offsets[d];
+		}
 	}
 
 	/*

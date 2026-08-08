@@ -529,43 +529,6 @@ int main(void) {
 			CHECK(ra_split_definitions(text, len, lines) == RA_DEFS_MAX_LINES);
 		}
 
-		/*
-		    Watch lines, which are how the next hardware session measures memory rather than
-		    guessing at another definition.
-		*/
-		{
-			const char* p;
-			u32         v;
-
-			p = "1593d0"; CHECK(ra_parse_hex(&p, &v) && v == 0x1593d0);
-			p = "0x9c";   CHECK(ra_parse_hex(&p, &v) && v == 0x9c);
-			p = ":4";     CHECK(!ra_parse_hex(&p, &v));   /* empty field is not a zero */
-
-			ra_watch_clear();
-			CHECK(ra_add_watch_line("1593d0:4"));
-			CHECK(watchCount == 1);
-			CHECK(watches[0].base == RA_DS_SYSTEM_RAM_BASE + 0x1593d0);
-			CHECK(watches[0].size == 4 && watches[0].depth == 0);
-
-			CHECK(ra_add_watch_line("159164:4:9c"));
-			CHECK(watches[1].base == RA_DS_SYSTEM_RAM_BASE + 0x159164);
-			CHECK(watches[1].depth == 1 && watches[1].offsets[0] == 0x9c);
-
-			/* Malformed and out-of-range both refused rather than half-installed. */
-			CHECK(!ra_add_watch_line("1593d0"));          /* no size */
-			CHECK(!ra_add_watch_line("400000:4"));        /* past DS system RAM */
-			CHECK(!ra_add_watch_line("1593d0:3"));        /* size not 1, 2 or 4 */
-			CHECK(watchCount == 2);                        /* nothing was added */
-
-			/*
-			    Put the self-test watches back. Later tests read results[] and this block
-			    borrowed the list to check the parser -- leaving it emptied would fail them
-			    for a reason that has nothing to do with what they test.
-			*/
-			ra_watch_clear();
-			ra_install_defaults(&snapshot);
-		}
-
 		/* Back to no file, so the tests after this see the built-in. */
 		*(u32*)block = 0;
 	}
@@ -854,6 +817,85 @@ int main(void) {
 		/* Only the refusal forced by hand above; nothing in normal operation was denied. */
 		CHECK(snapshot.rcPeeksRejected == 1);
 	}
+
+	/*
+	    Watch lines and 24-bit console pointers, which is how the next hardware session
+	    measures memory rather than guessing at another definition. Last, because it takes
+	    the watchlist over and ticks -- every assertion above reads results[].
+	*/
+	printf("\nwatch lines parse, and 24-bit console pointers resolve\n");
+	{
+		const char* p;
+		u32         v;
+
+		p = "1593d0"; CHECK(ra_parse_hex(&p, &v) && v == 0x1593d0);
+		p = "0x9c";   CHECK(ra_parse_hex(&p, &v) && v == 0x9c);
+		p = ":4";     CHECK(!ra_parse_hex(&p, &v));   /* empty field is not a zero */
+
+		ra_watch_clear();
+		CHECK(ra_add_watch_line("1593d0:4", 0));
+		CHECK(watchCount == 1);
+		CHECK(watches[0].base == RA_DS_SYSTEM_RAM_BASE + 0x1593d0);
+		CHECK(watches[0].size == 4 && watches[0].depth == 0);
+
+		CHECK(ra_add_watch_line("159164:4:9c", 0));
+		CHECK(watches[1].base == RA_DS_SYSTEM_RAM_BASE + 0x159164);
+		CHECK(watches[1].depth == 1 && watches[1].offsets[0] == 0x9c);
+
+		/* Malformed and out-of-range both refused rather than half-installed. */
+		CHECK(!ra_add_watch_line("1593d0", 0));          /* no size */
+		CHECK(!ra_add_watch_line("400000:4", 0));        /* past DS system RAM */
+		CHECK(!ra_add_watch_line("1593d0:3", 0));        /* size not 1, 2 or 4 */
+		CHECK(watchCount == 2);                        /* nothing was added */
+
+		/*
+		    A 24-bit console pointer, which is what RetroAchievements' DS notes mean and
+		    what hardware showed the walker was getting wrong. The game stores a word
+		    whose low 24 bits are the console address; read as a DS address it resolves
+		    nowhere, which is exactly the BAD_TARGET the first run reported.
+		*/
+		ra_watch_clear();
+		{
+			static u32 fakePointerCell;
+			static u32 fakeStruct[64];
+			const u32  consoleBase = (u32)&fakePointerCell - RA_DS_SYSTEM_RAM_BASE;
+			const u32  structConsole = (u32)&fakeStruct[0] - RA_DS_SYSTEM_RAM_BASE;
+
+			fakeStruct[4] = 0xFEEDFACE;   /* at +0x10 */
+
+			/* Top byte deliberately not 0x02, the way the game stores it. */
+			fakePointerCell = 0x7F000000 | structConsole;
+
+			CHECK(ra_add_watch_line("1593d0:4", RA_WATCH_FLAG_PTR24));   /* syntax ok */
+			ra_watch_clear();
+
+			{
+				char line[32];
+				sprintf(line, "%x:4:10", consoleBase);
+				CHECK(ra_add_watch_line(line, RA_WATCH_FLAG_PTR24));
+				ra_wram_tick(&snapshot);
+				/* Masked, so it resolves into the struct and reads the value there. */
+				CHECK(snapshot.results[0].status == RA_WATCH_OK);
+				CHECK(snapshot.results[0].address == (u32)&fakeStruct[4]);
+				CHECK(snapshot.results[0].value == 0xFEEDFACE);
+
+				/* Without the flag, the same word is not a usable DS address. */
+				ra_watch_clear();
+				CHECK(ra_add_watch_line(line, 0));
+				ra_wram_tick(&snapshot);
+				CHECK(snapshot.results[0].status == RA_WATCH_BAD_TARGET);
+			}
+		}
+
+		/*
+		    Put the self-test watches back. Later tests read results[] and this block
+		    borrowed the list to check the parser -- leaving it emptied would fail them
+		    for a reason that has nothing to do with what they test.
+		*/
+		ra_watch_clear();
+		ra_install_defaults(&snapshot);
+	}
+
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",
 	       failures, failures == 1 ? "" : "s");

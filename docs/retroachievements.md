@@ -205,6 +205,43 @@ between measuring and betting.
 Any watch line replaces the built-in self-test watches, so the first four land in
 `results[]` where a hex viewer can read them.
 
+### The watches found it: RetroAchievements' DS pointers are 24-bit
+
+Measuring instead of guessing paid immediately. Three of the four watches resolved and one
+did not, and the pattern is the answer:
+
+| | Resolved | Value | Status |
+| --- | --- | --- | --- |
+| Current Stage `0x1593d0` | `0x021593D0` | `0` — Stage 1 | OK |
+| game state via `0x159164 → +0x9c` | — | — | **BAD_TARGET** |
+| Stages Completed `0x1593c4` | `0x021593C4` | `0` | OK |
+| Red→Red rounds `0x159992` | `0x02159992` | `0` | OK |
+
+Three direct reads landing on plausible addresses with plausible values settles the first
+question: **the code notes do describe this ROM**. The addresses are right.
+
+The chain failing while `rcPeeksRejected` stayed `0` is what settles the second. Our walker
+read the word at `0x02159164` as a 32-bit DS address, added `0x9c`, and got something
+outside main RAM. rcheevos read the *same location* as 24 bits, added `0x9c`, and got a
+console address it was happy with. Two readers disagreeing about one word is what
+identified the model as wrong rather than the address.
+
+**RetroAchievements' DS pointers are 24-bit console pointers, and the walker was treating
+them as DS addresses.** That is not a quirk of this game; it is what the map means. The
+notes say "[24-Bit Pointer]" precisely because the low 24 bits *are* the console address —
+a 32-bit DS pointer of `0x02xxxxxx` would be past the 4 MB the map covers, so the top byte
+is dropped by definition. Whatever this game keeps in that top byte, it is not part of the
+pointer.
+
+So the walker learned it: `RA_WATCH_FLAG_PTR24` masks each mid-chain pointer to 24 bits and
+adds main RAM's base, and the file selects it with `W24:` instead of `W:`. rcheevos already
+did this, which is why its side never complained — the fix brings our walker in line with
+the library rather than working around it.
+
+The host test now reproduces the hardware failure exactly: the same watch resolves with the
+flag and returns `BAD_TARGET` without it, against a cell whose top byte is deliberately not
+`0x02`. A regression test derived from an observation rather than from a guess.
+
 ### The next task: a real achievement, from a real game
 
 Everything below the client is now proven on hardware. What is missing is the client: the

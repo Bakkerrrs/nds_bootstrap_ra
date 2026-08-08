@@ -30,7 +30,11 @@
 # and every address below is suspect too.
 W:1593d0:4
 
-# results[1] -- the game state, through the pointer the notes describe:
+# results[1] -- the game state, through the pointer the notes describe. Note `W24:`, not
+# `W:`: the previous run proved the word stored there is not a DS address. Three direct
+# watches resolved and this chain came back BAD_TARGET, while rcheevos -- which masks to
+# 24 bits -- refused nothing at the same location. The two disagreeing is what identified
+# the walker's model as wrong rather than the address.
 #   0x159164  [24-Bit Pointer] Game state pointer
 #     +0x9c   [32-Bit] Game state, 0x02 = Fever
 #
@@ -38,19 +42,21 @@ W:1593d0:4
 # so a plausible 0x02xxxxxx there means the pointer is real, and `value` shows the state.
 # Watch it while entering Fever Time: if it never becomes 2, the offset or the meaning is
 # wrong. If `status` is 4 (BAD_POINTER) the word at 0x159164 is not a usable pointer, which
-# would mean the notes' "24-bit" needs handling the walker does not do.
-W:159164:4:9c
+# would mean even the masked pointer is not usable and the address itself is wrong.
+W24:159164:4:9c
 
 # results[2] -- Number of Stages Completed, [8-Bit] 0x00-0x05.
 # A slow, small, easily verified counter: a second opinion on whether these addresses
 # describe this ROM at all.
 W:1593c4:1
 
-# results[3] -- Red -> Red rounds completed this run, [16-Bit].
-# The address definition 2 was written against, so its value explains that result too.
-W:159992:2
 
 
-# The Fever definition, kept so it keeps being evaluated alongside the watch that explains
-# it. rcTriggered stays 0 while the watch shows why.
+# results[3] is joined by the raw word behind the pointer, so its actual value is visible
+# rather than inferred from a status code. If `value` here is 0x0215xxxx the mask changes
+# nothing and the offset is the problem; anything else and the mask was the problem.
+W:159164:4
+
+# The Fever definition, kept so it keeps being evaluated alongside the watches that explain
+# it. rcheevos already masks, so this is unchanged.
 I:0xW159164_0xX00009c=2_I:0xW159164_d0xX00009c!=2

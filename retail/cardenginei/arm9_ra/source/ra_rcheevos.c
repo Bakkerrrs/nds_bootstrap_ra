@@ -60,6 +60,7 @@
 extern bool ra_readable(u32 addr, u32 len);
 extern u32  ra_read(u32 addr, u8 size);
 extern int  ra_watch_add(u32 base, u8 size, u8 depth, const u32* offsets);
+extern int  ra_watch_add_flags(u32 base, u8 size, u8 depth, const u32* offsets, u8 flags);
 extern void ra_watch_clear(void);
 
 /* VCOUNT, read directly -- the game owns every hardware timer. See raSnapshot.linesLast. */
@@ -313,7 +314,7 @@ static bool ra_parse_hex(const char** p, u32* out) {
     Any watch line replaces the built-in self-test watches, so the first four land in the
     snapshot's results[] where they can be read.
 */
-static bool ra_add_watch_line(const char* line) {
+static bool ra_add_watch_line(const char* line, u8 flags) {
 	u32 base;
 	u32 size;
 	u32 offsets[RA_CHAIN_MAX];
@@ -343,7 +344,7 @@ static bool ra_add_watch_line(const char* line) {
 	if (base == 0) {
 		return false;
 	}
-	return ra_watch_add(base, (u8)size, depth, offsets) >= 0;
+	return ra_watch_add_flags(base, (u8)size, depth, offsets, flags) >= 0;
 }
 
 static const char* ra_definition(raSnapshot* snapshot) {
@@ -434,14 +435,26 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 		{
 			bool anyWatch = false;
 			for (i = 0; i < count; i++) {
+				const char* rest = 0;
+				u8          flags = 0;
+
+				/* `W:` is a plain chain; `W24:` masks each pointer to 24 bits. */
 				if (lines[i][0] == 'W' && lines[i][1] == ':') {
-					if (!anyWatch) {
-						ra_watch_clear();
-						anyWatch = true;
-					}
-					if (!ra_add_watch_line(lines[i] + 2)) {
-						snapshot->rcBadLine = i + 1;
-					}
+					rest = lines[i] + 2;
+				} else if (lines[i][0] == 'W' && lines[i][1] == '2'
+				        && lines[i][2] == '4' && lines[i][3] == ':') {
+					rest  = lines[i] + 4;
+					flags = RA_WATCH_FLAG_PTR24;
+				}
+				if (!rest) {
+					continue;
+				}
+				if (!anyWatch) {
+					ra_watch_clear();
+					anyWatch = true;
+				}
+				if (!ra_add_watch_line(rest, flags)) {
+					snapshot->rcBadLine = i + 1;
 				}
 			}
 		}
@@ -450,7 +463,7 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 		snapshot->rcActivated = 0;
 		for (i = 0; i < count; i++) {
 			int one;
-			if (lines[i][0] == 'W' && lines[i][1] == ':') {
+			if (lines[i][0] == 'W' && (lines[i][1] == ':' || lines[i][1] == '2')) {
 				continue;   /* a watch, handled above */
 			}
 			one = rc_runtime_activate_achievement(
