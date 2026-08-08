@@ -41,6 +41,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
+#include <malloc.h>
 
 /*
     Step 3 links dsiwifi's ARM9 half after all -- see retail/dsiwifi9/, which rebuilds it with
@@ -89,6 +90,11 @@
 #define RA_WIFI_WAIT_LINK   40
 #define RA_WIFI_WAIT_DHCP   30
 #define RA_WIFI_WAIT_TAIL   8   /* after the summary: dsiwifi keeps narrating */
+/*
+    Per-recv(), not for the whole reply. Long enough that a slow server is not mistaken for a
+    lost FIN, short enough that the run still ends: the reply itself arrives in one packet.
+*/
+#define RA_WIFI_RECV_TIMEOUT 5
 
 /*
     dsiwifi's narration is captured into RAM by the interrupt and written out by the main
@@ -259,6 +265,22 @@ static bool raWifiWaitArm7(void) {
 	return false;
 }
 
+/*
+    How much heap is left, at the moments it changes.
+
+    Reported because it is the number step 3d will run into: `r=patch` returns a whole
+    achievement set, lwip's send path allocates from the same malloc as libfat and the
+    launcher's own strings, and the static side of the region is already 569,136 of 753,664.
+    Better to have the figure from a run that worked than to discover it from one that did not.
+*/
+static void raWifiReportHeap(const char* when) {
+	struct mallinfo mi = mallinfo();
+
+	raWifiLog("heap %-11s %lu free of %lu, largest %lu\n", when,
+	          (unsigned long)mi.fordblks, (unsigned long)mi.arena,
+	          (unsigned long)mi.usmblks);
+}
+
 /* Drain once per frame, so a hang leaves everything up to it already on the card. */
 static void raWifiIdle(void) {
 	swiWaitForVBlank();
@@ -375,10 +397,46 @@ static void raWifiHttpGet(void) {
 	}
 	raWifiLog("request sent\n");
 
+	/*
+	    Bounded, because the unbounded version hung the console -- twice -- on the line after
+	    "request sent", and it hung there for a dull reason.
+
+	    The reply is 994 bytes, so the first recv() returns all of it and the loop asks again.
+	    That second call blocks until the server's FIN arrives, and `Connection: close` is a
+	    request rather than a promise: if the FIN is late or lost, a blocking recv() with no
+	    timeout waits for it forever. An earlier build got its FIN promptly and reached stage 9;
+	    the next one did not, and the difference was luck rather than code.
+
+	    This document's own rule is that a probe which hangs teaches nothing, and this was the
+	    one place lwip can block. SO_RCVTIMEO puts a floor under it -- dsiwifi enables
+	    LWIP_SO_RCVTIMEO, so it is honoured -- and the loop reports what each call returned, so
+	    a future stall is a reading rather than a photograph of a frozen screen.
+	*/
+	{
+		struct timeval tv;
+
+		tv.tv_sec  = RA_WIFI_RECV_TIMEOUT;
+		tv.tv_usec = 0;
+		if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+			raWifiLog("\x1b[33mSO_RCVTIMEO refused; recv may block\x1b[37m\n");
+		}
+	}
+
 	while (total < (int)sizeof(response) - 1) {
 		const int got = recv(sock, response + total, sizeof(response) - 1 - total, 0);
 
-		if (got <= 0) {
+		if (got == 0) {
+			raWifiLog("peer closed after %d\n", total);
+			break;
+		}
+		if (got < 0) {
+			/*
+			    A timeout here is not a failure if bytes already arrived: it means the reply is
+			    in and only the close is missing, which is what the API's own answer being
+			    present settles. Reported either way, because "994 then timed out" and "timed
+			    out with nothing" are different worlds.
+			*/
+			raWifiLog("recv stopped after %d\n", total);
 			break;
 		}
 		total += got;
@@ -448,6 +506,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 		          (unsigned long)hashInfo.arm9Size, (unsigned long)hashInfo.arm7Size);
 		raWifiLog("would malloc     %lu bytes\n", (unsigned long)hashInfo.bufferBytes);
 	}
+	raWifiReportHeap("after hash");
 
 	raWifiLog("\n-- the ARM7 half --\n");
 
@@ -487,8 +546,11 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 		goto done;
 	}
 
+	raWifiReportHeap("with lwip up");
+
 	raWifiLog("\n-- stage 7-9: reach the API over plain HTTP --\n");
 	raWifiHttpGet();
+	raWifiReportHeap("after HTTP");
 
 done:
 	/*

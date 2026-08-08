@@ -684,6 +684,33 @@ Which means **3b, 3c and 3d are work and not questions.** Nothing above this lin
 platform experiment: the hash, `r=login` and `r=patch` are code, and the block they feed is
 already proven to fire real achievements.
 
+#### The hang after `request sent`, which was the one place a probe could still block
+
+The build that added 3b froze twice on the line after `request sent`, and the cause was not 3b.
+It was an unbounded `recv()`.
+
+The reply is 994 bytes, so the first `recv()` returns all of it and the loop asks again. That
+second call waits for the server's FIN — and `Connection: close` is a request, not a promise. If
+the FIN is late or lost, a blocking `recv()` with no timeout waits for it forever. The earlier
+run reached stage 9 because its FIN arrived promptly; the next one did not. **The difference was
+luck, not code**, which means the earlier `stage 9 of 9` was a real result obtained by a probe
+that could have hung at any time.
+
+Every other wait in this file is bounded — `raWifiWaitStage()`, `raWifiWaitIp()`,
+`raWifiWaitArm7()` all count frames and give up — because *a probe that hangs teaches nothing*
+is the rule this document keeps restating. The socket read was the one place that rule was not
+applied, and it is the one place lwip can block indefinitely.
+
+Fixed with `SO_RCVTIMEO`, which dsiwifi's lwipopts enables, plus a report of what each call
+returned. A timeout with bytes already in hand is not a failure — it means the reply arrived and
+only the close is missing, which the API's own error code being present settles — so the log now
+distinguishes `peer closed after 994` from `recv stopped after 994` from `recv stopped after 0`.
+Three different worlds that all used to look like a frozen screen.
+
+The same build now also reports free heap after the hash, once lwip is up, and after the HTTP
+exchange. That is the number step 3d will run into, and it is worth having from a run that
+worked rather than from one that did not.
+
 #### The one alarming line in the log, which is not ours and is not a problem
 
 ```
