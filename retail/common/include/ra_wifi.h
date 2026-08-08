@@ -59,6 +59,24 @@
 #define RA_WIFI_LOG_PATH_FAT  "fat:/ra_wifi_launcher.log"
 
 /*
+    And where stage 12 writes the definitions it staged, verbatim, one per line.
+
+    The first hardware run of that stage is why this exists. It reported 51 definitions in 6,791
+    bytes and printed the first one as `1=1.300.` -- eight characters, which is *syntactically* a
+    valid memaddr ("always true, 300 hits") and is not what a published achievement looks like.
+    Six summary numbers cannot tell "the scanner works and that set has an odd first entry" apart
+    from "the scanner is producing fragments", and no amount of arguing from the code settles it
+    either.
+
+    So the definitions become the artifact, the way dsiwifi's verbatim log is the artifact for the
+    chip: this file can be read against the set's page on retroachievements.org, definition by
+    definition. Same file format the launcher already *reads* from ra_achievements.txt, which
+    makes it directly re-usable -- copy it there and the game boots with the server's own set.
+*/
+#define RA_DEFS_DUMP_PATH      "sd:/ra_definitions.txt"
+#define RA_DEFS_DUMP_PATH_FAT  "fat:/ra_definitions.txt"
+
+/*
     The ladder, and it only moves forward. Five rungs against the probe's six: rungs 1-3
     are the chip coming up, 4-5 are the link becoming usable, and the probe's stages 3-6
     (DNS, TCP, HTTP) are step three of the plan rather than this one.
@@ -257,7 +275,25 @@ typedef struct raNetStream {
     the achievement set and nothing else. If RA ever adds a `MemAddr` elsewhere, this would
     take that too, and that is a limitation rather than a bug to find later.
 */
-#define RA_PATCH_MEMADDR_MAX 2048
+/*
+    8192, and the number is a hardware measurement rather than a guess.
+
+    It was 2048, chosen because RA memaddr strings "run from tens to a few hundred characters".
+    That is true of most of them and false where it matters: the first run of stage 12 against
+    GameID 14856 reported `longest memaddr 6264 of 2047` and **dropped five definitions** for
+    exceeding the buffer. A completionist achievement is one condition per collectable -- 150
+    stars is 150 conditions -- so a few kilobytes is normal for exactly the achievements a player
+    cares most about.
+
+    Raising it is cheap in the launcher (6 KB of .bss against 69,632 of measured headroom) and it
+    is the only honest option: the alternative was already rejected in ra_patch.c, because a
+    truncated memaddr is not a shorter achievement but a different one.
+
+    8192 leaves 30% over the largest definition this project has seen. `longest` is reported on
+    every run precisely so that margin stays a measurement -- another game will have another
+    largest, and the log will say so instead of five achievements quietly not existing.
+*/
+#define RA_PATCH_MEMADDR_MAX 8192
 
 #define RA_PATCH_SCAN   0
 #define RA_PATCH_VALUE  1
@@ -277,7 +313,8 @@ typedef struct raPatch {
 	u16   empty;          /* dropped: the value was "" */
 	u16   dropped;        /* dropped: the block was full */
 	u32   wanted;         /* bytes the kept and block-full definitions needed between them */
-	u32   longest;        /* longest memaddr seen, decoded */
+	u32   longest;        /* longest memaddr seen, decoded -- including ones too long to keep */
+	u32   shortest;       /* shortest one that belonged in the block: a fragment as a number */
 
 	/* Scanner state. Carried across chunks, which is the whole point of it being here. */
 	u8    state;

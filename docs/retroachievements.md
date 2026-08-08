@@ -69,11 +69,17 @@ Confirmed on hardware, in order of when each was settled:
     **`GameID 14856`** for `c3b1916756737f2c4117cc95c1d51ac7`. The hash question is closed by
     the server rather than by eye. Log at `docs/logs/ra_wifi_launcher_gameid-3ds.log`.
 
-**Written but not yet run on hardware:** step 3d, `r=patch` — stage 12, the achievement set
-streamed out of a 100 KB reply into the staging block. Everything it depends on is confirmed
-above, and its two state machines are checked on a host at every byte boundary, but *nothing in
-this list is a hardware result until a log says so*. See *Step 3d — `r=patch`* below for what the
-run is expected to report and what would make it interesting.
+11. **The achievement set arriving from the server** — step 3d, `reached stage 12 of 12`:
+    **87,747 bytes** of `r=patch` JSON streamed off the socket, **51 published definitions**
+    staged for the cardengine, 3 unofficial ones filtered out, and **zero bytes of heap
+    allocated** — `top 02327000` identical before and after. Log at
+    `docs/logs/ra_wifi_launcher_patch-3ds.log`.
+
+**But that run also found its own bug, and one number step 3 needs is still unknown.** The carry
+buffer was 2,047 bytes and the largest definition in the set is **6,264**, so five real
+achievements were dropped. The buffer is 8,192 now — the point is that `block 6791 of 32759`
+looked comfortable *because the five largest definitions were missing from it*, so **"does a real
+set fit the 32 KB block" is still open.** See *First hardware run of stage 12* below.
 
 Everything from the game's RAM up to a fired trigger is done, and the launcher now reaches the
 RetroAchievements API. **So open question #1 is closed for context A, and nothing in front of
@@ -106,20 +112,19 @@ paying for them:
 - **Measure before guessing.** Each guess costs a flash cycle and a play session; a watch line
   in `ra_achievements.txt` costs a text edit. The file exists for that reason.
 
-The immediate next step is **one hardware run of stage 12**, which is the last reading step 3
-needs. `r=patch` is written; what it has never done is run. The four numbers to read off the log,
-in the order they decide things:
+The immediate next step is **a second hardware run of stage 12**, with the 8 KB carry buffer, and
+it answers the one thing step 3 still does not know. Two artifacts come back from it:
 
-| Line | What it settles |
+| | |
 | --- | --- |
-| `definitions      N kept, M unofficial` | whether the set arrives at all, and how much of it is published |
-| `block            X of 32751 used, Y wanted` | **the size question this whole step exists to answer.** `Y > X` means the block is the limit, not the ladder |
-| `longest memaddr  L of 2047` | whether the 2 KB carry buffer is the right size for a real set |
-| `heap after patch ... safe` | the number step 4 inherits. The static floor rose 29 KB across 3b–3d |
+| `block X of 32759 used, Y wanted` | **the size question.** `Y > X` means the block is the limit for the first time, and `CARDENGINEI_ARM9_RA_DEFS_MAX` becomes step 4's problem |
+| `sd:/ra_definitions.txt` | every staged definition, one per line, checkable against the set's page. This is what settles whether `1=1.300.` was a real achievement or a fragment |
+| `memaddr length ... of 8191` | whether 8 KB is enough, or whether another game will need more |
+| `heap after patch ... safe` | the number step 4 inherits. The static floor rose 35 KB across 3b–3d |
 
-`RA_DEFS_MAX_LINES` was raised from 8 to **128** for this, and the block holds 32,751 bytes of
-text — so 128 definitions average 255 bytes each before the *block* becomes the limit rather than
-the line count. Whether that is enough is exactly what `wanted` reports.
+`RA_DEFS_MAX_LINES` was raised from 8 to **128** for this, and 59 `MemAddr` keys came back for
+GameID 14856 — so the line count is not the constraint. The block is, or is not, and `wanted` says
+which.
 
 After that, step 4: the same code beside a running game, where the ARM7 belongs to the game.
 
@@ -1328,14 +1333,88 @@ missing flags — which then failed for the right reason on the wrong grounds. B
 lesson: **a fixture whose size has to be re-derived by hand is a fixture that will eventually
 measure wrong.**
 
+#### First hardware run of stage 12: the set arrived, and the buffer was wrong
+
+`reached stage 12 of 12`, and the numbers that matter are not the rung:
+
+```
+body was         87747 bytes
+definitions      51 kept, 3 unofficial
+lost             0 full, 5 too long, 0 cut, 0 empty
+block            6791 of 32759 used, 6791 wanted
+longest memaddr  6264 of 2047
+first            1=1.300.
+heap after patch 69632 safe + 8184 free, top 02327000
+```
+
+Log at `docs/logs/ra_wifi_launcher_patch-3ds.log`. What is **settled** by it:
+
+- **The whole path works.** 87,747 bytes of JSON streamed off the socket, 59 `MemAddr` keys found,
+  51 definitions written into the staging block, magic set. The reply is 2.7× the block it fed and
+  was never held anywhere.
+- **It cost nothing.** `top 02327000` and `safe 69632` are byte-for-byte identical before and after
+  the request. The largest reply in this project allocates zero bytes of heap, which is what the
+  streaming design was for and is now measured rather than intended.
+- **Unofficial filtering works on real data.** 3 of 59 came back `Flags 5` and are not in the block.
+
+And what it **breaks**:
+
+> **`longest memaddr 6264 of 2047` — five real achievements were dropped because the carry buffer
+> was a third of the size it needed to be.**
+
+That is the buffer being wrong, not the reply. `RA_PATCH_MEMADDR_MAX` was 2048 because RA memaddr
+strings "run from tens to a few hundred characters" — true of most of them and false exactly where
+it hurts. A completionist achievement is one condition per collectable; 150 stars is 150
+conditions, and a few kilobytes is normal for the achievements a player cares most about. It is
+**8192** now, and `longest` is reported every run so the margin stays a measurement.
+
+The consequence is that **the number this whole rung existed to produce is not yet known.** `wanted`
+read 6,791 of 32,759 — but that is 51 definitions averaging 133 bytes, with the five largest
+missing. Five definitions of the size actually observed put `wanted` somewhere between 22 K and
+32 K, which straddles the block:
+
+| if the five average | `wanted` becomes | of 32,759 |
+| --- | --- | --- |
+| 3,000 bytes | 21,791 | fits |
+| 5,000 bytes | 31,791 | **fits by 968 bytes** |
+| 6,000 bytes | 36,791 | **does not fit** |
+
+So "does a real set fit the block" is still open, and the next run answers it. That it is open is
+the finding — the first run's comfortable-looking `6791 of 32759` was comfortable because five
+definitions were missing from it.
+
+#### `1=1.300.` and why six numbers were not enough
+
+The other thing the run printed is `first 1=1.300.`, and it is worth being precise about what that
+is and is not. Eight characters. It is **valid memaddr syntax** — `.300.` is a serialized hit count,
+so it reads as "always true, 300 hits" — and it is **not** what a published achievement looks like.
+
+Which means the summary cannot distinguish two very different worlds: *the scanner works and that
+set has an odd first entry*, or *the scanner is emitting fragments*. Arguing from the code cannot
+settle it either, and the whole method of this document is that a reading which can come out two
+ways is not a reading.
+
+So the definitions themselves become the artifact, the way dsiwifi's verbatim log is the artifact
+for the chip. Stage 12 now writes `sd:/ra_definitions.txt` — every staged definition, one per
+line — and it can be read against the set's page on retroachievements.org line by line. The log
+also prints the **first three** definitions with their true lengths rather than one, because three
+consecutive entries are not ambiguous in the way one is.
+
+The dump is written **last, after the summary has been fsync()'d**, and that ordering is
+deliberate: it is tens of kilobytes of SD I/O with the WiFi link still up, which is the ARM7
+contention *#1d* is about and which froze a run once already. A freeze there now costs the file and
+keeps the reading. It is also the same format the launcher already *reads* from
+`ra_achievements.txt`, so copying it to `sd:/_nds/nds-bootstrap/` boots the game with the server's
+own set and no network at all — useful while step 4 is still being built.
+
 #### The static floor rose, and that is the cost worth naming
 
-Steps 3b, 3c and 3d took the launcher's static side from **569,136 to 598,220** of 753,664 —
-response buffers, the config, the hash's streaming window, the scanner's carry buffer. Every one
-of those raises the floor the heap starts from, so the 85,656 bytes measured at `r=gameid` will
-read smaller on the next run. It does not matter for *this* rung, which allocates nothing, and
-the heap line reports the figure either way. It matters for step 4, and the number to watch is
-`safe`, not `free`.
+Steps 3b, 3c and 3d took the launcher's static side from **569,136 to 604,844** of 753,664 —
+response buffers, the config, the hash's streaming window, and the scanner's 8 KB carry buffer.
+Every one of those raises the floor the heap starts from, and the first stage-12 run measured the
+result: `safe` fell from 77,824 at `r=login` to **69,632**, and the 6 KB the buffer just gained
+takes another bite. It does not matter for *this* rung, which allocates nothing. It matters for
+step 4, and the number to watch is `safe`, not `free`.
 
 #### The screen gets a heartbeat, and the card gets nothing
 

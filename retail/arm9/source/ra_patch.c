@@ -134,6 +134,14 @@ static void raPatchCommit(raPatch* p) {
 
 		p->wanted += length + 1;   /* the newline the reader splits on */
 
+		/*
+		    Zero is the unset marker rather than a counter, and it is safe as one: an empty value
+		    is filtered above, so no definition that reaches here has length 0.
+		*/
+		if (p->shortest == 0 || length < p->shortest) {
+			p->shortest = length;
+		}
+
 		if (p->block && p->used + length + 1 <= p->blockMax) {
 			memcpy(p->block + p->used, p->pending, length);
 			p->used += length;

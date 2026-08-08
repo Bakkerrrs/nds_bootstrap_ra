@@ -500,7 +500,8 @@ static void patchRun(raPatch* patch, char* block, u32 blockMax, const char* repl
 }
 
 static void test_patch(void) {
-	static char block[4096];
+	/* Sized from the carry buffer, so the longest definition the scanner will hold still fits. */
+	static char block[RA_PATCH_MEMADDR_MAX + 4096];
 	raPatch     patch;
 
 	printf("\nthe patch scanner pulls the published set out of a streaming reply\n");
@@ -515,6 +516,7 @@ static void test_patch(void) {
 	CHECK(patch.wanted == strlen(PATCH_EXPECT));
 	/* Decoded length, so the escaped slash counts as the one character it becomes. */
 	CHECK(patch.longest == strlen("0xH0a1b2c=1_d0xH0a1b2c=0"));
+	CHECK(patch.shortest == strlen("0xH000010>d0xH000010"));
 
 	/*
 	    Every split, because the boundary the network chooses is not ours -- and the interesting
@@ -612,6 +614,35 @@ static void test_patch(void) {
 		raPatchFinish(&patch);
 		CHECK(patch.kept == 0 && patch.unofficial == 1 && block[0] == 0);
 		CHECK(patch.longest == strlen("0xH1=1_0xH2=2_0xH3=3"));
+	}
+
+	printf("\nthe carry buffer holds the largest definition hardware has produced\n");
+	{
+		/*
+		    6,264 bytes, measured: the first hardware run of stage 12 against GameID 14856
+		    reported that as `longest` and dropped five definitions to a 2,047-byte buffer. A
+		    completionist achievement is one condition per collectable, so kilobytes is normal for
+		    exactly the achievements a player cares most about.
+
+		    Pinned as a test rather than only as a constant, because the failure it prevents is
+		    silent: five achievements that simply never exist, in a set that otherwise loads.
+		*/
+		enum { RA_MEASURED_LONGEST = 6264 };
+		static char huge[RA_MEASURED_LONGEST + 64];
+		u32         i;
+
+		strcpy(huge, "\"MemAddr\":\"");
+		for (i = strlen(huge); i < strlen("\"MemAddr\":\"") + RA_MEASURED_LONGEST; i++) {
+			huge[i] = (i & 1) ? '1' : '0';
+		}
+		strcpy(huge + i, "\",\"Flags\":3");
+
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, huge);
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.tooLong == 0);
+		CHECK(patch.longest == RA_MEASURED_LONGEST);
+		CHECK(RA_PATCH_MEMADDR_MAX > RA_MEASURED_LONGEST);
 	}
 
 	printf("\nnothing is truncated: a short definition is a different definition\n");

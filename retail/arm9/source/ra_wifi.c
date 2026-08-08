@@ -712,8 +712,9 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	raWifiLog("block            %lu of %lu used, %lu wanted\n",
 	          (unsigned long)patch.used, (unsigned long)blockMax,
 	          (unsigned long)patch.wanted);
-	raWifiLog("longest memaddr  %lu of %d\n",
-	          (unsigned long)patch.longest, RA_PATCH_MEMADDR_MAX - 1);
+	raWifiLog("memaddr length   %lu shortest, %lu longest, of %d\n",
+	          (unsigned long)patch.shortest, (unsigned long)patch.longest,
+	          RA_PATCH_MEMADDR_MAX - 1);
 
 	if (!patch.kept) {
 		raWifiLog("\x1b[31mno definitions in the reply\x1b[37m\n");
@@ -721,19 +722,38 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	}
 
 	/*
-	    The first definition, verbatim and clipped, because it is the cheapest possible check
-	    that these are memaddr strings rather than 30 K of something else that happened to sit
-	    between quotes. It should start with an address or a condition flag.
+	    The first three definitions, clipped, as the cheapest possible check that these are
+	    memaddr strings and not 30 K of something else that happened to sit between quotes.
+
+	    Three rather than one because of what the first run showed: a single `1=1.300.` is
+	    ambiguous -- it is valid syntax for "always true, 300 hits" and it is also exactly what a
+	    fragment would look like. Three consecutive entries are not ambiguous in the same way, and
+	    ra_definitions.txt below settles it completely.
 	*/
 	{
-		char first[65];
-		u32  i;
+		const char* at = block;
+		int         n;
 
-		for (i = 0; i < sizeof(first) - 1 && block[i] && block[i] != '\n'; i++) {
-			first[i] = block[i];
+		for (n = 0; n < 3 && *at; n++) {
+			char line[57];
+			u32  full = 0;
+			u32  i;
+
+			/* The real length first, then the clip -- a clipped length would say nothing. */
+			while (at[full] && at[full] != '\n') {
+				full++;
+			}
+			for (i = 0; i < sizeof(line) - 1 && i < full; i++) {
+				line[i] = at[i];
+			}
+			line[i] = 0;
+			raWifiLog("def %d %5lu      %s\n", n + 1, (unsigned long)full, line);
+
+			at += full;
+			if (*at) {
+				at++;
+			}
 		}
-		first[i] = 0;
-		raWifiLog("first            %s\n", first);
 	}
 
 	/*
@@ -749,6 +769,53 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	verdict.defsKept  = patch.kept;
 	verdict.defsBytes = patch.used;
 	raWifiLog("\x1b[32mstaged %u definitions for the cardengine\x1b[37m\n", patch.kept);
+}
+
+/*
+    Write the staged definitions out as text, so the set itself can be checked rather than its
+    summary.
+
+    Called last -- after the summary has been written and fsync()'d -- and that ordering is the
+    whole reason it is a separate function. This is tens of kilobytes of SD I/O with the WiFi link
+    still up, which is exactly the ARM7 contention #1d is about and which froze a run once
+    already. Putting it after the summary means a freeze here costs the file and keeps the
+    reading; putting it before would have risked the reverse.
+
+    The file is the same format the launcher already *reads* from ra_achievements.txt, so it is
+    not only evidence: copy it to sd:/_nds/nds-bootstrap/ and a normal build boots the game with
+    the server's own achievement set, with no network involved. That is a useful thing to have
+    while step 4 is still being built.
+*/
+static void raWifiDumpDefinitions(bool sdFound) {
+	const char* const path = sdFound ? RA_DEFS_DUMP_PATH : RA_DEFS_DUMP_PATH_FAT;
+	const char* const text = (const char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
+	                                       + CARDENGINEI_ARM9_RA_DEFS_HEADER);
+	const u32         length = *(u32*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + 4);
+	FILE*             out;
+
+	if (*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION != CARDENGINEI_ARM9_RA_DEFS_MAGIC
+	 || length == 0) {
+		return;
+	}
+
+	out = fopen(path, "w");
+	if (!out) {
+		raWifiLog("\x1b[33mcould not write %s\x1b[37m\n", path);
+		return;
+	}
+	/*
+	    Written and closed, not fsync()'d and left open like the log. The log is deliberately
+	    never closed because a hang must not lose it; this one is finished when it is finished, and
+	    close() is what makes libfat write the directory entry -- the same lesson the zero-byte log
+	    taught.
+	*/
+	if (fwrite(text, 1, length, out) == length) {
+		fclose(out);
+		raWifiLog("definitions to   %s\n", path);
+	} else {
+		fclose(out);
+		raWifiLog("\x1b[33m%s is short -- the card refused a write\x1b[37m\n", path);
+	}
 }
 
 void raWifiProbe(bool sdFound, const char* ndsPath) {
@@ -980,6 +1047,16 @@ done:
 	    with the file still open. Powering off here does not lose it.
 	*/
 	raWifiSync();
+
+	/*
+	    The definitions go out here, deliberately after the summary is already on the card. See
+	    raWifiDumpDefinitions(): this is the largest SD write of the run and the link is still up.
+	*/
+	if (verdict.patched) {
+		raWifiDumpDefinitions(sdFound);
+		raWifiSync();
+	}
+
 	raWifiLog("\nlog written and synced -- safe to power off.\n"
 	          "this build does not boot games.\n");
 
