@@ -163,6 +163,48 @@ and a Data Abort inside the game's interrupt handler.
 what turns a DS address into the console address RetroAchievements definitions are written
 in, which is why the notes call these "24-Bit Pointers".
 
+### First run with real definitions: the machinery works, the definitions do not
+
+Every mechanical part passed on the first attempt, and nothing fired.
+
+| Field | Read | |
+| --- | --- | --- |
+| `rcFromFile` / `rcActivated` / `rcBadLine` | `1` / `3` / `0` | all three parsed, including the pointer chain |
+| `rcPeeks` | `4` | exactly the four distinct memrefs, so AddAddress is walked every frame |
+| `rcPeeksRejected` | `0` | the computed address was always in range |
+| `rcLines` / `rcLinesMax` | `2` / `2` | still two scanlines of 263 |
+| `rcInitLines` | `37` | parsing three definitions, once |
+| `rcTriggered` | **`0`** | after reaching Fever Time |
+| `rcEvents` | `2` | two triggers went WAITING → ACTIVE |
+
+That combination is informative rather than disappointing. `rcPeeks = 4` with
+`rcPeeksRejected = 0` says the AddAddress chain resolves and reads real memory every frame,
+which was the thing this run existed to test. `rcEvents = 2` says two of the three left
+WAITING and are actively evaluating — the third, `stage == 0`, was true at activation and
+rcheevos requires a trigger to be false once before it may fire, exactly as expected.
+
+So the conditions are not being met, and that is a fact about this ROM rather than about
+rcheevos. The definitions were written from published code notes; something in them does
+not describe the copy being played.
+
+**The response is not another guess.** A guess costs a play session. Reading the addresses
+costs nothing extra, because the watchlist already resolves chains and reports values into
+the snapshot — so the definitions file now also carries watches:
+
+```
+W:<address>:<size>[:<offset>[:<offset>]]
+```
+
+`W:159164:4:9c` resolves the same chain the Fever definition uses and puts the resolved
+address and the value in `results[1]`. If the address looks like a plausible `0x02xxxxxx`
+the pointer is real and the question is the offset or the meaning; if `status` is
+`BAD_POINTER` the word is not a usable pointer at all. Either way the next session answers
+"what does this memory hold" instead of "did my next guess work", which is the difference
+between measuring and betting.
+
+Any watch line replaces the built-in self-test watches, so the first four land in
+`results[]` where a hex viewer can read them.
+
 ### The next task: a real achievement, from a real game
 
 Everything below the client is now proven on hardware. What is missing is the client: the

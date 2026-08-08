@@ -59,6 +59,8 @@
 */
 extern bool ra_readable(u32 addr, u32 len);
 extern u32  ra_read(u32 addr, u8 size);
+extern int  ra_watch_add(u32 base, u8 size, u8 depth, const u32* offsets);
+extern void ra_watch_clear(void);
 
 /* VCOUNT, read directly -- the game owns every hardware timer. See raSnapshot.linesLast. */
 #define RA_VCOUNT            (*(const vu16*)0x04000006)
@@ -263,6 +265,87 @@ static u8 ra_split_definitions(char* text, u32 length, char** lines) {
 	return count;
 }
 
+/*
+    Hexadecimal up to the next delimiter, advancing the cursor. Returns whether anything
+    was read, because an empty field and a zero are different mistakes.
+*/
+static bool ra_parse_hex(const char** p, u32* out) {
+	const char* s     = *p;
+	u32         value = 0;
+	bool        any   = false;
+
+	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+		s += 2;
+	}
+	while (1) {
+		u32 digit;
+		if (*s >= '0' && *s <= '9')      digit = (u32)(*s - '0');
+		else if (*s >= 'a' && *s <= 'f') digit = (u32)(*s - 'a' + 10);
+		else if (*s >= 'A' && *s <= 'F') digit = (u32)(*s - 'A' + 10);
+		else break;
+		value = (value << 4) | digit;
+		any   = true;
+		s++;
+	}
+	*p   = s;
+	*out = value;
+	return any;
+}
+
+/*
+    A watch line: `W:<address>:<size>[:<offset>[:<offset>]]`, addresses being console
+    addresses like everywhere else in this file.
+
+    This exists because of what the first hardware run showed. Every mechanical part worked
+    -- three definitions parsed, the pointer chain walked four memrefs a frame, nothing
+    refused -- and no achievement fired. That is not a bug to debug, it is a fact about the
+    game that nobody has measured: the conditions were written from published code notes and
+    something about them does not match this ROM.
+
+    Guessing at another definition costs a session. Reading the addresses costs nothing extra,
+    because the watchlist already resolves chains and reports values into the snapshot. So
+    the same file that carries definitions can carry watches, and the next session answers
+    "what does this memory actually hold" instead of "did my next guess work".
+
+      W:1593d0:4        the 32-bit value at console 0x1593d0
+      W:159164:4:9c     the 32-bit value at (24-bit pointer at 0x159164) + 0x9c
+
+    Any watch line replaces the built-in self-test watches, so the first four land in the
+    snapshot's results[] where they can be read.
+*/
+static bool ra_add_watch_line(const char* line) {
+	u32 base;
+	u32 size;
+	u32 offsets[RA_CHAIN_MAX];
+	u8  depth = 0;
+
+	if (!ra_parse_hex(&line, &base) || *line != ':') {
+		return false;
+	}
+	line++;
+	if (!ra_parse_hex(&line, &size)) {
+		return false;
+	}
+	while (*line == ':' && depth < RA_CHAIN_MAX) {
+		u32 offset;
+		line++;
+		if (!ra_parse_hex(&line, &offset)) {
+			return false;
+		}
+		offsets[depth++] = offset;
+	}
+
+	/*
+	    Console address to DS address, the same translation peek() does. A watch written
+	    beside a definition should mean the same thing the definition means.
+	*/
+	base = ra_rc_translate(base, size ? size : 1);
+	if (base == 0) {
+		return false;
+	}
+	return ra_watch_add(base, (u8)size, depth, offsets) >= 0;
+}
+
 static const char* ra_definition(raSnapshot* snapshot) {
 	const u32* block = (const u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION;
 
@@ -343,10 +426,34 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 		    than the last result -- a file with one bad line among three should say so
 		    instead of being reported by whichever happened to be last.
 		*/
+		/*
+		    Watches first, and only clearing the defaults if the file actually supplies
+		    some -- a file of definitions alone should still show the self-test watches,
+		    which are the thing that says the reader is alive at all.
+		*/
+		{
+			bool anyWatch = false;
+			for (i = 0; i < count; i++) {
+				if (lines[i][0] == 'W' && lines[i][1] == ':') {
+					if (!anyWatch) {
+						ra_watch_clear();
+						anyWatch = true;
+					}
+					if (!ra_add_watch_line(lines[i] + 2)) {
+						snapshot->rcBadLine = i + 1;
+					}
+				}
+			}
+		}
+
 		activate = RC_OK;
 		snapshot->rcActivated = 0;
 		for (i = 0; i < count; i++) {
-			const int one = rc_runtime_activate_achievement(
+			int one;
+			if (lines[i][0] == 'W' && lines[i][1] == ':') {
+				continue;   /* a watch, handled above */
+			}
+			one = rc_runtime_activate_achievement(
 				&runtime, RA_TEST_ACHIEVEMENT_ID + i, lines[i], 0, 0);
 			if (one == RC_OK) {
 				snapshot->rcActivated++;
@@ -356,8 +463,17 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 			}
 		}
 		snapshot->rcActivate = (s8)activate;
+		/*
+		    A file of watches alone is legitimate -- measuring memory is the point of this
+		    session -- so only a file that offered definitions and had none parse is a
+		    failure. The self-test keeps the runtime doing something either way.
+		*/
 		if (snapshot->rcActivated == 0) {
-			return RA_RC_PARSE_BAD;
+			if (rc_runtime_activate_achievement(&runtime, RA_TEST_ACHIEVEMENT_ID,
+			                                    RA_TEST_DEFINITION, 0, 0) != RC_OK) {
+				return RA_RC_PARSE_BAD;
+			}
+			snapshot->rcActivated = 1;
 		}
 	}
 

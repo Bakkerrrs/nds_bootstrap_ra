@@ -529,6 +529,43 @@ int main(void) {
 			CHECK(ra_split_definitions(text, len, lines) == RA_DEFS_MAX_LINES);
 		}
 
+		/*
+		    Watch lines, which are how the next hardware session measures memory rather than
+		    guessing at another definition.
+		*/
+		{
+			const char* p;
+			u32         v;
+
+			p = "1593d0"; CHECK(ra_parse_hex(&p, &v) && v == 0x1593d0);
+			p = "0x9c";   CHECK(ra_parse_hex(&p, &v) && v == 0x9c);
+			p = ":4";     CHECK(!ra_parse_hex(&p, &v));   /* empty field is not a zero */
+
+			ra_watch_clear();
+			CHECK(ra_add_watch_line("1593d0:4"));
+			CHECK(watchCount == 1);
+			CHECK(watches[0].base == RA_DS_SYSTEM_RAM_BASE + 0x1593d0);
+			CHECK(watches[0].size == 4 && watches[0].depth == 0);
+
+			CHECK(ra_add_watch_line("159164:4:9c"));
+			CHECK(watches[1].base == RA_DS_SYSTEM_RAM_BASE + 0x159164);
+			CHECK(watches[1].depth == 1 && watches[1].offsets[0] == 0x9c);
+
+			/* Malformed and out-of-range both refused rather than half-installed. */
+			CHECK(!ra_add_watch_line("1593d0"));          /* no size */
+			CHECK(!ra_add_watch_line("400000:4"));        /* past DS system RAM */
+			CHECK(!ra_add_watch_line("1593d0:3"));        /* size not 1, 2 or 4 */
+			CHECK(watchCount == 2);                        /* nothing was added */
+
+			/*
+			    Put the self-test watches back. Later tests read results[] and this block
+			    borrowed the list to check the parser -- leaving it emptied would fail them
+			    for a reason that has nothing to do with what they test.
+			*/
+			ra_watch_clear();
+			ra_install_defaults(&snapshot);
+		}
+
 		/* Back to no file, so the tests after this see the built-in. */
 		*(u32*)block = 0;
 	}
