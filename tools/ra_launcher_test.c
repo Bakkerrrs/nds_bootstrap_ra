@@ -1,5 +1,9 @@
 /*
-    Host-side check for step 3b: the RetroAchievements hash of a DS ROM.
+    Host-side checks for the launcher's own pure logic: the ROM hash (3b), the configuration
+    file and the query encoding (3c). What they have in common is that every one of them fails
+    *silently* -- a hash over the wrong bytes, a password truncated at an `&`, a config key that
+    parses as something else -- and every one of those looks, from the console, exactly like a
+    wrong password or a game with no achievement set.
 
     A second binary rather than a section of tools/ra_reader_test.c, and that separation is
     load-bearing. That file computes the WRAM allocator's arena from the addresses of
@@ -14,7 +18,7 @@
     file simply does not join that link: no cardengine sources, no fixed link address, no
     mapped pages. It needs none of them -- the hash is file I/O and an MD5.
 
-    Run through tools/ra_reader_test.sh, which builds both.
+    Run through tools/ra_reader_test.sh, which builds both binaries.
 
     This file is part of nds-bootstrap and is licensed under the GPL-3.0,
     the same terms as the rest of the project.
@@ -24,6 +28,15 @@
 #include <string.h>
 
 #include "ra_wifi.h"
+
+/*
+    raNetUrlEncode() and raNetJsonString() are string logic; the rest of ra_net.c is lwip
+    sockets. Rather than link lwip into a host test to reach two pure functions, the two are
+    lifted in by including the file with its socket half compiled out. RA_NET_HOST_TEST is
+    defined nowhere else, so the target build always gets the whole thing.
+*/
+#define RA_NET_HOST_TEST 1
+#include "../retail/arm9/source/ra_net.c"
 
 /*
     ------------------------------------------------------------------------------------
@@ -150,8 +163,132 @@ static void test_rom_hash(void) {
 	}
 }
 
+/*
+    The query encoder, and it is the one function in 3c that can lie convincingly.
+
+    A password is user text. An `&` ends the parameter early, so the server sees a shorter
+    password; a `+` decodes as a space; a `%` opens an escape that is not there. Every one of
+    those builds a well-formed request that comes back `invalid_credentials`, which from the
+    console is indistinguishable from the password simply being wrong -- so the user would be
+    told their password is wrong when it is not.
+*/
+static void test_url_encode(void) {
+	char buf[64];
+
+	printf("\nthe query encoder survives a password with punctuation in it\n");
+
+	CHECK(raNetUrlEncode("plain", buf, sizeof(buf)) && strcmp(buf, "plain") == 0);
+	/* Unreserved per RFC 3986 pass through untouched. */
+	CHECK(raNetUrlEncode("aZ09-_.~", buf, sizeof(buf)) && strcmp(buf, "aZ09-_.~") == 0);
+	/* The three that would silently corrupt a login. */
+	CHECK(raNetUrlEncode("a&b", buf, sizeof(buf)) && strcmp(buf, "a%26b") == 0);
+	CHECK(raNetUrlEncode("a+b", buf, sizeof(buf)) && strcmp(buf, "a%2Bb") == 0);
+	CHECK(raNetUrlEncode("100%", buf, sizeof(buf)) && strcmp(buf, "100%25") == 0);
+	CHECK(raNetUrlEncode("a b", buf, sizeof(buf)) && strcmp(buf, "a%20b") == 0);
+	CHECK(raNetUrlEncode("=?#/", buf, sizeof(buf)) && strcmp(buf, "%3D%3F%23%2F") == 0);
+	/* High bytes, in case someone's password is not ASCII. */
+	CHECK(raNetUrlEncode("\xc3\xb1", buf, sizeof(buf)) && strcmp(buf, "%C3%B1") == 0);
+	CHECK(raNetUrlEncode("", buf, sizeof(buf)) && buf[0] == 0);
+
+	/*
+	    Truncation has to be reported, not swallowed: a silently shortened password is the same
+	    bug as a badly escaped one.
+	*/
+	{
+		char tiny[4];
+
+		CHECK(raNetUrlEncode("abc", tiny, sizeof(tiny)) && strcmp(tiny, "abc") == 0);
+		CHECK(raNetUrlEncode("abcd", tiny, sizeof(tiny)) == false);
+		/* One %XX needs four bytes of room including the terminator. */
+		CHECK(raNetUrlEncode("&", tiny, sizeof(tiny)) && strcmp(tiny, "%26") == 0);
+		CHECK(raNetUrlEncode("&&", tiny, sizeof(tiny)) == false);
+	}
+}
+
+/*
+    The config file, fed odelot's own example verbatim -- because "his file works here" is the
+    actual requirement, and a fixture I invent cannot check it.
+*/
+static void test_config(void) {
+	const char* path = "/tmp/ra_cfg_test.cfg";
+	raConfig    cfg;
+	FILE*       f = fopen(path, "w");
+
+	printf("\nthe config file reads odelot's format\n");
+	if (!f) {
+		printf("  cannot write %s -- skipped\n", path);
+		return;
+	}
+	fputs("# RetroAchievements configuration file\n"
+	      "\n"
+	      "# RetroAchievements credentials\n"
+	      "username=odelot\n"
+	      "password=hunter2&co\n"
+	      "\n"
+	      "show_challenge_show_popup=1\n"
+	      "show_progress_popups=1\n"
+	      "debug=0\n"
+	      "hardcore=1\n"
+	      "force_hardcore=0\n"
+	      "list_hotkey=0\n"
+	      "   spaced   =   yes   \n"
+	      "a line with no equals sign\n",
+	      f);
+	fclose(f);
+
+	CHECK(raConfigRead(path, &cfg) == true);
+	CHECK(cfg.found == 1);
+	CHECK(strcmp(cfg.username, "odelot") == 0);
+	/* Kept verbatim, punctuation and all -- the encoder is what makes it safe to send. */
+	CHECK(strcmp(cfg.password, "hunter2&co") == 0);
+	CHECK(cfg.usable == 1);
+	CHECK(cfg.hardcore == 1);
+	CHECK(cfg.debug == 0);
+	/* His popup and leaderboard keys are recognised and not acted on, not rejected. */
+	CHECK(cfg.notYet == 4);
+	/* `spaced` is nobody's key: a typo has to be visible. */
+	CHECK(cfg.unknown == 1);
+	CHECK(cfg.badLines == 1);
+
+	/*
+	    And the secret must never be printable. The log is a file that gets sent to someone.
+	*/
+	printf("\nsecrets are not printable\n");
+	CHECK(strstr(raConfigRedact(cfg.password), "hunter2") == NULL);
+	CHECK(strstr(raConfigRedact(cfg.password), "10") != NULL);   /* its length, though */
+	CHECK(strcmp(raConfigRedact(""), "(empty)") == 0);
+	CHECK(strcmp(raConfigRedact(NULL), "(empty)") == 0);
+
+	printf("\nthe login reply gives up its token and nothing else\n");
+	{
+		const char* reply =
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+			"{\"Success\":true,\"User\":\"odelot\",\"Token\":\"abcDEF123\",\"Score\":42}";
+		char token[40];
+		char user[40];
+
+		CHECK(strstr(raNetBody(reply), "{\"Success\"") == raNetBody(reply));
+		CHECK(raNetJsonString(reply, "Token", token, sizeof(token))
+		   && strcmp(token, "abcDEF123") == 0);
+		CHECK(raNetJsonString(reply, "User", user, sizeof(user))
+		   && strcmp(user, "odelot") == 0);
+		/* Absent, and a non-string field, must both fail rather than return rubbish. */
+		CHECK(raNetJsonString(reply, "Nope", token, sizeof(token)) == false);
+		CHECK(raNetJsonString(reply, "Score", token, sizeof(token)) == false);
+		/* A token longer than the buffer is a failure, not a truncation. */
+		{
+			char tiny[4];
+			CHECK(raNetJsonString(reply, "Token", tiny, sizeof(tiny)) == false);
+		}
+	}
+
+	remove(path);
+}
+
 int main(void) {
 	test_rom_hash();
+	test_url_encode();
+	test_config();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",
 	       failures, failures == 1 ? "" : "s");

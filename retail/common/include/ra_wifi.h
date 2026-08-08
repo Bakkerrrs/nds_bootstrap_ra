@@ -25,6 +25,7 @@
 #define RA_WIFI_H
 
 #include <nds/ndstypes.h>
+#include <stddef.h>   /* size_t, for the ra_net entry points below */
 
 /*
     Master switch, and it is off in every shipped build.
@@ -75,7 +76,8 @@
 #define RA_WIFI_STAGE_RESOLVED    7  /* DNS answered for retroachievements.org */
 #define RA_WIFI_STAGE_CONNECTED   8  /* TCP to port 80 */
 #define RA_WIFI_STAGE_ANSWERED    9  /* the API replied, and the reply looks like the API */
-#define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_ANSWERED
+#define RA_WIFI_STAGE_LOGGED_IN   10 /* r=login returned a token for the configured user */
+#define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_LOGGED_IN
 
 /*
     What dsiwifi's narration said about how the chip arrived.
@@ -108,6 +110,7 @@ typedef struct raWifiVerdict {
 	u8   dnsOk;
 	u8   tcpOk;
 	u8   apiOk;
+	u8   loggedIn;         /* r=login returned a token */
 	u32  ip;               /* as DSiWifi_GetIP() returns it */
 	char chip[16];         /* "AR6014", as dsiwifi named it */
 	/*
@@ -143,6 +146,53 @@ int         raWifiVerdictStage(const raWifiVerdict* v);
 const char* raWifiVerdictArrival(const raWifiVerdict* v);
 
 /*
+    Step 3c's configuration, read from sd:/_nds/nds-bootstrap/ra.cfg -- the same `key=value`
+    shape odelot's MiSTer core uses, because that is the file this project's user already has.
+
+    The password is kept in the file, knowingly: the alternative of caching only a token was
+    offered and declined. It therefore goes over the wire in the clear on every boot. It must
+    never reach the log -- see raConfigRedact().
+*/
+#define RA_CFG_PATH      "sd:/_nds/nds-bootstrap/ra.cfg"
+#define RA_CFG_PATH_FAT  "fat:/_nds/nds-bootstrap/ra.cfg"
+
+typedef struct raConfig {
+	char username[33];   /* RA usernames are short; 32 is well past any real one */
+	char password[65];
+	u8   hardcore;       /* the API's h= parameter. Softcore is h=0 and is what this fork does */
+	u8   debug;
+	u8   found;          /* the file existed */
+	u8   usable;         /* ...and both credentials are set */
+	u16  notYet;         /* keys we recognise from odelot's file and do not act on yet */
+	u16  unknown;        /* keys nobody knows: almost certainly a typo */
+	u16  badLines;       /* non-comment lines with no `=` */
+} raConfig;
+
+/*
+    Step 3c's transport. The layering table has had an `ra_net` row since before it existed;
+    this is it. Negative returns so a failure names its own step instead of becoming a zero.
+*/
+#define RA_NET_HOST           "retroachievements.org"
+#define RA_NET_PORT           80
+#define RA_NET_RECV_TIMEOUT   5
+
+#define RA_NET_BAD_ARGS       (-1)
+#define RA_NET_NO_DNS         (-2)
+#define RA_NET_NO_SOCKET      (-3)
+#define RA_NET_NO_CONNECT     (-4)
+#define RA_NET_REQ_TOO_LONG   (-5)
+#define RA_NET_NO_SEND        (-6)
+
+/* How far one request got, so the ladder can be filled in from a single call. */
+typedef struct raNetProgress {
+	u8  resolved;
+	u8  connected;
+	u8  sent;
+	u8  closedByPeer;
+	u32 address;
+} raNetProgress;
+
+/*
     Step 3b. What the launcher had to allocate to compute the hash, reported so the margin
     against the heap is a measurement rather than a hope: rc_hash_nintendo_ds() takes
     max(0xA00, arm9Size, arm7Size) in one block, and the launcher has ~352 K of heap before
@@ -167,6 +217,17 @@ void raWifiProbe(bool sdFound, const char* ndsPath);
 */
 bool        raHashRom(const char* path, char hash[33], raHashInfo* info);
 const char* raHashLastError(void);
+
+/* Step 3c. The config file, and what may be said about a secret out loud. */
+bool        raConfigRead(const char* path, raConfig* cfg);
+const char* raConfigRedact(const char* secret);
+
+/* Step 3c. The transport. */
+bool        raNetUrlEncode(const char* in, char* out, size_t outSize);
+int         raNetHttpGet(const char* host, const char* path, char* out, int outSize,
+                         raNetProgress* p);
+const char* raNetBody(const char* response);
+bool        raNetJsonString(const char* json, const char* key, char* out, size_t outSize);
 
 /* The ARM7 half: hand this CPU to dsiwifi. One call, and where it goes matters. */
 void raWifiInstall(void);

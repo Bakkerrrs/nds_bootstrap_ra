@@ -338,7 +338,7 @@ static void test_wifi_verdict(void) {
 	    than in narration -- so the probe sets them and no string can. Checked in order,
 	    because the ladder only means anything if each rung is the thing that proves it.
 	*/
-	printf("\nthe top four rungs come from lwip, not from the log\n");
+	printf("\nthe rungs above the link come from lwip and the API, not from the log\n");
 	wifi_feed_chunked(&v, 59);
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_READY);
 	v.gotIp = 1;
@@ -349,7 +349,10 @@ static void test_wifi_verdict(void) {
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_CONNECTED);
 	v.apiOk = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_ANSWERED);
-	CHECK(RA_WIFI_STAGE_ANSWERED == RA_WIFI_STAGE_MAX);
+	/* Step 3c's rung: r=login returning a token, which is also the top of the ladder today. */
+	v.loggedIn = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_LOGGED_IN);
+	CHECK(RA_WIFI_STAGE_LOGGED_IN == RA_WIFI_STAGE_MAX);
 
 	/*
 	    The step-3 run, which reached stage 9. Its narration carries the same five rungs and

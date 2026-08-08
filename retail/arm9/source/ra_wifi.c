@@ -63,15 +63,14 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 
-#define RA_HOST "retroachievements.org"
-#define RA_PORT 80
+/* The host and port live in ra_wifi.h now, with the rest of ra_net's contract. */
 /*
     A login for a user that does not exist, exactly as the probe does it. The reply is a 401
     with a JSON body, which proves DNS, TCP, HTTP and the API parsing our query without this
     program ever handling a real password. Over cleartext that distinction is worth keeping,
     and it is the reason step 3's first rung needs no credentials at all.
 */
-#define RA_PATH "/dorequest.php?r=login&u=ndsbootstrap_probe&p=x"
+#define RA_PATH_ANON "/dorequest.php?r=login&u=ndsbootstrap_probe&p=x"
 
 /* What the launcher's ARM7 stashed there at boot, before anything could change it. */
 #define REG_SCFG_EXT7 *(u32*)0x02FFFDF0
@@ -393,123 +392,127 @@ static bool raWifiWaitIp(int seconds) {
 }
 
 /*
-    One GET, and the reply is checked for *content*. A captive portal, a proxy or a Cloudflare
-    interstitial all succeed at the socket level and mean nothing; the API's own error code
-    coming back is what proves we reached RetroAchievements rather than something answering on
-    its behalf. Same test the probe applies, for the same reason.
+    Stage 7-9: reach the API, with no credentials at all.
+
+    The request logs in as a user that does not exist, which is the same thing
+    tools/wifiprobe/ does and for the same reason: a well-formed `invalid_credentials` proves
+    DNS, TCP, HTTP and the API parsing our query, without the reading depending on the config
+    file being right. So when the login below fails, the failure is the login.
+
+    The reply is checked for *content*, not for bytes. A captive portal, a proxy or a
+    Cloudflare interstitial all succeed at the socket level and mean nothing.
 */
-static void raWifiHttpGet(void) {
-	static char        response[2048];
-	struct hostent*    he;
-	struct sockaddr_in addr;
-	char               request[320];
-	int                sock;
-	int                total = 0;
+static void raWifiReachApi(void) {
+	static char   response[2048];
+	raNetProgress p;
+	int           got;
 
-	he = gethostbyname(RA_HOST);
-	if (!he || !he->h_addr_list[0]) {
-		raWifiLog("\x1b[31mDNS failed for %s\x1b[37m\n", RA_HOST);
+	memset(&p, 0, sizeof(p));
+	got = raNetHttpGet(RA_NET_HOST, RA_PATH_ANON, response, sizeof(response), &p);
+
+	verdict.dnsOk = p.resolved;
+	verdict.tcpOk = p.connected;
+	if (p.resolved) {
+		raWifiLog("resolved         %s\n", RA_NET_HOST);
+		raWifiReportIp("its address", p.address);
+	}
+	if (p.connected) {
+		raWifiLog("connected        port %d\n", RA_NET_PORT);
+	}
+	if (p.sent) {
+		raWifiLog("request sent\n");
+	}
+	if (got < 0) {
+		raWifiLog("\x1b[31mHTTP failed at step %d\x1b[37m\n", -got);
 		return;
 	}
-	memcpy(&addr.sin_addr, he->h_addr_list[0], 4);
-	verdict.dnsOk = 1;
-	raWifiLog("resolved         %s\n", RA_HOST);
-	raWifiReportIp("its address", addr.sin_addr.s_addr);
+	raWifiLog("%s after %d\n", p.closedByPeer ? "peer closed" : "recv stopped", got);
 
-	sock = socket(AF_INET, SOCK_STREAM, 0);
-	if (sock < 0) {
-		raWifiLog("\x1b[31msocket() failed\x1b[37m\n");
-		return;
-	}
-	addr.sin_family = AF_INET;
-	addr.sin_port   = htons(RA_PORT);
-
-	if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-		raWifiLog("\x1b[31mconnect() to port %d failed\x1b[37m\n", RA_PORT);
-		lwip_close(sock);
-		return;
-	}
-	verdict.tcpOk = 1;
-	raWifiLog("connected        port %d\n", RA_PORT);
-
-	/* A user agent is mandatory on every Connect API call; without one it is our fault. */
-	siprintf(request,
-	         "GET %s HTTP/1.1\r\n"
-	         "Host: %s\r\n"
-	         "User-Agent: nds-bootstrap-ra-launcher/0.1\r\n"
-	         "Connection: close\r\n"
-	         "\r\n",
-	         RA_PATH, RA_HOST);
-
-	if (send(sock, request, strlen(request), 0) < 0) {
-		raWifiLog("\x1b[31msend() failed\x1b[37m\n");
-		lwip_close(sock);
-		return;
-	}
-	raWifiLog("request sent\n");
-
-	/*
-	    Bounded, because the unbounded version hung the console -- twice -- on the line after
-	    "request sent", and it hung there for a dull reason.
-
-	    The reply is 994 bytes, so the first recv() returns all of it and the loop asks again.
-	    That second call blocks until the server's FIN arrives, and `Connection: close` is a
-	    request rather than a promise: if the FIN is late or lost, a blocking recv() with no
-	    timeout waits for it forever. An earlier build got its FIN promptly and reached stage 9;
-	    the next one did not, and the difference was luck rather than code.
-
-	    This document's own rule is that a probe which hangs teaches nothing, and this was the
-	    one place lwip can block. SO_RCVTIMEO puts a floor under it -- dsiwifi enables
-	    LWIP_SO_RCVTIMEO, so it is honoured -- and the loop reports what each call returned, so
-	    a future stall is a reading rather than a photograph of a frozen screen.
-	*/
-	{
-		struct timeval tv;
-
-		tv.tv_sec  = RA_WIFI_RECV_TIMEOUT;
-		tv.tv_usec = 0;
-		if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-			raWifiLog("\x1b[33mSO_RCVTIMEO refused; recv may block\x1b[37m\n");
-		}
-	}
-
-	while (total < (int)sizeof(response) - 1) {
-		const int got = recv(sock, response + total, sizeof(response) - 1 - total, 0);
-
-		if (got == 0) {
-			raWifiLog("peer closed after %d\n", total);
-			break;
-		}
-		if (got < 0) {
-			/*
-			    A timeout here is not a failure if bytes already arrived: it means the reply is
-			    in and only the close is missing, which is what the API's own answer being
-			    present settles. Reported either way, because "994 then timed out" and "timed
-			    out with nothing" are different worlds.
-			*/
-			raWifiLog("recv stopped after %d\n", total);
-			break;
-		}
-		total += got;
-	}
-	response[total] = 0;
-	lwip_close(sock);
-
-	raWifiLog("%d bytes back\n", total);
 	if (strstr(response, "invalid_credentials")) {
 		verdict.apiOk = 1;
 		raWifiLog("\x1b[32mthe API answered over plain HTTP\x1b[37m\n");
-	} else if (total > 0) {
+	} else if (got > 0) {
 		raWifiLog("\x1b[31mreply is not the API\x1b[37m\n");
 	}
+	raWifiLog("body: %s\n", raNetBody(response));
+}
+
+/*
+    Stage 10: r=login, with the credentials from ra.cfg.
+
+    The password is percent-encoded rather than pasted in, and that is the one detail in this
+    function that can fail convincingly: an `&` in a password ends the parameter early, a `+`
+    decodes as a space, a `%` opens an escape that is not there. Each produces a well-formed
+    request that comes back `invalid_credentials` -- so the user would be told their password
+    is wrong when it is not. tools/ra_launcher_test.c pins the encoder against exactly those.
+
+    Nothing secret is logged. Not the password, and not the token either: a token grants the
+    same power over the account, and this log is a file whose purpose is to be sent to someone.
+    A length answers the only question a log needs to answer.
+*/
+static void raWifiLogin(const raConfig* cfg) {
+	static char   response[2048];
+	char          user[3 * sizeof(cfg->username)];
+	char          pass[3 * sizeof(cfg->password)];
+	char          path[320];
+	char          token[64];
+	raNetProgress p;
+	int           got;
+
+	if (!cfg->usable) {
+		raWifiLog(cfg->found
+		          ? "\x1b[33mra.cfg has no username/password; login skipped\x1b[37m\n"
+		          : "\x1b[33mno ra.cfg; login skipped\x1b[37m\n");
+		return;
+	}
+
+	if (!raNetUrlEncode(cfg->username, user, sizeof(user))
+	 || !raNetUrlEncode(cfg->password, pass, sizeof(pass))) {
+		raWifiLog("\x1b[31mcredentials too long to encode\x1b[37m\n");
+		return;
+	}
+	if (sniprintf(path, sizeof(path), "/dorequest.php?r=login&u=%s&p=%s", user, pass)
+	    >= (int)sizeof(path)) {
+		raWifiLog("\x1b[31mlogin request too long\x1b[37m\n");
+		return;
+	}
+
+	raWifiLog("logging in as    %s\n", cfg->username);
+
+	memset(&p, 0, sizeof(p));
+	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+	if (got < 0) {
+		raWifiLog("\x1b[31mlogin HTTP failed at step %d\x1b[37m\n", -got);
+		return;
+	}
+	raWifiLog("%d bytes back\n", got);
+
+	if (raNetJsonString(response, "Token", token, sizeof(token))) {
+		verdict.loggedIn = 1;
+		raWifiLog("\x1b[32mlogged in, token %s\x1b[37m\n", raConfigRedact(token));
+		return;
+	}
+
+	/*
+	    The API's own error, verbatim -- it distinguishes a wrong password from a banned
+	    account from a malformed request, and guessing between those from a console is exactly
+	    what this project does not do.
+	*/
 	{
-		const char* body = strstr(response, "\r\n\r\n");
-		raWifiLog("body: %s\n", body ? body + 4 : response);
+		char code[64];
+
+		if (raNetJsonString(response, "Code", code, sizeof(code))) {
+			raWifiLog("\x1b[31mlogin refused: %s\x1b[37m\n", code);
+		} else {
+			raWifiLog("\x1b[31mno token in the reply\x1b[37m\n");
+		}
+		raWifiLog("body: %s\n", raNetBody(response));
 	}
 }
 
 void raWifiProbe(bool sdFound, const char* ndsPath) {
-	int stage;
+	static raConfig config;
+	int             stage;
 
 	logFile = fopen(sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT, "w");
 
@@ -559,6 +562,36 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	}
 	raWifiReportHeap("after hash");
 
+	/*
+	    Step 3c's half that needs no network. Read here, beside the hash, for the same reason:
+	    a missing or malformed config file should be a line in the log before anything can be
+	    blamed on the radio.
+
+	    Reported in detail because every field is a way for a login to fail silently -- an empty
+	    username, a `notYet` count that is really a typo, a `password=` line the user thought
+	    they filled in. The secret itself is never printed: see raConfigRedact().
+	*/
+	raWifiLog("\n-- stage 0c: the RetroAchievements config --\n");
+	raConfigRead(sdFound ? RA_CFG_PATH : RA_CFG_PATH_FAT, &config);
+	raWifiLog("ra.cfg           %s\n", config.found ? "found" : "absent");
+	if (config.found) {
+		raWifiLog("username         %s\n", config.username[0] ? config.username : "(empty)");
+		raWifiLog("password         %s\n", raConfigRedact(config.password));
+		raWifiLog("hardcore         %s\n", config.hardcore ? "1" : "0");
+		if (config.notYet) {
+			raWifiLog("%u keys parsed but not acted on yet\n", config.notYet);
+		}
+		if (config.unknown) {
+			raWifiLog("\x1b[33m%u unknown keys -- check for typos\x1b[37m\n", config.unknown);
+		}
+		if (config.badLines) {
+			raWifiLog("\x1b[33m%u lines with no '='\x1b[37m\n", config.badLines);
+		}
+	} else {
+		raWifiLog("put username= and password= in\n%s\n",
+		          sdFound ? RA_CFG_PATH : RA_CFG_PATH_FAT);
+	}
+
 	raWifiLog("\n-- the ARM7 half --\n");
 
 	if (!raWifiWaitArm7()) {
@@ -600,8 +633,12 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	raWifiReportHeap("with lwip up");
 
 	raWifiLog("\n-- stage 7-9: reach the API over plain HTTP --\n");
-	raWifiHttpGet();
+	raWifiReachApi();
 	raWifiReportHeap("after HTTP");
+
+	raWifiLog("\n-- stage 10: log in --\n");
+	raWifiLogin(&config);
+	raWifiReportHeap("after login");
 
 done:
 	/*
@@ -647,6 +684,7 @@ done:
 	          verdict.dnsOk ? "ok" : "no",
 	          verdict.tcpOk ? "ok" : "no",
 	          verdict.apiOk ? "ok" : "no");
+	raWifiLog("logged in        %s\n", verdict.loggedIn ? "yes" : "no");
 	if (verdict.mboxAllocFailed) {
 		raWifiLog("\x1b[31mthe ARM7 could not allocate its mboxes\x1b[37m\n");
 	}
@@ -657,7 +695,9 @@ done:
 	}
 
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);
-	if (stage >= RA_WIFI_STAGE_ANSWERED) {
+	if (stage >= RA_WIFI_STAGE_LOGGED_IN) {
+		raWifiLog("logged in from the launcher.\n");
+	} else if (stage >= RA_WIFI_STAGE_ANSWERED) {
 		raWifiLog("the launcher can reach RetroAchievements.\n");
 	} else if (stage >= RA_WIFI_STAGE_READY) {
 		raWifiLog("the link is up; the IP stack is where it stopped.\n");

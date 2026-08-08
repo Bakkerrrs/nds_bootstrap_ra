@@ -962,6 +962,62 @@ cannot be blamed on one. And it reads the ROM off the card while the heap is sti
 `ra_hash.c` streams, but libfat still wants buffers, and there is no reason to make it compete
 with lwip for them.
 
+### Step 3c — the config file, and the one function that can lie convincingly
+
+`r=login` is small: one GET, one token out of the reply. What it needs around it is a place to
+keep credentials and a way to put them in a URL without corrupting them, and the second of those
+is where the whole step can go silently wrong.
+
+**The format is odelot's**, from his MiSTer core — `key=value`, `#` comments, credentials at the
+top — because that is the file this project's user already has, and a format someone can copy
+from a working example beats a tidier one they have to learn. `tools/ra.example.cfg` ships it;
+the launcher reads `sd:/_nds/nds-bootstrap/ra.cfg`.
+
+His file carries a dozen keys about popups and leaderboards that describe an overlay this fork
+does not have. Rejecting them would make his file unusable here for no reason; accepting them
+in silence would make a typo indistinguishable from a feature that is simply not built. So the
+ones we know are counted as recognised-but-not-yet, and only genuinely unknown keys are
+reported.
+
+**The password stays in the file.** That is a decision on the record: caching only a token after
+one login was offered and declined, so `r=login` sends the password in the clear on every boot
+and the file sits readable on the card. What the code does do is keep it out of the log —
+`raConfigRedact()` turns any secret into `(set, N chars)`, and the token gets the same treatment,
+because a token grants the same power over the account and the log's entire purpose is to be
+sent to someone.
+
+#### Percent-encoding is the part that would have been blamed on the user
+
+A password is user text. An `&` ends the query parameter early, so the server sees a shorter
+password; a `+` decodes as a space; a `%` opens an escape that is not there. Every one of those
+builds a **well-formed request that comes back `invalid_credentials`** — which from the console
+is indistinguishable from the password simply being wrong. The user would have been told their
+password was wrong when it was not, and would have retyped it.
+
+So `raNetUrlEncode()` exists as a function with a host test rather than as a `sniprintf`, and
+`tools/ra_launcher_test.c` feeds it exactly those characters plus a non-ASCII one, and checks
+that truncation is *reported* rather than swallowed — a silently shortened password being the
+same bug in a different coat.
+
+The config parser is tested against **odelot's example verbatim**, because "his file works here"
+is the actual requirement and a fixture invented for the test cannot check it.
+
+#### ra_net exists now, which the layering table has been promising since phase 0
+
+The table at the top of this document has had an `ra_net` row — *"HTTP(S) transport to the RA
+servers. rcheevos ships no networking"* — since before any of it was written. The GET lived
+inside `ra_wifi.c` while there was exactly one request to make. With `r=login` there are two and
+`r=patch` makes three, so it moved: `raNetHttpGet()`, `raNetBody()`, `raNetJsonString()`.
+
+`raNetJsonString()` is deliberately not a JSON parser. It matches `"key":"` and copies to the
+closing quote, which is enough for `r=login`'s flat object of scalars and knowingly not enough
+for `r=patch`'s nested one. Dragging a parser in before something needs it would mean shipping
+untested code; 3d is where it earns its place.
+
+The ladder grows one rung to **10**, and the file the host test reads is still a 9-rung run —
+which is the point of reading real logs rather than transcriptions: the fixture did not have to
+be edited to stay true.
+
 #### The ARM7 was supposed to be the wall. It is not, and the reason is a section name
 
 The one thing this could not be reasoned about was space. dsiwifi's ARM7 half is ~13,000
@@ -1283,6 +1339,9 @@ encoding) and it looked as though nothing was being read. Liveness is proved by
 | `tools/ra_reader_test.c` / `.sh` | Host-side test for the watchlist, the chain walker, the example file and step two's log classifier |
 | `tools/ra_hash_test.c` | Host-side test for step 3b: our ROM hash against rcheevos' own. Its own binary, for a reason worth reading |
 | `retail/arm9/source/ra_hash.c` | The ROM's RetroAchievements hash, streamed rather than allocated |
+| `retail/arm9/source/ra_cfg.c` | The `ra.cfg` reader, and the redaction that keeps secrets out of the log |
+| `retail/arm9/source/ra_net.c` | `ra_net`: the HTTP GET, the query encoder, and just enough JSON |
+| `tools/ra.example.cfg` | The config file to copy to the card |
 | `retail/common/include/ra_wifi.h` | Step two: the `RA_LAUNCHER_WIFI` switch, the stage ladder, the verdict struct |
 | `retail/arm9/source/ra_wifi.c` | Step two on the ARM9: one IPC message, the log, the summary |
 | `retail/arm9/source/ra_wifi_verdict.c` | Reads how the chip arrived out of dsiwifi's log text. Host-tested |
@@ -1745,8 +1804,8 @@ things to test. So the order is not "build the client":
      launcher*.
    - **3b, game identification — written, host-verified, not yet run.** The launcher computes
      the ROM's RetroAchievements hash and logs it. See *Step 3b* below.
-   - **3c, `r=login`.** A token, and the first time this project handles a real password —
-     over cleartext, which is the user's call to make knowingly (see *#1a*).
+   - **3c, `r=login` — written, host-verified, not yet run.** Credentials from a config file,
+     percent-encoded, and a token back. See *Step 3c* below.
    - **3d, `r=patch` and parsing.** JSON in, memaddr strings out, into the block that already
      works.
 4. **Only after those**, live submission from inside the game — context **B**, behind the
