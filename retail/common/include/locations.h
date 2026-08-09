@@ -146,25 +146,6 @@
 #define CARDENGINEI_ARM9_RA_DEFS_MAGIC               0x31414452
 #define CARDENGINEI_ARM9_RA_DEFS_MAX                 0x8000
 #define CARDENGINEI_ARM9_RA_DEFS_HEADER              0x8
-
-/*
-    The launcher's log, carried into the game inside whatever the achievement set left unused.
-
-    A reader inside the game needs the text in memory the ARM9 can reach, and the obvious route -- give
-    the in-game menu the log file's cluster -- means a second trip through loadCrt0, two bootloaders and
-    ce7 for one diagnostic. This block is already copied into DSi WRAM by the bootloader and already read
-    by the ARM9, so it costs nothing new.
-
-    Laid out after the definitions rather than at a fixed offset, because the definitions are the tenant
-    with the claim: magic and length at HEADER + defsLength + 1, text after that. A set that fills the
-    block simply leaves no log, which is the right precedence -- Mario 64's unfiltered set is 28,924 of
-    32,759 bytes and Contra 4's is 7,416, so in practice there is room and sometimes there is not.
-
-    Reads as "RLG1" in a byte dump, so it can be found by eye in the RAM viewer.
-*/
-#define CARDENGINEI_ARM9_RA_LOG_MAGIC                0x31474C52
-#define CARDENGINEI_ARM9_RA_LOG_HEADER               0x8
-#define CARDENGINEI_ARM9_RA_LOG_MIN                  512   /* below this it is not worth the room */
 #define CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION   (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x30000)
 #define CARDENGINEI_ARM9_RA_DEFS_LOCATION            (CARDENGINEI_ARM9_RA_LOCATION + CARDENGINEI_ARM9_RA_SIZE - CARDENGINEI_ARM9_RA_DEFS_MAX)
 
