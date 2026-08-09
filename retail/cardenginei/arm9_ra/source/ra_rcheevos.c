@@ -830,19 +830,38 @@ static u8 ra_rc_prepare(raSnapshot* snapshot) {
 }
 
 /*
-    One definition, then out. Returns RA_RC_LOADING while any remain.
+    As many definitions as fit a scanline budget, then out. Returns RA_RC_LOADING while any remain.
+
+    It used to do exactly one per frame, and hardware showed why that was wrong. A Contra 4 session
+    read `rcStage 5` (loading), `rcActivated 14` of 45 and **`rcPeeks 0`** -- rc_runtime_do_frame had
+    never run once, so nothing could ever unlock. `ticks` and `wramTicks` both stopped at 15, so the
+    reader got fifteen frames and one-per-frame needed forty-five. The set was never armed.
+
+    Why the reader stops at fifteen frames is a separate and still-open question. This does not depend
+    on the answer: finishing in a handful of frames instead of forty-five means the set is armed inside
+    whatever window exists, which is worth having either way -- an achievement that arms half a second
+    into a session rather than three quarters is strictly better even when nothing is broken.
+
+    The budget is measured rather than guessed. rcInitLines reported 27 scanlines for the most
+    expensive single definition of this set against a frame of 263, so RA_RC_INIT_BUDGET_LINES sits
+    under half a frame and at least one definition is always attempted -- the check is after the work,
+    so a definition costing more than the whole budget still makes progress instead of deadlocking.
 
     Every line gets its own achievement id, numbered from RA_TEST_ACHIEVEMENT_ID, so the first
     keeps the id the measured-progress fields report on and the rest still count toward
     rcTriggered. rcActivate carries the *first* failure rather than the last -- a set with one bad
     line among fifty-six should say which, not be overwritten by whichever came last.
 */
+#define RA_RC_INIT_BUDGET_LINES 120
+
 static u8 ra_rc_activate_next(raSnapshot* snapshot) {
 	int one;
 	u16 startLine;
 	u16 spent;
+	u16 spentThisFrame = 0;
 	u8  line;
 
+	for (;;) {
 	/* Skip watch lines; ra_rc_prepare() already dealt with them. */
 	while (defIndex < defCount
 	    && defLines[defIndex][0] == 'W'
@@ -850,7 +869,10 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
 		defIndex++;
 	}
 
-	if (defIndex < defCount) {
+	if (defIndex >= defCount) {
+		break;
+	}
+	{
 		line = defIndex;
 		defIndex++;
 
@@ -890,7 +912,15 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
 		snapshot->rcActivated = activatedCount;
 		snapshot->rcActivate  = (s8)defFirstError;
 
-		return RA_RC_LOADING;
+		/*
+		    Checked after the work, so a single definition more expensive than the whole budget still
+		    advances by one rather than being attempted forever.
+		*/
+		spentThisFrame += spent;
+		if (spentThisFrame >= RA_RC_INIT_BUDGET_LINES) {
+			return RA_RC_LOADING;
+		}
+	}
 	}
 
 	/*

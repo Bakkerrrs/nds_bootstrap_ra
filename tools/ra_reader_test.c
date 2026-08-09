@@ -847,8 +847,14 @@ int main(void) {
 			ra_wram_tick(&snapshot);
 			ticks++;
 		}
-		/* One tick to activate the single self-test definition, one to finish and evaluate. */
-		CHECK(ticks == 2);
+		/*
+		    Settled, and in a bounded number of ticks -- not in a *specific* number. Activation is
+		    budgeted by scanlines now (see RA_RC_INIT_BUDGET_LINES), and on a host RA_VCOUNT is a
+		    mapped register that never advances, so every activation measures as free and the batch
+		    finishes in one pass. Pinning 2 would pin that accident rather than the behaviour.
+		*/
+		CHECK(ticks >= 1);
+		CHECK(snapshot.rcStage >= RA_RC_ACTIVE);
 	}
 	CHECK(snapshot.rcActivate == 0);                  /* RC_OK */
 	CHECK(snapshot.rcStage == RA_RC_FRAME);
@@ -1413,11 +1419,19 @@ int main(void) {
 				}
 				CHECK(stage == RA_RC_ACTIVE);
 				/*
-				    One pass per line plus the one that finishes: a machine that silently
-				    skipped definitions would still reach ACTIVE, and this is what says it
-				    did not.
+				    The count of passes is no longer the property worth pinning. Activation is
+				    budgeted by scanlines now -- as many definitions per call as fit under
+				    RA_RC_INIT_BUDGET_LINES -- because one-per-frame left a real set unarmed:
+				    hardware read rcActivated 14 of 45 with rcPeeks still 0, so the reader's
+				    fifteen frames never covered forty-five definitions.
+				    
+				    On a host RA_VCOUNT is a mapped register that does not advance, so every
+				    activation measures as free and the whole set lands in one pass. Pinning a
+				    number here would pin that accident. What matters is that nothing was
+				    skipped, and rcActivated says so directly.
 				*/
-				CHECK(passes == 4);
+				CHECK(passes >= 1);
+				CHECK(probe.rcActivated == 3);   /* the three definitions this fixture stages */
 			}
 			CHECK(probe.rcFromFile == 1);
 			/*
