@@ -726,6 +726,17 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	    the block alone cannot say which of those happened.
 	*/
 	raWifiLog("ids              %u with, %u without\n", patch.withId, patch.withoutId);
+	/*
+	    The one this project cannot explain, with the reply's own bytes around it. Two lookups
+	    established that the set publishes 55 achievements while 56 core definitions arrive, and that
+	    the extra id returns NOT FOUND -- so what is left is to see what object it is in, verbatim,
+	    rather than to infer a filter from a threshold. See RA_ODD_ID_FROM.
+	*/
+	if (patch.oddIds) {
+		raWifiLog("\x1b[33m%u id(s) at or above %u, first %lu\x1b[37m\n",
+		          patch.oddIds, (unsigned)RA_ODD_ID_FROM, (unsigned long)patch.oddId);
+		raWifiLog("context: %s\n", patch.oddContext);
+	}
 	if (patch.dropped || patch.tooLong || patch.cutShort || patch.empty
 	 || patch.oddFlags || patch.noFlags) {
 		/*

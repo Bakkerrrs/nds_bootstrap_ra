@@ -177,6 +177,12 @@ static void raPatchCommit(raPatch* p) {
 		    here rather than measured separately so `wanted` stays the one number that answers
 		    "would a complete set have fit".
 		*/
+		if (p->pendingId >= RA_ODD_ID_FROM) {
+			p->oddIds++;
+			if (p->oddId == 0) {
+				p->oddId = p->pendingId;
+			}
+		}
 		if (p->pendingId) {
 			p->withId++;
 			idLength = raPatchIdDigits(p->pendingId) + 1;   /* the digits and the colon */
@@ -244,6 +250,14 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 
 	for (i = 0; i < length; i++) {
 		const char c = data[i];
+
+		if (p->oddCapture && p->oddFill < RA_ODD_CONTEXT_MAX - 1) {
+			p->oddContext[p->oddFill++] = c;
+			p->oddContext[p->oddFill]   = 0;
+			if (p->oddFill >= RA_ODD_CONTEXT_MAX - 1) {
+				p->oddCapture = 0;
+			}
+		}
 
 		if (p->state == RA_PATCH_VALUE) {
 			if (p->escape) {
@@ -313,6 +327,15 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 				continue;
 			}
 			p->idBad = 0;
+			/*
+			    The digits are in. If this id is one of the ones nobody can explain, start copying
+			    the reply verbatim from here -- the fields that would identify it (Title, Points,
+			    Flags, Type) all follow the id in the object, so this is the only place they can be
+			    caught without holding a reply that does not fit.
+			*/
+			if (p->pendingId >= RA_ODD_ID_FROM && p->oddFill == 0) {
+				p->oddCapture = 1;
+			}
 			/*
 			    Falls through to the scanner with the same character, for the reason the Flags state
 			    does: what ends the digits could be the quote that opens the next key.
@@ -401,6 +424,11 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->state     = RA_PATCH_ID;
 			p->pendingId = 0;
 			p->idBad     = 0;
+			/*
+			    A fresh id begins, so any capture in progress is for the previous one and is done.
+			    Only the first odd id is captured -- one example is what identifies the shape.
+			*/
+			p->oddCapture = 0;
 			p->memAt     = 0;
 			p->flagsAt   = 0;
 			p->idAt      = 0;

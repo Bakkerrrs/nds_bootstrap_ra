@@ -307,6 +307,28 @@ typedef struct raNetStream {
     every run precisely so that margin stays a measurement -- another game will have another
     largest, and the log will say so instead of five achievements quietly not existing.
 */
+/*
+    Ids at or above this are not published achievements, on the evidence of one set and two lookups:
+    the set for GameID 14856 staged **56** core definitions while retroachievements.org lists **55**,
+    and the extra one -- `101000001:1=1.300.` -- returns NOT FOUND at
+    retroachievements.org/achievement/101000001. Every genuine id in that set is between 92,869 and
+    579,308.
+
+    It is **not filtered on that basis**, and the distinction matters. One set and one id is not a
+    rule, and a filter inferred from it would silently drop something real the first time RA numbers
+    an achievement differently. What happens instead is that the reply's own bytes around such an id
+    are captured and logged, so the next run says what the object *is* -- its Title, its Points, its
+    Type -- rather than leaving this project with a threshold it cannot justify.
+
+    The likely explanation is already written down as a known limitation: the scanner does not know
+    which object a `MemAddr` belonged to, and this game has subsets -- its page redirects to
+    `game/9983?set=6112`. A flat scan over a reply with more than one set reads across all of them.
+*/
+#define RA_ODD_ID_FROM 100000000u
+
+/* Enough of the reply after an odd id to show its Title, Points, Flags and Type. */
+#define RA_ODD_CONTEXT_MAX 240
+
 #define RA_PATCH_MEMADDR_MAX 8192
 
 #define RA_PATCH_SCAN   0
@@ -343,6 +365,10 @@ typedef struct raPatch {
 	u32   pendingId;      /* the "ID" seen most recently, waiting for its MemAddr */
 	u16   withId;         /* definitions written with a RetroAchievements id */
 	u16   withoutId;      /* ...and without one, which is a set we cannot report on */
+	u16   oddIds;         /* ids at or above RA_ODD_ID_FROM -- see there */
+	u32   oddId;          /* the first of them */
+	u16   oddFill;        /* how much of oddContext is written */
+	char  oddContext[RA_ODD_CONTEXT_MAX];
 
 	u16   kept;           /* written to the block */
 	u16   unofficial;     /* dropped: Flags 5, not part of the published set */
@@ -362,6 +388,7 @@ typedef struct raPatch {
 	u8    flagsAt;
 	u8    idAt;
 	u8    idBad;          /* the id being read will not fit a u32; treat the line as id-less */
+	u8    oddCapture;     /* copying the reply into oddContext right now */
 	u8    escape;
 	u8    pendingOpen;    /* a value has started, so there is something to commit */
 	u8    pendingBad;     /* ...and it overran RA_PATCH_MEMADDR_MAX */

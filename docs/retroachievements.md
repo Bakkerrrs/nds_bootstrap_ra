@@ -3971,6 +3971,32 @@ this unlock to the server on every single boot.** So the id needs identifying be
 and if it turns out not to be a published achievement then the set needs a filter this project does
 not have yet — `Flags` 3 versus 5 does not separate it, since it arrived as core.
 
+#### `101000001` is not a published achievement, and it is not being filtered
+
+Two lookups settled it. `retroachievements.org/achievement/101000001` returns **NOT FOUND**, and the
+set's own page — which redirects to `retroachievements.org/game/9983?set=6112` — lists **55**
+achievements against the **56 core definitions** that arrive. The extra one is exactly that id, and
+its definition is `1=1.300.`: always true, three hundred hits, unlocking five seconds into every
+session.
+
+**It is still staged, and that is deliberate.** One set and one id is not a rule. A filter on
+"ids at or above 100,000,000 are not real" would be inferred from a single data point, and the first
+time RetroAchievements numbers a genuine achievement differently it would drop something real —
+silently, which is the failure this document keeps refusing to ship.
+
+So what happens instead is that the reply's own bytes are captured. When an id at or above
+`RA_ODD_ID_FROM` completes, the scanner copies the following **240 bytes of the reply verbatim** into
+`oddContext` and the log prints them. The fields that identify an object — `Title`, `Points`,
+`Flags`, `Type` — all follow the id inside it, so this is the one place they can be caught without
+holding a reply that does not fit in memory. One example, the first, because one is what identifies a
+shape.
+
+The likely answer is already written down as a known limitation of the scanner: **it does not know
+which object a `MemAddr` belonged to**, and this game has subsets. A flat scan over a reply
+containing more than one set reads across all of them. If the captured context shows this id sitting
+in a second set rather than in `Achievements`, the fix is a structural one — track which array the
+scanner is inside — and not a threshold.
+
 #### The bug the data walked into
 
 `101000001` is nine digits, and the clamp guarding both id parsers was:

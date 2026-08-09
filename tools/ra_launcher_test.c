@@ -678,6 +678,28 @@ static void test_patch(void) {
 		CHECK(patch.kept == 1 && patch.withId == 0 && patch.withoutId == 1);
 		CHECK(strcmp(block, "0xH1=1\n") == 0);
 
+		/*
+		    An id nobody can explain is *counted and captured*, not filtered. The set for GameID
+		    14856 staged 56 core definitions against 55 published achievements, and the extra id --
+		    101000001 -- returns NOT FOUND on the site. One set and one id is not a rule, so the
+		    reply's own bytes around it are kept and the definition still stages. What identifies it
+		    is the Title and Points that follow the id in the object, which is exactly what the
+		    capture holds.
+		*/
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch,
+			"{\"ID\":93121,\"MemAddr\":\"0xH1=1\",\"Title\":\"Real\",\"Flags\":3},"
+			"{\"ID\":101000001,\"MemAddr\":\"1=1.300.\",\"Title\":\"Odd One\","
+			"\"Points\":0,\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 2);
+		CHECK(patch.oddIds == 1 && patch.oddId == 101000001);
+		/* The capture starts at the byte after the id's digits, so the fields follow it verbatim. */
+		CHECK(strstr(patch.oddContext, "Odd One") != NULL);
+		CHECK(strstr(patch.oddContext, "\"Points\":0") != NULL);
+		/* And it is the *first* odd id only -- one example identifies the shape. */
+		CHECK(strstr(patch.oddContext, "Real") == NULL);
+
 		/* Ids survive being split across chunks like everything else. */
 		{
 			const char* reply = "\"ID\":123456,\"MemAddr\":\"0xH9=9\",\"Flags\":3";
