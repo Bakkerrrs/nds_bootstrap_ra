@@ -4986,6 +4986,32 @@ draws on the sub engine, which is the same screen the in-game menu occupies, so 
 be seen while the RAM viewer is open: a visibility check has to be made with the menu closed. I asked
 for a reading that could not have produced one.
 
+### The palette hypothesis is dead, and the notification appears
+
+`overlayState` read **0x08** on Contra 4: bit 0 clear, so **BG extended palettes were off**. The
+explanation this section was built around is wrong, killed by the one bit it was worth spending to
+measure. The layer borrowed was 0 and the block was 1.
+
+And in the same run the notification **appeared** -- in Contra 4, and in Super Mario 64 DS -- flickering
+rapidly, without disturbing the game's graphics. So the earlier reading, where the message was absent
+and the game's own tiles flickered instead, was not a property of the game. It is **scene-dependent**:
+whether a character block is genuinely free depends on what the game is drawing at that moment. Calling
+Contra 4 "a game where the overlay never appears" was too coarse a claim, and it came from a small
+number of observations of one scene.
+
+The counters keep agreeing on the arithmetic: `shows` read 2 at 313 ticks, against
+`(313 - 60) / 240 + 1 = 2`.
+
+The rapid flicker has a candidate that the same run supports rather than a new hypothesis.
+`rearmDispstat` read 71, so Contra 4 rewrites the sub engine's display registers constantly -- and the
+overlay's hold path re-asserts `SUB_BGCNT`, the scroll registers and the layer-enable bit once per
+frame, from a VCOUNT handler that runs at line 0. A game that writes `SUB_DISPCNT` later in the same
+frame wins that frame; we win the next. Visible on alternate frames is exactly a fast flicker, and it
+predicts that re-asserting later in the frame -- or accepting a lower Y-trigger -- would steady it.
+
+Not built on that, because it is one hypothesis with one supporting number. But it is testable and it
+costs nothing to state before the run that would check it.
+
 ### The original plan for that pair, kept for the record
 
 The decisive form is a *controlled* pair, and it costs ten seconds: run the `RA_OVERLAY_DEMO=60` probe
