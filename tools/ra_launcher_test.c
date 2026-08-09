@@ -656,6 +656,28 @@ static void test_patch(void) {
 		CHECK(strcmp(block, "14856:0xH1=1\n77:0xH2=2\n") != 0);
 		CHECK(strcmp(block, "0xH1=1\n77:0xH2=2\n") == 0);
 
+		/*
+		    Nine digits, from the real set, and ten, which a u32 holds. The clamp this replaced
+		    stopped at 100,000,000 and would have turned a ten-digit id into a nine-digit one.
+		*/
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "{\"ID\":101000001,\"MemAddr\":\"1=1.300.\",\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.withId == 1);
+		CHECK(strcmp(block, "101000001:1=1.300.\n") == 0);
+
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "{\"ID\":4294967295,\"MemAddr\":\"0xH1=1\",\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(strcmp(block, "4294967295:0xH1=1\n") == 0);
+
+		/* And past a u32 it is refused rather than shortened, so the line stages without an id. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "{\"ID\":99999999999,\"MemAddr\":\"0xH1=1\",\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.withId == 0 && patch.withoutId == 1);
+		CHECK(strcmp(block, "0xH1=1\n") == 0);
+
 		/* Ids survive being split across chunks like everything else. */
 		{
 			const char* reply = "\"ID\":123456,\"MemAddr\":\"0xH9=9\",\"Flags\":3";

@@ -361,6 +361,7 @@ typedef struct raPatch {
 	u8    memAt;
 	u8    flagsAt;
 	u8    idAt;
+	u8    idBad;          /* the id being read will not fit a u32; treat the line as id-less */
 	u8    escape;
 	u8    pendingOpen;    /* a value has started, so there is something to commit */
 	u8    pendingBad;     /* ...and it overran RA_PATCH_MEMADDR_MAX */

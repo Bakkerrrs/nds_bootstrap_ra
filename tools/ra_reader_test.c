@@ -1438,6 +1438,32 @@ int main(void) {
 		CHECK(ra_take_id(&at) == 0);
 		CHECK(strcmp(at, "0xH000010>d0xH000010") == 0);
 
+		/*
+		    Nine digits, because the real set has one: line 1 of GameID 14856 is
+		    `101000001:1=1.300.`. And ten, which a u32 holds and the first clamp would have
+		    silently shortened by a digit -- naming a different achievement.
+		*/
+		strcpy(line, "101000001:1=1.300.");
+		at = line;
+		CHECK(ra_take_id(&at) == 101000001);
+		CHECK(strcmp(at, "1=1.300.") == 0);
+
+		strcpy(line, "4294967295:0xH1=1");
+		at = line;
+		CHECK(ra_take_id(&at) == 4294967295u);
+		CHECK(strcmp(at, "0xH1=1") == 0);
+
+		/*
+		    Past a u32 the id is refused -- but the prefix is still stripped, because a line left
+		    with digits and a colon on the front is not memaddr syntax and rcheevos would refuse the
+		    whole definition. Losing the ability to report one achievement beats losing the
+		    achievement.
+		*/
+		strcpy(line, "99999999999:0xH1=1");
+		at = line;
+		CHECK(ra_take_id(&at) == 0);
+		CHECK(strcmp(at, "0xH1=1") == 0);
+
 		/* An id of 1 is a real id, and is not the same thing as no id. */
 		strcpy(line, "1:0xH1=1");
 		at = line;

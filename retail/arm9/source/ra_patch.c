@@ -287,15 +287,32 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 
 		if (p->state == RA_PATCH_ID) {
 			if (c >= '0' && c <= '9') {
+				const u32 digit = (u32)(c - '0');
+
 				/*
-				    Clamped rather than wrapped. RA ids are six or seven digits today; a value that
-				    overflowed would name a different achievement, which is worse than naming none.
+				    Refused on overflow, not clamped -- and this is a correction rather than a
+				    precaution. The first version stopped accumulating above 100,000,000 on the
+				    reasoning that "RA ids are six or seven digits today", and then the real set for
+				    GameID 14856 turned up with **101000001** on its first line. That one happens to
+				    survive the clamp; a ten-digit id, which a u32 holds perfectly well, would have
+				    come out one digit short and named a different achievement. Silently.
+				
+				    So a value that will not fit sets the sticky bad flag and the definition ends up
+				    counted in withoutId. No id is a definition that cannot be reported; a wrong id
+				    is an unlock awarded to somebody else's achievement.
 				*/
-				if (p->pendingId < 100000000u) {
-					p->pendingId = p->pendingId * 10 + (u32)(c - '0');
+				if (p->idBad) {
+					continue;
 				}
+				if (p->pendingId > (0xFFFFFFFFu - digit) / 10u) {
+					p->idBad     = 1;
+					p->pendingId = 0;
+					continue;
+				}
+				p->pendingId = p->pendingId * 10 + digit;
 				continue;
 			}
+			p->idBad = 0;
 			/*
 			    Falls through to the scanner with the same character, for the reason the Flags state
 			    does: what ends the digits could be the quote that opens the next key.
@@ -383,6 +400,7 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			*/
 			p->state     = RA_PATCH_ID;
 			p->pendingId = 0;
+			p->idBad     = 0;
 			p->memAt     = 0;
 			p->flagsAt   = 0;
 			p->idAt      = 0;

@@ -133,10 +133,15 @@ paying for them:
 The immediate next step is **step 4**, and it splits into two failures that are worth keeping
 apart, because they have different fixes.
 
-**4a is confirmed on hardware, and step 5 — the block carrying achievement ids — is written and
-awaiting a run.** Ids gate everything that reports: `r=unlocks` answers in them and
-`r=awardachievement` is asked in them. Read `rcDefsWithId` at `0x027FEDF4` and `rcFirstId` at
-`0x027FEDF0`; see *Step 5* below.
+**4a and step 5 are both confirmed on hardware.** The block carries RetroAchievements' own ids —
+`56 with, 0 without`, all distinct — and `rcFirstId` read **101000001**, matching line 1 of the dump
+to the digit across eight hops.
+
+**The next thing is not code, it is one lookup.** `101000001` is nine digits where every other id in
+the set is between 92,869 and 579,308, its definition is `1=1.300.`, and it unlocks five seconds into
+every session. Step 6 would report that to the server on every boot, so
+`retroachievements.org/achievement/101000001` needs checking before anything reports. See
+*Confirmed on hardware: the ids arrived* below.
 
 **Both halves of the offline path are done, and 4a — fetch at boot, then boot — is confirmed on
 hardware.** What remains is **4b**: `r=awardachievement` at the moment an achievement fires, which is
@@ -3924,6 +3929,68 @@ still read 1.
 The block grows by the ids: 56 of about six digits plus a colon is **+392 bytes**, taking it from
 28,585 to roughly **28,977 of 32,759 — 88.5% full**. Which moves the block-size question from
 "comfortable" to "worth watching", and `wanted` reports it either way.
+
+### Confirmed on hardware: the ids arrived, and one of them is worth a second look
+
+```
+definitions      56 kept, 3 unofficial
+ids              56 with, 0 without
+block            28943 of 32759 used, 28943 wanted
+def 1    18      101000001:1=1.300.
+def 2  1232      93121:R:0xH09cab4>0_R:0xH09cab5>0_...
+def 3  6270      93119:0xT0009caa8=0.100._P:0x 0017e874=64.1._...
+```
+
+Log at `docs/logs/ra_wifi_launcher_ids-3ds.log`, set at `docs/logs/ra_definitions-14856-ids.txt`.
+And from the snapshot:
+
+| Field | Read | |
+| --- | --- | --- |
+| `rcDefsWithId` | **56** | every definition carried one |
+| `rcDefsNoId` | **0** | |
+| **`rcFirstId`** | **101000001** | and line 1 of the dump is `101000001:1=1.300.` |
+
+`rcFirstId` matching the file to the digit is the end-to-end proof: server → streaming scanner →
+staging block → bootloader copy → the cardengine's splitter → rcheevos' own identity for the
+trigger → the event handler → the snapshot. Eight hops, one number.
+
+All 56 ids are distinct, which matters more than it looks: rcheevos identifies achievements by id
+and *reuses the trigger of one it has already seen*, so a duplicate would have silently merged two
+achievements into one. The block landed at **28,943 of 32,759 — 88.4% full**, against a prediction
+of 28,977; ids average 5.4 characters rather than the 6 assumed.
+
+#### `101000001`
+
+Every other id in this set is between **92,869 and 579,308**. That one is nine digits, its
+definition is `1=1.300.` — always true, three hundred hits — and **it is the one that unlocks**,
+about five seconds into every session.
+
+What that is, I do not know, and it is not something to guess at: `retroachievements.org/achievement/101000001`
+settles it in one click. What matters is the consequence, and it is concrete. **Step 6 would report
+this unlock to the server on every single boot.** So the id needs identifying before anything reports,
+and if it turns out not to be a published achievement then the set needs a filter this project does
+not have yet — `Flags` 3 versus 5 does not separate it, since it arrived as core.
+
+#### The bug the data walked into
+
+`101000001` is nine digits, and the clamp guarding both id parsers was:
+
+```c
+if (id < 100000000u) { id = id * 10 + digit; }
+```
+
+written on the reasoning that "RA ids are six or seven digits today". That value survives it — but a
+**ten-digit id, which a `u32` holds perfectly well, would have come out one digit short**. Silently,
+and naming a different achievement. Which is exactly the failure mode called out one section above as
+worse than having no id at all, reintroduced two paragraphs later by a lazy bound.
+
+Both parsers refuse on overflow now instead of clamping, the same discipline `raNetJsonNumber()` has
+had since step 3c: a value that will not fit is not an id. In the scanner the definition is counted in
+`withoutId`; in the cardengine's `ra_take_id()` the prefix is **still stripped** even when the number
+is refused, because a line left with `<digits>:` on the front is not memaddr syntax and rcheevos would
+refuse the whole definition. Losing the ability to report one achievement beats losing the achievement.
+
+Pinned with `101000001` from the real set, `4294967295` at the u32 boundary, and `99999999999` past it.
 
 ## Known graphical limitations of the overlay (deferred)
 

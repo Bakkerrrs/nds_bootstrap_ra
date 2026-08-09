@@ -590,16 +590,32 @@ static u32 ra_take_id(char** line) {
 	if (digits == 0 || at[digits] != ':') {
 		return 0;
 	}
+
+	/*
+	    The prefix is stripped whether or not the number survives, and that distinction matters: a
+	    line left with `<digits>:` still on the front is not memaddr syntax and rcheevos would refuse
+	    the whole definition. So an id that will not fit costs the *reporting* of one achievement, not
+	    the achievement.
+	*/
+	*line = (char*)(at + digits + 1);
+
 	{
 		u32 i;
 		for (i = 0; i < digits; i++) {
-			/* Clamped rather than wrapped: a truncated id names a different achievement. */
-			if (id < 100000000u) {
-				id = id * 10 + (u32)(at[i] - '0');
+			const u32 digit = (u32)(at[i] - '0');
+
+			/*
+			    Refused on overflow rather than clamped, which is a correction. The first version
+			    stopped accumulating above 100,000,000 because "RA ids are six or seven digits", and
+			    the real set then arrived with 101000001 on its first line. A ten-digit id fits a u32
+			    and would have come out one digit short -- naming a different achievement, silently.
+			*/
+			if (id > (0xFFFFFFFFu - digit) / 10u) {
+				return 0;
 			}
+			id = id * 10 + digit;
 		}
 	}
-	*line = (char*)(at + digits + 1);
 	return id;
 }
 
