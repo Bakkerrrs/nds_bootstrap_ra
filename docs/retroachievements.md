@@ -4925,6 +4925,34 @@ priority of finishing 3b, which is all that stands between the loop starting fro
 starting from a text editor. The whole result cost one session and no code, which is what the experiment
 was for.
 
+## A second category of overlay failure: borrowed, drawn, invisible
+
+Everything catalogued below is a *denial* -- the overlay wanted a VRAM block or a background layer,
+found none free, and said so through `denied` or `deniedNoLayer`. Contra 4 is not that.
+
+On Contra 4 the notification reports `shows 1` with `denied`, `evicted` and `deniedNoLayer` all zero.
+It got its block, it got its layer, it held both for the full 180 frames, and it drew. And it is not
+seen. **"Drawn" and "visible" are different claims**, and the instrumentation only ever measured the
+first one -- which is why this went unnoticed for so long.
+
+It went unnoticed, but not unobserved. The demo-timer notification that pulsed reliably in several
+games **never appeared in Contra 4 either**, back in the phase 0.5 and phase 1 days, long before any
+of the recent work. So this is a long-standing, game-specific display conflict rather than anything
+the achievement path introduced -- and it also means the overlay itself is fine, since it is visible
+elsewhere with the same code.
+
+The leading explanation is one register bit. The glyph colour is written to standard palette RAM at
+`0x05000400`, and with **BG extended palettes** enabled the sub engine does not read that for
+backgrounds at all: the glyphs are drawn in whatever the game's extended palette holds at that index,
+which is very likely nothing. That fits every number -- borrowed, never refused, never reclaimed,
+invisible. `raSnapshot.overlayExtPal` records `SUB_DISPCNT` bit 30 at `show()` time so one run decides
+it instead of an argument.
+
+The decisive form is a *controlled* pair, and it costs ten seconds: run the `RA_OVERLAY_DEMO=60` probe
+on Contra 4, where the message is known not to appear, and on a game where it is known to appear.
+`overlayExtPal` differing between them is the answer; matching kills the hypothesis and sends the
+search to layer priority or the tile map.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
