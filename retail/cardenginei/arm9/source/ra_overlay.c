@@ -34,7 +34,7 @@
     while the demo timer's identical call *is* seen because it fires on an ordinary frame.
 */
 #define SUB_MASTER_BRIGHT (*(vu16*)0x0400106C)
-#define SUB_BG0CNT   (*(vu16*)0x04001008)
+
 #define SUB_BGCNT(i) (*(vu16*)(0x04001008 + (i) * 2))
 /* Scroll is per layer, four bytes apart -- not always BG0's. */
 #define SUB_BGHOFS(i) (*(vu16*)(0x04001010 + (i) * 4))
@@ -46,6 +46,29 @@
 /* Sub BG VRAM: bank C, 128K at 0x06200000, so eight 16K character base blocks. */
 #define SUB_BG_VRAM 0x06200000
 #define CHAR_BLOCKS 8
+
+/*
+    Is the sub engine actually dimming or whitening the screen right now?
+
+    Bits 0-4 are the blend factor and bits 14-15 are the mode: 0 and 3 mean *no effect at all*, 1 blends
+    toward white and 2 toward black. So the factor field on its own says nothing -- a game may leave a
+    stale factor of 16 sitting there with the mode off and the screen perfectly normal.
+
+    This is a correction, and it matters because the earlier reading was over-read. `overlayState` bit 5
+    came back set on Contra 4 and was reported as "confirmed: the notification landed inside a fade".
+    All it ever proved was that bits 0-4 were non-zero, which is a much weaker claim than the one made
+    from it. The register is published raw now (raSnapshot.overlayBright) so the next reading settles the
+    mode as well as the factor instead of leaving it inferred.
+
+    A function rather than a macro, because this window is measured in single bytes and there are two call
+    sites: expanded at both, this overflowed it. It reads the register itself rather than taking it as a
+    parameter -- both callers want it live, and the two forms measure the same.
+*/
+static bool brightActive(void) {
+	const u16 b = SUB_MASTER_BRIGHT;
+	const u16 mode = b & 0xC000;
+	return (mode == 0x4000 || mode == 0x8000) && (b & 0x1F) != 0;
+}
 
 #define OVERLAY_PAL_BANK 15
 
@@ -73,12 +96,18 @@
 /*
     How long a notification will wait for the screen to stop fading before giving up and showing anyway.
 
-    Bounded rather than patient: a game that leaves the screen dimmed -- a pause menu, a dark room, a
-    brightness setting -- must not swallow the notification forever. Ten seconds is far longer than any
-    transition and far shorter than a session, so the worst case is a notification that arrives late
-    rather than one that never arrives.
+    **Ticks, not frames**, and the difference is the whole reason this number came down from 600. This
+    counter advances once per call, and in Contra 4 the per-frame hook keeps getting torn out -- 1,720
+    ticks over a session long enough to score 43,425 points, so the reader runs a small fraction of the
+    frames and is re-armed from cardRead(). 600 of *those* is minutes of real time, not ten seconds, and
+    a notification owed for minutes is a notification that never arrives.
+
+    90 is a bound on the wait rather than an estimate of a fade: any transition is over well inside it in
+    a game that ticks normally, and in a game that does not, the notification is late by a second or two
+    instead of lost. Waiting longer buys nothing -- if the screen is still dimmed after 90 chances, it is
+    a dark room or a pause menu, which no amount of patience fixes.
 */
-#define OVERLAY_FADE_WAIT_FRAMES 600
+#define OVERLAY_FADE_WAIT_TICKS 90
 
 /*
     Was: raise the overlay on a timer, because when this was written there was no achievement logic to
@@ -124,7 +153,9 @@ static const u8 glyphs[][8] = {
 
 static u32  stateMagic;
 static u32  framesLeft;   /* non-zero while visible */
+#if OVERLAY_DEMO_INTERVAL
 static u32  demoCounter;
+#endif
 static u32  lastUnlocks;
 /*
     A notification owed but not yet raised, because the screen was being faded when it was earned.
@@ -139,7 +170,11 @@ static u32  lastUnlocks;
     rcheevos fires.
 */
 static u8   pending;        /* a notification is owed */
-static u16  pendingFrames;  /* how long it has waited for the fade to end */
+/*
+    Ticks it has waited for the fade to end. A byte, because the bound is 90 -- so it needs no clamp
+    before it is published and it fits alongside `pending` in seven bits.
+*/
+static u8   pendingFrames;
 static int  block;        /* character base block currently borrowed */
 static int  layer;        /* background layer currently borrowed */
 static u16  savedBgCnt;
@@ -263,7 +298,7 @@ static void draw(int b) {
 	                      | ((layer & 3) << 1)
 	                      | ((block & 3) << 3)
 	                      /* bit 5: the screen was being faded when this was raised */
-	                      | ((SUB_MASTER_BRIGHT & 0x1F) ? 0x20 : 0)
+	                      | (brightActive() ? 0x20 : 0)
 	                      /* bit 6: this one was held back until a fade ended */
 	                      | (pendingFrames ? 0x40 : 0));
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
@@ -348,7 +383,9 @@ void ra_overlay_tick(u32 unlocks) {
 	if (stateMagic != STATE_MAGIC) {
 		stateMagic = STATE_MAGIC;
 		framesLeft = 0;
+#if OVERLAY_DEMO_INTERVAL
 		demoCounter = 0;
+#endif
 		pending = 0;
 		pendingFrames = 0;
 		/*
@@ -361,6 +398,29 @@ void ra_overlay_tick(u32 unlocks) {
 		raOverlayEvicted = 0;
 		raOverlayDeniedNoLayer = 0;
 	}
+
+	/*
+	    Published every tick, before any of the early returns below -- otherwise the one state worth
+	    reporting, a notification stuck waiting, would be the one state that returns before reporting it.
+	*/
+	/*
+	    Bit 7: a notification is owed and has not been raised yet. Refreshed here rather than in draw(),
+	    which is the whole point -- draw() only runs when one *is* raised, so the state that needed
+	    reporting was the one state nothing reported.
+
+	    That absence cost a hardware run. Contra 4 came back with rcTriggered 1 and unlockSent 1 --
+	    rcheevos fired and the id reached the ARM7 -- and shows, denied, evicted and deniedNoLayer all
+	    zero. show() always increments one of those, so it had never been called: the notification was
+	    still owed, held by a fade gate that could not pass, and nothing said so. It read as "nothing
+	    happened", which is the one thing it was not.
+
+	    A bit rather than a field, and that is a budget decision rather than a preference: the ARM9
+	    cardengine's window overflowed by 44 bytes when this was a word of its own carrying the wait
+	    count and the raw brightness register with it. Bit 7 of a byte that already exists costs nothing,
+	    and it answers the only question that could not be answered any other way -- the register itself
+	    is live at 0x0400106C for anyone who wants the value.
+	*/
+	raOverlayState = (u8)((raOverlayState & 0x7F) | (pending ? 0x80 : 0));
 
 	if (framesLeft) {
 		bool used[CHAR_BLOCKS];
@@ -402,7 +462,7 @@ void ra_overlay_tick(u32 unlocks) {
 	    notification is one notification, and `lastUnlocks` has already moved past both.
 	*/
 	if (pending) {
-		if ((SUB_MASTER_BRIGHT & 0x1F) && pendingFrames < OVERLAY_FADE_WAIT_FRAMES) {
+		if (brightActive() && pendingFrames < OVERLAY_FADE_WAIT_TICKS) {
 			pendingFrames++;
 			return;
 		}

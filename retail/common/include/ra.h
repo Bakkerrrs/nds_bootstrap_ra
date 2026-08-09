@@ -499,12 +499,27 @@ typedef struct raSnapshot {
 	        bit 0     SUB_DISPCNT bit 30 -- BG extended palettes were on
 	        bits 1-2  the background layer borrowed
 	        bits 3-4  the 16K character block borrowed
-	        bit 5     the sub engine's master brightness was non-zero -- the screen was mid-fade
+	        bit 5     the sub engine was blending the screen toward white or black -- a real fade
+	        bit 6     this notification had been held back waiting for a fade to end
+	        bit 7     a notification is owed *right now* and has not been raised
 
 	    Bit 5 is there because a real unlock fires when a stage ends, which is precisely when a game fades
 	    the screen, and a fade dims our glyphs along with everything else. It would explain a notification
 	    that reports drawn, is never denied or evicted, and is still not seen -- while the demo timer's
 	    identical call is seen, because it fires on an ordinary frame.
+
+	    **And bit 5 was wrong when that explanation was called confirmed.** It tested only the blend factor
+	    in SUB_MASTER_BRIGHT bits 0-4 and ignored the mode in bits 14-15 -- and with the mode clear there is
+	    no fade at all, however large the factor. So a set bit 5 proved much less than was claimed from it.
+	    It consults the mode now; the register is live at 0x0400106C for anyone who wants the value itself.
+
+	    Bit 7 is the one that was missing, and its absence cost a hardware run. Every other bit here is
+	    written by draw(), which only runs when a notification *is* raised -- so the state that most needed
+	    reporting was the one state nothing could report. Contra 4 came back with rcTriggered 1 and
+	    unlockSent 1, and shows, denied, evicted and deniedNoLayer all zero: show() always increments one of
+	    those, so it had never been called at all. The notification was still owed, held by the fade gate,
+	    and the snapshot said "nothing happened" -- which is the one thing it was not. Bit 7 is refreshed
+	    every tick, so a notification stuck in the queue now says so.
 
 	    Registers and choice belong together and that is why the choice is what is stored: the registers
 	    themselves are hardware, readable live from the RAM viewer at 0x04001000 and 0x04001008, and the

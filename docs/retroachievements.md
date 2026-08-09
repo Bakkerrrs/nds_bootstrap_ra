@@ -5059,6 +5059,58 @@ correct denial, counted at `+0x0C denied` with `+0x14 deniedNoLayer` separating 
 than a silent trespass. It also says plainly what the real fix is: the overlay needs VRAM it does not
 have to borrow, which is one more item on the list the rewrite in `cardenginei_arm9_ra` already owns.
 
+### The gate was holding it, and the gate was reading the wrong bits
+
+The build with the conservative survey was run on Contra 4 and showed nothing at all. The snapshot at
+`0x027FEE80` said why, and it said it by what was *missing*:
+
+| Field | Value | Reading |
+|---|---|---|
+| `rcTriggered` +0x70 | 1 | rcheevos fired |
+| `rcFirstId` +0xA0 | 302,349 | and named the achievement |
+| `unlockSent` +0xAC | 1 | the id crossed to the ARM7 |
+| `unlockQueued` / `unlockLost` | 0 / 0 | nothing waiting, nothing dropped |
+| `shows` +0x08 | **0** | |
+| `denied` +0x0C | **0** | |
+| `evicted` +0x10 | **0** | |
+| `deniedNoLayer` +0x14 | **0** | |
+| `overlayState` +0xB3 | 0x00 | |
+
+`show()` always increments exactly one of `shows` or `denied`. All four at zero means it was **never
+called** — so the survey fix was not even exercised, and the notification never got as far as asking for
+VRAM. It was still owed, held by the fade gate, and nothing in the snapshot said so.
+
+Two independent bugs in that gate, both found by reading it rather than by another run.
+
+**The mode bits were never consulted.** `SUB_MASTER_BRIGHT` is a blend factor in bits 0-4 and a *mode* in
+bits 14-15: 0 and 3 mean no effect at all, 1 blends toward white, 2 toward black. The test read only the
+factor. A game that leaves a stale factor sitting there with the mode off has a perfectly normal screen
+and a gate that will never open.
+
+That also **weakens the conclusion of the previous section**, which was stated too strongly. `overlayState`
+bit 5 coming back set was reported as "confirmed: the notification landed inside a fade". All it ever
+proved was that bits 0-4 were non-zero. The fade may well have been real — a stage ending is a fade — but
+that reading did not establish it, and calling it confirmed was over-reading a bit that could not carry
+the claim.
+
+**The bound was in ticks, and ticks are not frames.** The wait was capped at 600, described as ten
+seconds. It is 600 *calls*, and in Contra 4 `ticks` reached 1,720 over a session long enough to score
+43,425 points — the per-frame hook keeps getting torn out and is re-armed from `cardRead()`, so the reader
+runs a small fraction of the frames. 600 of those is minutes. The bound is 90 now: in a game that ticks
+normally any transition is over well inside it, and in a game that does not, the notification is late by a
+second or two instead of lost.
+
+**And the state had no field, which is why one run was spent on it.** Every bit of `overlayState` is
+written by `draw()`, which only runs when a notification *is* raised — so the one state that needed
+reporting was the one state nothing could report. Bit 7 now says "a notification is owed right now" and is
+refreshed every tick.
+
+The ARM9 cardengine window is down to **8 bytes free**, and it took three attempts to fit even this. A
+word carrying the wait count and the raw brightness register overflowed it by 44 bytes; packing the two
+into one word still overflowed it; a single spare bit in a byte that already existed fit. That is not a
+tight budget any more, it is the end of one — and it is the strongest argument yet for the overlay moving
+to `cardenginei_arm9_ra`, which the achievement-name notification needs anyway.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
