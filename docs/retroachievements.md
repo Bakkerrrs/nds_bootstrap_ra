@@ -5339,10 +5339,16 @@ ever been run without one, and the run with the unlock predates them.
 
 ### It was the display, and the probe read the achievement's name back
 
-Confirmed on hardware, and the confirmation arrived as a sentence rather than a hex dump. The pulse was
-visible for the whole of stage 1, **went blank for a stretch at the stage-clear transition**, and came
-back at the start of stage 2 reading **"Welcome to the jungle"** — the real name of the achievement that
-had fired during the transition.
+Confirmed on hardware, and the confirmation arrived as a sentence rather than a hex dump. Through the
+whole of stage 1 the pulse was visible and read `probe 0123456789`, the placeholder `arm9_ra` renders at
+init. At the stage-clear transition it **went blank for a stretch**. At the start of stage 2 it came back
+reading **"Welcome to the jungle"** — the real name of the achievement that had fired during the blank.
+
+The order matters and is worth spelling out, because "the title appeared" and "the title appeared exactly
+when it should have" are different claims. The placeholder was on screen right up to the unlock; the real
+name replaced it from the unlock onwards. That also verifies the one part of the cross-binary contract
+nothing had exercised: a re-render *mid-session* is picked up by the next show, so the strip is a live
+channel rather than something written once at init.
 
 So the notification had always been drawn correctly. It was drawn into a screen the game was not
 displaying, and it spent its 180 frames there.

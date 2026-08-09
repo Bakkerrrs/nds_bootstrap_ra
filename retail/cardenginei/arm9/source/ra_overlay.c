@@ -105,12 +105,13 @@ static bool brightActive(void) {
       bits 16-17   the display mode. 0 is off, and no background appears in it however its own
                    registers read.
 
-    And this *was* the bug, confirmed on hardware rather than reasoned about. The pulse probe was visible
-    for the whole of stage 1 on Contra 4, went blank for a stretch at the stage-clear transition, and came
-    back at the start of stage 2 reading **"Welcome to the jungle"** -- the real name of the achievement
-    that had fired during the transition. `shows` 43 against 10,339 ticks, which is exactly 10,339 / 240,
-    with nothing denied or evicted. The notification had always been drawn correctly into a screen that
-    was not being displayed.
+    And this *was* the bug, confirmed on hardware rather than reasoned about. Through the whole of stage 1
+    on Contra 4 the pulse probe was visible, reading the placeholder arm9_ra renders at init; at the
+    stage-clear transition it went blank for a stretch; at the start of stage 2 it came back reading
+    **"Welcome to the jungle"**, the real name of the achievement that had fired during the blank. `shows`
+    43 against 10,339 ticks, which is exactly 10,339 / 240, with nothing denied or evicted.
+
+    So the notification had always been drawn correctly, into a screen that was not being displayed.
 */
 static bool screenHidden(void) {
 	const u32 d = SUB_DISPCNT;
