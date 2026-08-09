@@ -4133,6 +4133,75 @@ A fresh account on this game reads `already earned 0` and changes nothing, which
 control: the stage is proven by an account that *has* unlocks, so the number to compare against is
 whatever retroachievements.org shows for the set.
 
+#### The third socket lost a race inside lwip
+
+The first run with `r=unlocks` in it never reached the fetch:
+
+```
+-- stage 11: does the server know this ROM --
+asking about     c3b1916756737f2c4117cc95c1d51ac7
+Assert "state!" failed at line 1411 in .../lwip/api/api_msg.c
+gameid HTTP failed at step 4
+```
+
+Log at `docs/logs/ra_wifi_launcher_lwipassert-3ds.log`. Step 4 is `RA_NET_NO_CONNECT`, so
+`connect()` returned an error, and lwip printed an assert on the way out.
+
+`api_msg.c:1411` is the assert *after* the semaphore wait:
+
+```c
+msg->conn->current_msg = msg;
+UNLOCK_TCPIP_CORE();
+sys_arch_sem_wait(LWIP_API_MSG_SEM(msg), 0);
+LOCK_TCPIP_CORE();
+LWIP_ASSERT("state!", msg->conn->state != NETCONN_CONNECT);   /* <- 1411 */
+```
+
+The wait has no timeout, so it returning at all means the semaphore was signalled — and the state
+being still `NETCONN_CONNECT` means the connect had *not* completed when it was. A semaphore that was
+already signalled before the wait began produces exactly that, and netconns come from a static pool
+of eight (`MEMP_NUM_NETCONN 8`), so a recycled netconn carrying a stale `op_completed` count is the
+shape that fits.
+
+**Nothing in stage 11's path changed.** `r=unlocks` is stage 12 and had not run; the only difference
+in that build below stage 11 is 4.6 KB more `.bss`, which changes no behaviour. So this is a
+pre-existing race that has now shown itself once, on the third socket of a run, after several dozen
+runs that did the same thing and did not.
+
+##### What the failure proves about the design
+
+Worth saying before the fix, because it is the part that was designed rather than lucky:
+
+- the error came back as a **named step** — `step 4`, `RA_NET_NO_CONNECT` — rather than as a hang or a
+  wrong answer;
+- stage 12 said `no GameID or token; staging the whole set` and stage 13 said `no GameID; the set
+  cannot be asked for`, both of which are the **fail-open** paths;
+- stage 13's early return happens *before* the block is invalidated, so the user's own
+  `ra_achievements.txt` survived untouched;
+- the radio came down cleanly and **the game booted**.
+
+A random lwip race cost this run its achievement set and cost nothing else.
+
+##### The fix is a retry, and that is a choice rather than a shrug
+
+It is not fixed at the root. The honest reason: it is a race inside a vendored lwip, on a console with
+no debugger, and the tooling to chase a semaphore lifecycle there does not exist in this project.
+Claiming otherwise would be worse than saying so.
+
+What a retry buys is real: a second attempt draws a **different netconn** from the pool, so a poisoned
+one is stepped over rather than fatal. `raNetConnect()` now tries up to `RA_NET_CONNECT_TRIES` times
+with `RA_NET_RETRY_FRAMES` between them — and the gap is doing work rather than marking time, because
+lwip's own processing runs off a 100 ms TIMER3 in dsiwifi's ARM9 half, so waiting frames is what lets
+a half-finished netconn finish and go back to the pool.
+
+It also removed duplication that was already a small liability: DNS, socket and connect existed twice,
+once in `raNetHttpGet()` and once in `raNetHttpGetStream()`, so a retry policy would have had to be
+written twice and could have drifted.
+
+**`attempts` is reported.** A retry that succeeds silently would turn a measurable race into an
+impression, so every request prints `needed N connect attempts` when N is more than one. That is the
+number to watch across runs: rare is a curiosity, common is a reason to look at lwip properly.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately

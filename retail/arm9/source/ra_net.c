@@ -27,6 +27,7 @@
     nowhere in the target build, so the console always gets the whole file.
 */
 #ifndef RA_NET_HOST_TEST
+#include <nds.h>   /* swiWaitForVBlank(), for the gap between connect attempts */
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #endif
@@ -78,6 +79,70 @@ bool raNetUrlEncode(const char* in, char* out, size_t outSize) {
 }
 
 /*
+    DNS, then a socket, then connect -- with a bounded retry, because the third socket of a run once
+    lost a race inside lwip. See RA_NET_CONNECT_TRIES.
+
+    Factored out of the two GETs rather than duplicated into both, so a retry policy exists in one
+    place. Returns a connected socket, or a negative RA_NET_* code.
+*/
+#ifndef RA_NET_HOST_TEST
+static int raNetConnect(const char* host, raNetProgress* p) {
+	struct hostent*    he;
+	struct sockaddr_in addr;
+	int                tries;
+
+	he = gethostbyname(host);
+	if (!he || !he->h_addr_list[0]) {
+		return RA_NET_NO_DNS;
+	}
+	memset(&addr, 0, sizeof(addr));
+	memcpy(&addr.sin_addr, he->h_addr_list[0], 4);
+	addr.sin_family = AF_INET;
+	addr.sin_port   = htons(RA_NET_PORT);
+
+	if (p) {
+		p->resolved = 1;
+		p->address  = addr.sin_addr.s_addr;
+	}
+
+	for (tries = 1; tries <= RA_NET_CONNECT_TRIES; tries++) {
+		const int sock = socket(AF_INET, SOCK_STREAM, 0);
+
+		if (p) {
+			p->attempts = (u8)tries;
+		}
+		if (sock < 0) {
+			/* No socket at all is a different failure from a refused connect, and says so. */
+			if (tries == RA_NET_CONNECT_TRIES) {
+				return RA_NET_NO_SOCKET;
+			}
+		} else if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+			if (p) {
+				p->connected = 1;
+			}
+			return sock;
+		} else {
+			lwip_close(sock);
+		}
+
+		/*
+		    A gap before trying again, and it is doing work rather than marking time: lwip's own
+		    processing runs off a 100 ms TIMER3 in dsiwifi's ARM9 half, so waiting frames is what
+		    lets a half-finished netconn finish and go back to the pool.
+		*/
+		if (tries < RA_NET_CONNECT_TRIES) {
+			int frames = RA_NET_RETRY_FRAMES;
+
+			while (frames-- > 0) {
+				swiWaitForVBlank();
+			}
+		}
+	}
+	return RA_NET_NO_CONNECT;
+}
+#endif /* RA_NET_HOST_TEST */
+
+/*
     One GET, and the reply read into a caller-supplied buffer.
 
     The recv() loop is bounded by SO_RCVTIMEO, which is not a refinement: without it this hung
@@ -90,40 +155,18 @@ bool raNetUrlEncode(const char* in, char* out, size_t outSize) {
 */
 #ifndef RA_NET_HOST_TEST
 int raNetHttpGet(const char* host, const char* path, char* out, int outSize, raNetProgress* p) {
-	struct hostent*    he;
-	struct sockaddr_in addr;
-	char               request[512];
-	int                sock;
-	int                total = 0;
+	char request[512];
+	int  sock;
+	int  total = 0;
 
 	if (outSize < 2) {
 		return RA_NET_BAD_ARGS;
 	}
 	out[0] = 0;
 
-	he = gethostbyname(host);
-	if (!he || !he->h_addr_list[0]) {
-		return RA_NET_NO_DNS;
-	}
-	memcpy(&addr.sin_addr, he->h_addr_list[0], 4);
-	if (p) {
-		p->resolved = 1;
-		p->address  = addr.sin_addr.s_addr;
-	}
-
-	sock = socket(AF_INET, SOCK_STREAM, 0);
+	sock = raNetConnect(host, p);
 	if (sock < 0) {
-		return RA_NET_NO_SOCKET;
-	}
-	addr.sin_family = AF_INET;
-	addr.sin_port   = htons(RA_NET_PORT);
-
-	if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-		lwip_close(sock);
-		return RA_NET_NO_CONNECT;
-	}
-	if (p) {
-		p->connected = 1;
+		return sock;
 	}
 
 	/* A user agent is mandatory on every Connect API call; without one it is our fault. */
@@ -395,34 +438,12 @@ int raNetHttpGetStream(const char* host, const char* path, raNetSink sink, void*
                        raNetProgress* p) {
 	static raNetStream stream;
 	static char        rx[1024];
-	struct hostent*    he;
-	struct sockaddr_in addr;
 	char               request[512];
 	int                sock;
 
-	he = gethostbyname(host);
-	if (!he || !he->h_addr_list[0]) {
-		return RA_NET_NO_DNS;
-	}
-	memcpy(&addr.sin_addr, he->h_addr_list[0], 4);
-	if (p) {
-		p->resolved = 1;
-		p->address  = addr.sin_addr.s_addr;
-	}
-
-	sock = socket(AF_INET, SOCK_STREAM, 0);
+	sock = raNetConnect(host, p);
 	if (sock < 0) {
-		return RA_NET_NO_SOCKET;
-	}
-	addr.sin_family = AF_INET;
-	addr.sin_port   = htons(RA_NET_PORT);
-
-	if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-		lwip_close(sock);
-		return RA_NET_NO_CONNECT;
-	}
-	if (p) {
-		p->connected = 1;
+		return sock;
 	}
 
 	if (sniprintf(request, sizeof(request),

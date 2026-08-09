@@ -230,12 +230,32 @@ typedef struct raConfig {
 #define RA_NET_REQ_TOO_LONG   (-5)
 #define RA_NET_NO_SEND        (-6)
 
+/*
+    How many times to try the socket-and-connect before giving up, and why there is a number here at
+    all.
+
+    A run of the full ladder opened its third socket and lwip fired
+    `LWIP_ASSERT("state!", msg->conn->state != NETCONN_CONNECT)` from api_msg.c:1411 -- the assert
+    *after* the semaphore wait, which only trips when `sys_arch_sem_wait()` returns without the
+    connect having completed. Netconns come from a static pool of eight, so a recycled netconn whose
+    `op_completed` semaphore was left signalled by an earlier operation produces exactly that.
+
+    This is not fixed here and the honest reason is that it is a race inside a vendored lwip, on a
+    console with no debugger, and the tooling to chase it does not exist in this project. What a retry
+    does is turn a random abort of the whole fetch into a logged hiccup -- a second attempt draws a
+    different netconn from the pool. `attempts` is reported so the frequency becomes data rather than
+    an impression.
+*/
+#define RA_NET_CONNECT_TRIES 3
+#define RA_NET_RETRY_FRAMES  15   /* about 250 ms, so lwip's own timer thread gets to run */
+
 /* How far one request got, so the ladder can be filled in from a single call. */
 typedef struct raNetProgress {
 	u8  resolved;
 	u8  connected;
 	u8  sent;
 	u8  closedByPeer;
+	u8  attempts;      /* socket-and-connect tries used; more than 1 means the race above */
 	u32 address;
 } raNetProgress;
 

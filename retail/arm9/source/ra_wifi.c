@@ -415,6 +415,19 @@ static bool raWifiWaitIp(int seconds) {
 }
 
 /*
+    Say when a request needed more than one connect.
+
+    Printed only when it happened, because the interesting reading is the frequency: a run of the
+    ladder once had its third socket lose a race inside lwip -- see RA_NET_CONNECT_TRIES -- and a
+    retry that succeeds silently would turn that into an impression instead of a number.
+*/
+static void raWifiReportAttempts(const char* what, const raNetProgress* p) {
+	if (p->attempts > 1) {
+		raWifiLog("\x1b[33m%s needed %u connect attempts\x1b[37m\n", what, p->attempts);
+	}
+}
+
+/*
     Stage 7-9: reach the API, with no credentials at all.
 
     The request logs in as a user that does not exist, which is the same thing
@@ -442,6 +455,7 @@ static void raWifiReachApi(void) {
 	if (p.connected) {
 		raWifiLog("connected        port %d\n", RA_NET_PORT);
 	}
+	raWifiReportAttempts("the probe", &p);
 	if (p.sent) {
 		raWifiLog("request sent\n");
 	}
@@ -503,6 +517,7 @@ static void raWifiLogin(const raConfig* cfg) {
 
 	memset(&p, 0, sizeof(p));
 	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+	raWifiReportAttempts("login", &p);
 	if (got < 0) {
 		raWifiLog("\x1b[31mlogin HTTP failed at step %d\x1b[37m\n", -got);
 		return;
@@ -569,6 +584,7 @@ static void raWifiIdentify(void) {
 
 	memset(&p, 0, sizeof(p));
 	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+	raWifiReportAttempts("gameid", &p);
 	if (got < 0) {
 		raWifiLog("\x1b[31mgameid HTTP failed at step %d\x1b[37m\n", -got);
 		return;
@@ -636,6 +652,7 @@ static void raWifiUnlocks(const raConfig* cfg) {
 
 	memset(&p, 0, sizeof(p));
 	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+	raWifiReportAttempts("unlocks", &p);
 	if (got < 0) {
 		raWifiLog("\x1b[33munlocks HTTP failed at step %d; staging the whole set\x1b[37m\n", -got);
 		return;
@@ -787,6 +804,7 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	got = raNetHttpGetStream(RA_NET_HOST, path, raWifiPatchSink, &patch, &p);
 	raPatchFinish(&patch);
 	iprintf("\n");
+	raWifiReportAttempts("patch", &p);
 
 	if (got < -1000) {
 		raWifiLog("\x1b[31mthe server answered HTTP %d\x1b[37m\n", -got - 1000);
