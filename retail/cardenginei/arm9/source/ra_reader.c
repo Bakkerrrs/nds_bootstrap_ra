@@ -117,8 +117,8 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 		snapshot.evicted       = raOverlayEvicted;
 		snapshot.deniedNoLayer = raOverlayDeniedNoLayer;
 		{
-			extern u8 raOverlayExtPal;
-			snapshot.overlayExtPal = raOverlayExtPal;
+			extern u8 raOverlayState;
+			snapshot.overlayState = raOverlayState;
 		}
 	}
 	/*

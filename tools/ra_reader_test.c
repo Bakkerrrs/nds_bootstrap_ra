@@ -615,6 +615,11 @@ int main(void) {
 	    -- appended every time, so every offset above them keeps the address the hardware checklist
 	    reads it at.
 	*/
+	/*
+	    The overlay's packed state, and the size it has to stay inside. Four separate fields here took
+	    the ARM9 cardengine's window to -56 bytes free, so this is one byte on purpose.
+	*/
+	CHECK(__builtin_offsetof(raSnapshot, overlayState) == 0xB3);
 	CHECK(sizeof(raSnapshot) == 0xB4);
 
 	/*

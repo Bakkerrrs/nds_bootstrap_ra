@@ -491,7 +491,23 @@ typedef struct raSnapshot {
 	    One bit, so the next run either confirms that or kills it. Fits in the byte that was already
 	    reserved, so the snapshot does not grow and no offset moves.
 	*/
-	u8  overlayExtPal;    /* +0xB3  1 when SUB_DISPCNT bit 30 was set at show() time */
+	/*
+	    The sub engine's state as of the last show(), packed into one byte because there is no room for
+	    more: the ARM9 cardengine's window went to **-56 bytes free** when this was four separate fields,
+	    which is a hard stop rather than a tight fit.
+
+	        bit 0     SUB_DISPCNT bit 30 -- BG extended palettes were on
+	        bits 1-2  the background layer borrowed
+	        bits 3-4  the 16K character block borrowed
+
+	    Registers and choice belong together and that is why the choice is what is stored: the registers
+	    themselves are hardware, readable live from the RAM viewer at 0x04001000 and 0x04001008, and the
+	    one thing a photograph cannot recover is which block surveyBlocks() concluded was free. Contra 4
+	    reported `shows 1` with nothing denied or evicted and flickered the game's own graphics
+	    underneath, so the survey called a block free that the game was using -- and the block number is
+	    the missing half of that.
+	*/
+	u8  overlayState;     /* +0xB3  see the bit layout above */
 } raSnapshot;            /*              0xB4 bytes */
 
 /*

@@ -131,7 +131,8 @@ u32 raOverlayEvicted;  /* the game reclaimed the block mid-notification */
 */
 u32 raOverlayDeniedNoLayer;
 /* SUB_DISPCNT bit 30 as of the last show(); see raSnapshot.overlayExtPal. */
-u8  raOverlayExtPal;
+/* The sub engine's state and our choice out of it, as of the last show(). See raSnapshot. */
+u8  raOverlayState;
 
 /*
     Which 16K blocks of sub BG VRAM the game is using, for tiles or for maps. Read
@@ -206,7 +207,14 @@ static void draw(int b) {
 	    engine is not reading for backgrounds, so the glyphs come out in the game's own colour at this
 	    index -- which is the leading explanation for a notification that reports drawn and is not seen.
 	*/
-	raOverlayExtPal = (SUB_DISPCNT & (1u << 30)) ? 1 : 0;
+	/*
+	    Packed here, after the block and layer are chosen and before a single tile is written, so the
+	    reading is what surveyBlocks() had to work from paired with what it decided. One byte, because
+	    the cardengine's window has none to spare. See raSnapshot.overlayState.
+	*/
+	raOverlayState = (u8)(((SUB_DISPCNT & (1u << 30)) ? 1 : 0)
+	                      | ((layer & 3) << 1)
+	                      | ((block & 3) << 3));
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 
