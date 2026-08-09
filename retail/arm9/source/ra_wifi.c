@@ -131,6 +131,13 @@ static char          romHash[33];
     raConfigRedact(): a token is the account.
 */
 static char          raToken[64];
+/*
+    Achievements the account already holds. 128 because RA_DEFS_MAX_LINES is 128 and a skip list
+    longer than the set it filters would be pointless; a bigger set truncates and says so.
+*/
+#define RA_WIFI_UNLOCKS_MAX 128
+static u32           unlockedIds[RA_WIFI_UNLOCKS_MAX];
+static u16           unlockCount;
 static char          textBuf[RA_WIFI_TEXT_MAX];
 static volatile u32  textHead;      /* written only by the interrupt */
 static u32           textTail;      /* read only by the main loop */
@@ -593,7 +600,76 @@ static void raWifiIdentify(void) {
 }
 
 /*
-    Stage 12: r=patch -- fetch the real achievement set, and put it where the game will find it.
+    Stage 12: r=unlocks -- which of these has the account already earned.
+
+    Runs before the fetch, because that is the only order in which it helps: the block is 88% full
+    with a set of this size, and every definition already earned is one that does not need to be in
+    it. The arena and the per-frame budget follow the block down.
+
+    **Fails open.** A request that does not answer leaves the skip list empty and every definition is
+    staged, which is exactly what happened before this stage existed. The distinction the code cares
+    about is between "the account has earned nothing" and "we could not ask" -- both stage everything,
+    and only the second is worth a warning.
+
+    h=0 because this fork is softcore, which ra.cfg says and the server independently agrees with:
+    see the `Warning: Unknown Emulator` notice.
+*/
+static void raWifiUnlocks(const raConfig* cfg) {
+	static char   response[4096];
+	char          user[3 * sizeof(cfg->username)];
+	char          path[384];
+	raNetProgress p;
+	int           got;
+	int           count;
+
+	unlockCount = 0;
+
+	if (!verdict.gameId || !raToken[0] || !raNetUrlEncode(cfg->username, user, sizeof(user))) {
+		raWifiLog("\x1b[33mno GameID or token; staging the whole set\x1b[37m\n");
+		return;
+	}
+	if (sniprintf(path, sizeof(path), "/dorequest.php?r=unlocks&u=%s&t=%s&g=%lu&h=0",
+	              user, raToken, (unsigned long)verdict.gameId) >= (int)sizeof(path)) {
+		raWifiLog("\x1b[31munlocks request too long\x1b[37m\n");
+		return;
+	}
+
+	memset(&p, 0, sizeof(p));
+	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+	if (got < 0) {
+		raWifiLog("\x1b[33munlocks HTTP failed at step %d; staging the whole set\x1b[37m\n", -got);
+		return;
+	}
+	raWifiLog("%d bytes back\n", got);
+
+	count = raNetJsonIdList(response, "UserUnlocks", unlockedIds, RA_WIFI_UNLOCKS_MAX);
+	if (count < 0) {
+		/*
+		    No UserUnlocks key at all, which is a failure rather than an empty account -- the two
+		    look identical from the skip list and mean different things about whether to trust it.
+		*/
+		raWifiLog("\x1b[33mno UserUnlocks in the reply; staging the whole set\x1b[37m\n");
+		raWifiLog("body: %s\n", raNetBody(response));
+		return;
+	}
+
+	unlockCount           = (u16)count;
+	verdict.unlocksKnown  = 1;
+	verdict.unlockCount   = unlockCount;
+	raWifiLog("\x1b[32malready earned    %d\x1b[37m\n", count);
+	if (count >= RA_WIFI_UNLOCKS_MAX) {
+		/*
+		    Truncation is safe and is still said out loud: a short skip list only means a few
+		    already-earned achievements get staged again, which costs block space rather than
+		    correctness.
+		*/
+		raWifiLog("\x1b[33mskip list full at %d; some will be staged again\x1b[37m\n",
+		          RA_WIFI_UNLOCKS_MAX);
+	}
+}
+
+/*
+    Stage 13: r=patch -- fetch the real achievement set, and put it where the game will find it.
 
     This is the rung the whole ladder was for. Everything below it was a measurement; this
     produces the artifact, and it produces it into the same staging block a hand-written
@@ -699,7 +775,13 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	*/
 	*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
 	raPatchReset(&patch, block, blockMax);
-	patchProgress = 0;
+	/*
+	    Set after the reset, which zeroes the struct. Empty when r=unlocks did not answer, and then
+	    the scanner behaves exactly as it did before that stage existed.
+	*/
+	patch.skipIds   = unlockedIds;
+	patch.skipCount = unlockCount;
+	patchProgress   = 0;
 
 	memset(&p, 0, sizeof(p));
 	got = raNetHttpGetStream(RA_NET_HOST, path, raWifiPatchSink, &patch, &p);
@@ -726,6 +808,9 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	    the block alone cannot say which of those happened.
 	*/
 	raWifiLog("ids              %u with, %u without\n", patch.withId, patch.withoutId);
+	if (patch.alreadyDone) {
+		raWifiLog("already earned   %u left out of the block\n", patch.alreadyDone);
+	}
 	/*
 	    The one this project cannot explain, with the reply's own bytes around it. Two lookups
 	    established that the set publishes 55 achievements while 56 core definitions arrive, and that
@@ -1066,7 +1151,11 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	    not boot a game -- see RA_LAUNCHER_WIFI -- so what it proves is that the definitions
 	    arrive and fit, which is the question. Running them is step 4.
 	*/
-	raWifiLog("\n-- stage 12: fetch the set --\n");
+	raWifiLog("\n-- stage 12: what has this account already earned --\n");
+	raWifiUnlocks(&config);
+	raWifiReportHeap("after unlocks");
+
+	raWifiLog("\n-- stage 13: fetch the set --\n");
 	raWifiFetchPatch(&config);
 	raWifiReportHeap("after patch");
 
@@ -1120,6 +1209,11 @@ done:
 	} else {
 		raWifiLog("GameID           %s\n", verdict.gameId == 0 ? "unknown to the server" : "not asked");
 	}
+	if (verdict.unlocksKnown) {
+		raWifiLog("already earned   %u\n", verdict.unlockCount);
+	} else {
+		raWifiLog("already earned   unknown\n");
+	}
 	if (verdict.patched) {
 		raWifiLog("definitions      %u in %lu bytes\n",
 		          verdict.defsKept, (unsigned long)verdict.defsBytes);
@@ -1161,6 +1255,11 @@ done:
 	    The definitions go out here, deliberately after the summary is already on the card. See
 	    raWifiDumpDefinitions(): this is the largest SD write of the run and the link is still up.
 	*/
+	if (verdict.unlocksKnown) {
+		raWifiLog("already earned   %u\n", verdict.unlockCount);
+	} else {
+		raWifiLog("already earned   unknown\n");
+	}
 	if (verdict.patched) {
 		raWifiDumpDefinitions(sdFound);
 		raWifiSync();

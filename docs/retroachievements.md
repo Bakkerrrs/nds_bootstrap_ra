@@ -119,7 +119,7 @@ The five things a new session needs that are not obvious from the source:
 | Host test | `./tools/ra_reader_test.sh` — no toolchain, no hardware, seconds. Builds and runs **three** binaries: the reader/watchlist, the launcher's pure logic, and `ra_fit_test` (a real 56-definition set against the cardengine's arena). Run it before anything. |
 | Full build | `make` from the top level, **serially**, with `lzss` on `PATH`. See *Building*. |
 | WiFi build | `make RA_LAUNCHER_WIFI=1` — the network diagnostic, 12 rungs: the chip, DHCP, DNS, HTTP, the ROM's hash, `r=login`, `r=gameid` and `r=patch`. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
-| Fetch-and-play build | `make RA_LAUNCHER_WIFI=2` — same ladder, then tears the radio down and boots the game with the server's set staged. See *Step 4, online half*. |
+| Fetch-and-play build | `make RA_LAUNCHER_WIFI=2` — the 13-rung ladder, then tears the radio down and boots the game with the server's set staged. See *Step 4, online half*. |
 | RA config | `sd:/_nds/nds-bootstrap/ra.cfg`, odelot's format — copy `tools/ra.example.cfg`. Username and password, in the clear, by decision; see *Step 3c*. |
 
 Two working habits this document was largely written by, both of which were learned by
@@ -4066,6 +4066,72 @@ is refused, because a line left with `<digits>:` on the front is not memaddr syn
 refuse the whole definition. Losing the ability to report one achievement beats losing the achievement.
 
 Pinned with `101000001` from the real set, `4294967295` at the u32 boundary, and `99999999999` past it.
+
+### Step 5 closed, and step 6a: `r=unlocks`
+
+The run with the notice filtered read exactly what was predicted:
+
+```
+definitions      55 kept, 3 unofficial
+ids              55 with, 0 without
+1 server notice(s) dropped, first id 101000001
+block            28924 of 32759 used, 28924 wanted
+memaddr length   58 shortest, 6264 longest
+```
+
+Log at `docs/logs/ra_wifi_launcher_55-3ds.log`. **55 is the number retroachievements.org lists for
+the set**, so the client and the site now agree on what the set contains. And `shortest` moving from
+8 to 58 is the incidental confirmation: the 8 was the notice's `1=1.300.`, and with it gone the real
+shortest definition is 58 characters.
+
+One consequence worth stating before the next in-game reading, because it will look like a
+regression: **the thing that unlocked five seconds into every session was the notice.** With it
+filtered, `rcTriggered`, `rcFirstId` and `rcFirstTriggered` stay at 0 until a real achievement is
+earned. That is correct and it removes the quick canary — what says the runtime is alive now is
+`rcPeeks` at 69 a frame, `rcActivated`, and `rcStage`.
+
+#### The new rung, and why it goes before the fetch
+
+`r=unlocks&u=&t=&g=&h=0` answers with the ids the account already holds. It is **stage 12**, which
+pushed the fetch to 13, and the order is the whole point: the block is 88% full with a set this size,
+and a definition already earned is one that does not need to be in it. The arena and the per-frame
+budget follow the block down.
+
+**It fails open.** A request that does not answer leaves the skip list empty and every definition
+stages, which is exactly the behaviour before this rung existed. What the code is careful about is the
+difference between *"the account has earned nothing"* and *"we could not ask"* — both stage
+everything, and only the second deserves a warning. `raNetJsonIdList()` returns **0 for an empty list
+and −1 for a missing key** for that reason, and the host test pins both.
+
+`h=0` because this fork is softcore, which `ra.cfg` says and the server independently agrees with —
+see the `Warning: Unknown Emulator` notice.
+
+#### Left out of the block, not staged and skipped
+
+The filtering happens in the scanner, so an already-earned achievement never occupies a byte. A
+player who has earned half of a set gets half the block back.
+
+What that costs is that the cardengine cannot know those achievements exist, so it could not one day
+show "30 of 55 earned". That is worth the space today and worth writing down, because the fix is a
+format change rather than a flag.
+
+Truncation is safe and still reported: the skip list holds `RA_WIFI_UNLOCKS_MAX` of 128, matching
+`RA_DEFS_MAX_LINES`, and a set larger than that stages a few already-earned definitions again — block
+space rather than correctness.
+
+#### What to read
+
+| | |
+| --- | --- |
+| `already earned    N` in stage 12 | how many the account holds, from the server |
+| `already earned   N left out of the block` in stage 13 | how many of those were in this set |
+| `definitions      M kept` | should be 55 minus that |
+| `block ... used` | should fall by the same definitions' worth |
+| `reached stage 13 of 13` | the ladder grew a rung |
+
+A fresh account on this game reads `already earned 0` and changes nothing, which is the useful
+control: the stage is proven by an account that *has* unlocks, so the number to compare against is
+whatever retroachievements.org shows for the set.
 
 ## Known graphical limitations of the overlay (deferred)
 

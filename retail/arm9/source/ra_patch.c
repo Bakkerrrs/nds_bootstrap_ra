@@ -208,6 +208,28 @@ static void raPatchCommit(raPatch* p) {
 			p->pendingId     = 0;
 			return;
 		}
+		/*
+		    Already earned, so it is left out. Checked here rather than in the cardengine because the
+		    block is the scarce thing -- see raPatch.skipIds.
+		*/
+		if (p->pendingId && p->skipIds) {
+			u16 i;
+
+			for (i = 0; i < p->skipCount; i++) {
+				if (p->skipIds[i] == p->pendingId) {
+					p->alreadyDone++;
+					p->pendingOpen   = 0;
+					p->pendingBad    = 0;
+					p->pendingSeen   = 0;
+					p->pendingLength = 0;
+					p->flagsSeen     = 0;
+					p->flags         = 0;
+					p->pendingId     = 0;
+					return;
+				}
+			}
+		}
+
 		if (p->pendingId) {
 			p->withId++;
 			idLength = raPatchIdDigits(p->pendingId) + 1;   /* the digits and the colon */

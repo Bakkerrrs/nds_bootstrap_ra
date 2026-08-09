@@ -170,6 +170,15 @@ int raWifiVerdictStage(const raWifiVerdict* v) {
 	if (v->patched) {
 		return RA_WIFI_STAGE_PATCHED;
 	}
+	/*
+	    r=unlocks answering is a rung of its own, and it is below the fetch rather than above it
+	    because the fetch is what produces something a game runs. A run that knows the account's
+	    unlocks but never got the set has got further than one that did neither, and less far than one
+	    that staged definitions.
+	*/
+	if (v->unlocksKnown) {
+		return RA_WIFI_STAGE_UNLOCKS;
+	}
 	if (v->identified) {
 		return RA_WIFI_STAGE_IDENTIFIED;
 	}

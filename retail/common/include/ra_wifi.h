@@ -110,7 +110,13 @@
 #define RA_WIFI_STAGE_ANSWERED    9  /* the API replied, and the reply looks like the API */
 #define RA_WIFI_STAGE_LOGGED_IN   10 /* r=login returned a token for the configured user */
 #define RA_WIFI_STAGE_IDENTIFIED  11 /* r=gameid turned the ROM's hash into a GameID */
-#define RA_WIFI_STAGE_PATCHED     12 /* r=patch put real definitions in the staging block */
+/*
+    r=unlocks, and it sits *before* the patch because that is the only order in which it is useful:
+    knowing which achievements the account already has is what lets the scanner leave them out of a
+    block that is 88% full.
+*/
+#define RA_WIFI_STAGE_UNLOCKS     12
+#define RA_WIFI_STAGE_PATCHED     13 /* r=patch put real definitions in the staging block */
 #define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_PATCHED
 
 /*
@@ -146,6 +152,8 @@ typedef struct raWifiVerdict {
 	u8   apiOk;
 	u8   loggedIn;         /* r=login returned a token */
 	u8   identified;       /* r=gameid returned a non-zero GameID */
+	u8   unlocksKnown;     /* r=unlocks answered, so the skip list is trustworthy */
+	u16  unlockCount;      /* how many the account already has */
 	u8   patched;          /* r=patch produced at least one definition */
 	u16  defsKept;         /* ...this many */
 	u32  defsBytes;        /* and this much of the staging block */
@@ -365,6 +373,19 @@ typedef struct raPatch {
 	u32   pendingId;      /* the "ID" seen most recently, waiting for its MemAddr */
 	u16   withId;         /* definitions written with a RetroAchievements id */
 	u16   withoutId;      /* ...and without one, which is a set we cannot report on */
+	/*
+	    Achievements the account already holds, from r=unlocks. Definitions matching one of these are
+	    left out of the block entirely rather than staged and skipped later: the block is the scarcest
+	    thing here at 88% full, and the arena and the per-frame budget follow it down.
+
+	    What that costs is that the cardengine cannot know they exist, so it could not one day show
+	    "30 of 55 earned". Worth the space today and worth writing down, because the fix would be a
+	    format change rather than a flag.
+	*/
+	const u32* skipIds;
+	u16   skipCount;
+	u16   alreadyDone;    /* definitions left out because the account has them */
+
 	u16   oddIds;         /* ids at or above RA_ODD_ID_FROM -- see there */
 	u32   oddId;          /* the first of them */
 	u16   oddFill;        /* how much of oddContext is written */
@@ -436,6 +457,13 @@ int         raNetHttpGet(const char* host, const char* path, char* out, int outS
 const char* raNetBody(const char* response);
 bool        raNetJsonString(const char* json, const char* key, char* out, size_t outSize);
 bool        raNetJsonNumber(const char* json, const char* key, u32* out);
+/*
+    Step 6's prerequisite: `"UserUnlocks":[93119,93120,...]` into an array of ids. Returns how many
+    were read, or -1 if the key is absent -- and the difference matters, because an empty list is a
+    real answer (a player who has earned nothing) while a missing key means the request failed and
+    every definition must be staged.
+*/
+int         raNetJsonIdList(const char* json, const char* key, u32* out, int max);
 
 /*
     Step 3d. The streaming half: reset, feed the socket's bytes in whatever sizes they arrive,

@@ -384,6 +384,12 @@ static void test_wifi_verdict(void) {
 	    the summary's wording fails here rather than reporting "stage 12 of 12" for a run that
 	    stopped at 12 of 13.
 	*/
+	/*
+	    r=unlocks, which sits between the two: further than knowing the game, less far than having
+	    the set. Checked in order so a rung inserted without thinking about the order fails here.
+	*/
+	v.unlocksKnown = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_UNLOCKS);
 	v.patched = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_PATCHED);
 	CHECK(RA_WIFI_STAGE_PATCHED == RA_WIFI_STAGE_MAX);

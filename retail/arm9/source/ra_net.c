@@ -575,4 +575,76 @@ bool raNetJsonNumber(const char* json, const char* key, u32* out) {
 	return true;
 }
 
+/*
+    A JSON array of bare integers, into a caller-supplied array.
+
+    `r=unlocks` answers `{"Success":true,"UserUnlocks":[93119,93120],"GameID":14856}`, and this is the
+    one shape the flat matchers above could not read. Still not a JSON parser: it finds `"key":[`,
+    then takes runs of digits until the closing bracket, and anything that is not a digit or a comma
+    or whitespace ends it.
+
+    **-1 for a missing key, 0 for an empty list**, and conflating those would be the bug worth
+    avoiding: a player who has earned nothing and a request that failed produce the same empty array,
+    but the first means "stage everything because nothing is done" and the second means "stage
+    everything because we do not know". Both stage everything -- and only the second is worth
+    reporting as a problem.
+
+    Overflow is truncation and it is reported by returning `max`: the caller compares against its own
+    capacity. Refusing outright would be worse here, since a partial skip list is still correct --
+    it only means a few already-earned achievements get staged again.
+*/
+int raNetJsonIdList(const char* json, const char* key, u32* out, int max) {
+	char        needle[40];
+	const char* at;
+	int         count = 0;
+
+	if (sniprintf(needle, sizeof(needle), "\"%s\":[", key) >= (int)sizeof(needle)) {
+		return -1;
+	}
+	at = strstr(json, needle);
+	if (!at) {
+		return -1;
+	}
+	at += strlen(needle);
+
+	while (*at && *at != ']') {
+		if (*at >= '0' && *at <= '9') {
+			u32 value  = 0;
+			int digits = 0;
+
+			while (*at >= '0' && *at <= '9') {
+				const u32 digit = (u32)(*at - '0');
+
+				/* Refused rather than wrapped, like every other number this project reads. */
+				if (value > (0xFFFFFFFFu - digit) / 10u) {
+					digits = 0;
+					break;
+				}
+				value = value * 10 + digit;
+				digits++;
+				at++;
+			}
+			if (digits > 0) {
+				if (count < max) {
+					out[count] = value;
+				}
+				count++;
+			}
+			/* Skip the rest of a number that was refused. */
+			while (*at >= '0' && *at <= '9') {
+				at++;
+			}
+			continue;
+		}
+		if (*at == ',' || *at == ' ' || *at == '\t' || *at == '\n' || *at == '\r') {
+			at++;
+			continue;
+		}
+		/* Anything else is not a list of integers any more. */
+		break;
+	}
+
+	return (count > max) ? max : count;
+}
+
 #endif /* RA_LAUNCHER_WIFI */

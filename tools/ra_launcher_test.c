@@ -290,6 +290,42 @@ static void test_config(void) {
 	    not the supported one" into "something went wrong", which are different problems with
 	    different next moves.
 	*/
+	printf("\nthe unlocks reply gives up a list, and empty is not the same as absent\n");
+	{
+		u32 ids[8];
+		int n;
+
+		n = raNetJsonIdList("{\"Success\":true,\"UserUnlocks\":[93119,93120,94160],\"GameID\":14856}",
+		                    "UserUnlocks", ids, 8);
+		CHECK(n == 3);
+		CHECK(ids[0] == 93119 && ids[1] == 93120 && ids[2] == 94160);
+
+		/*
+		    The distinction the whole function exists for. A player who has earned nothing and a
+		    request that failed both produce no ids -- and they mean different things: the first is an
+		    answer, the second is "stage everything because we do not know". Conflating them would
+		    make a failed request look like a fresh account.
+		*/
+		CHECK(raNetJsonIdList("{\"Success\":true,\"UserUnlocks\":[]}", "UserUnlocks", ids, 8) == 0);
+		CHECK(raNetJsonIdList("{\"Success\":false}", "UserUnlocks", ids, 8) == -1);
+
+		/* Whitespace between elements is legal JSON even if this API sends none. */
+		n = raNetJsonIdList("{\"UserUnlocks\":[ 1, 22 ,333 ]}", "UserUnlocks", ids, 8);
+		CHECK(n == 3 && ids[0] == 1 && ids[1] == 22 && ids[2] == 333);
+
+		/*
+		    More than fits is truncation, reported by returning the capacity -- and it is safe: a
+		    short skip list only means a few already-earned achievements get staged again.
+		*/
+		n = raNetJsonIdList("{\"UserUnlocks\":[1,2,3,4,5,6,7,8,9,10]}", "UserUnlocks", ids, 4);
+		CHECK(n == 4);
+		CHECK(ids[0] == 1 && ids[3] == 4);
+
+		/* A value past a u32 is skipped rather than wrapped, like every other number here. */
+		n = raNetJsonIdList("{\"UserUnlocks\":[99999999999,7]}", "UserUnlocks", ids, 8);
+		CHECK(n == 1 && ids[0] == 7);
+	}
+
 	printf("\nthe gameid reply gives up a number, and zero is a number\n");
 	{
 		u32 id = 12345;
@@ -722,6 +758,37 @@ static void test_patch(void) {
 			}
 			CHECK(bad == 0);
 		}
+	}
+
+	printf("\nalready-earned definitions never reach the block\n");
+	{
+		/*
+		    Left out rather than staged and ignored, because the block is the scarce resource: 88%
+		    full with this set. A player who has earned half of them gets half the block back, and
+		    the arena and the frame budget follow it down.
+		*/
+		static const u32 earned[] = { 93121 };
+
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patch.skipIds   = earned;
+		patch.skipCount = 1;
+		patchFeedAll(&patch,
+			"{\"ID\":93121,\"MemAddr\":\"0xH1=1\",\"Flags\":3},"
+			"{\"ID\":93119,\"MemAddr\":\"0xH2=2\",\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.alreadyDone == 1);
+		CHECK(strcmp(block, "93119:0xH2=2\n") == 0);
+		/* And the one left out costs nothing in the block's accounting. */
+		CHECK(patch.wanted == strlen("93119:0xH2=2\n"));
+
+		/* An empty skip list is the same as none: everything stages. */
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patch.skipIds   = earned;
+		patch.skipCount = 0;
+		patchFeedAll(&patch,
+			"{\"ID\":93121,\"MemAddr\":\"0xH1=1\",\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.alreadyDone == 0);
 	}
 
 	printf("\nthe carry buffer holds the largest definition hardware has produced\n");
