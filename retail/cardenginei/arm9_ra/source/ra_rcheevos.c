@@ -97,6 +97,115 @@ static u32 ra_rc_translate(u32 consoleAddress, u32 len) {
 	return 0;
 }
 
+/*
+    ------------------------------------------------------------------------------------
+    A stack of our own for rcheevos, which is the fix for two Data Aborts.
+
+    Everything in this binary runs inside the game's VCOUNT interrupt handler -- see
+    myIrqHandlerVcount() in cardenginei_arm9 -- so it runs on the game's IRQ stack, whose size is
+    the game's business and not something we get to know. Measured on a host with
+    -finstrument-functions:
+
+        rc_runtime_do_frame()                 767 bytes
+        rc_runtime_activate_achievement()   2,383 bytes
+
+    The first has run every frame for many sessions without trouble, so the IRQ stack
+    accommodates it. The second wants 3.1 times as much, and it is what the first real
+    achievement set introduced: fifty-six parses instead of three. Both hardware crashes had a
+    wild PC inside the *game's* memory with a null data address, which is what trampling the
+    memory below an IRQ stack looks like from the outside.
+
+    Why the three-definition builds worked is worth being honest about: they overflowed too. They
+    did it three times, during boot, over memory the game had not started using. That is luck,
+    and this document has a section about the last time luck was mistaken for a result.
+
+    8 KB against a measured 2,383, and it costs nothing that matters -- the arena has 130 KB of
+    margin with the set this large. The high-water mark is reported, so the next reading replaces
+    the host's number with the console's.
+    ------------------------------------------------------------------------------------
+*/
+#define RA_RC_STACK_BYTES   8192
+#define RA_RC_STACK_WORDS   (RA_RC_STACK_BYTES / 4)
+#define RA_RC_STACK_PATTERN 0x5A5A5A5AuL
+
+/* 8-byte aligned because AAPCS wants sp 8-byte aligned at a public interface. */
+static u32 raRcStack[RA_RC_STACK_WORDS] __attribute__((aligned(8)));
+static u8  raRcStackReady;
+
+typedef u8 (*raRcStep)(raSnapshot*);
+
+/*
+    Call fn(snapshot) with sp pointing at our stack, then put sp back.
+
+    r4 and r5 hold the old sp and the target across the switch and are in the clobber list, which
+    is what keeps the compiler from placing an input in either -- and that matters: an earlier
+    shape of this took the function pointer in r0 and then loaded the argument into r0 before
+    branching. `blx` because this is ARMv5TE and the callee may be either instruction set.
+*/
+#ifdef __arm__
+static u8 ra_rc_on_stack(raRcStep fn, raSnapshot* snapshot) {
+	u32 result;
+
+	__asm__ volatile (
+		"mov  r4, sp        \n"
+		"mov  r5, %[fn]     \n"
+		"mov  r0, %[arg]    \n"
+		"mov  sp, %[top]    \n"
+		"blx  r5            \n"
+		"mov  sp, r4        \n"
+		"mov  %[res], r0    \n"
+		: [res] "=r" (result)
+		: [fn] "r" (fn), [arg] "r" (snapshot),
+		  [top] "r" ((char*)raRcStack + RA_RC_STACK_BYTES)
+		: "r0", "r1", "r2", "r3", "r4", "r5", "r12", "lr", "cc", "memory"
+	);
+	return (u8)result;
+}
+#else
+/*
+    The host build calls straight through. tools/ra_reader_test.c therefore does *not* exercise
+    the switch, which is worth stating rather than leaving implied -- what it does exercise is
+    that everything reached through it still works when the stack is someone else's.
+*/
+static u8 ra_rc_on_stack(raRcStep fn, raSnapshot* snapshot) {
+	return fn(snapshot);
+}
+#endif
+
+/*
+    Run one step on our stack and record how deep it went.
+
+    The region is painted once and never repainted, so the mark is the high-water mark across the
+    whole session rather than the last call's. Scanned from the low end: the first word that is
+    still the pattern bounds everything that has ever been used above it.
+*/
+static u8 ra_rc_step(raRcStep fn, raSnapshot* snapshot) {
+	u8  stage;
+	u32 i;
+
+	if (!raRcStackReady) {
+		for (i = 0; i < RA_RC_STACK_WORDS; i++) {
+			raRcStack[i] = RA_RC_STACK_PATTERN;
+		}
+		raRcStackReady = 1;
+	}
+
+	stage = ra_rc_on_stack(fn, snapshot);
+
+	for (i = 0; i < RA_RC_STACK_WORDS; i++) {
+		if (raRcStack[i] != RA_RC_STACK_PATTERN) {
+			break;
+		}
+	}
+	snapshot->rcStackUsed = (u16)((RA_RC_STACK_WORDS - i) * 4);
+	/*
+	    Saturating rather than wrapping would be wrong here: 8192 fits a u16 exactly, and a mark
+	    *at* 8192 means the paint was consumed to the last word, which is the one reading that
+	    would mean the stack is too small. It is reported as 8192 and read as "suspect".
+	*/
+	return stage;
+}
+
 static rc_runtime_t runtime;
 static u32 peeksThisFrame;
 static u32 peeksRejected;
@@ -631,6 +740,19 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
 }
 
 /*
+    One frame of evaluation, as a step so it can be run on the private stack like the rest.
+
+    Returns a stage only to fit raRcStep; the caller keeps using RA_RC_FRAME. A wrapper rather
+    than an asm call to rc_runtime_do_frame() directly, because the callbacks it needs are static
+    to this file and the trampoline takes one argument.
+*/
+static u8 ra_rc_frame_step(raSnapshot* snapshot) {
+	(void)snapshot;
+	rc_runtime_do_frame(&runtime, ra_rc_event_handler, ra_rc_peek, 0, 0);
+	return RA_RC_FRAME;
+}
+
+/*
     Called once per frame from ra_wram_tick(), after the watchlist. Runs inside the game's
     VCOUNT interrupt handler like everything else in this binary, so the cost is measured
     rather than assumed -- see rcLines.
@@ -652,9 +774,9 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	*/
 	if (rcStage < RA_RC_ACTIVE) {
 		if (rcStage == RA_RC_NONE) {
-			rcStage = ra_rc_prepare(snapshot);
+			rcStage = ra_rc_step(ra_rc_prepare, snapshot);
 		} else if (rcStage == RA_RC_LOADING) {
-			rcStage = ra_rc_activate_next(snapshot);
+			rcStage = ra_rc_step(ra_rc_activate_next, snapshot);
 		}
 		snapshot->rcStage = rcStage;
 		if (rcStage < RA_RC_ACTIVE) {
@@ -664,8 +786,15 @@ void ra_rc_tick(raSnapshot* snapshot) {
 
 	peeksThisFrame = 0;
 
+	/*
+	    On our stack too, and not only because 767 bytes is a lot to borrow: one stack for all of
+	    rcheevos means rcStackUsed is the high-water mark for everything the library does rather
+	    than for the parse alone, and it means there is one thing to reason about instead of two.
+	    peek() is called from in here, so it runs on our stack as well -- which it should, since
+	    it is rcheevos that decides how deep to call it from.
+	*/
 	startLine = RA_VCOUNT;
-	rc_runtime_do_frame(&runtime, ra_rc_event_handler, ra_rc_peek, 0, 0);
+	ra_rc_step(ra_rc_frame_step, snapshot);
 	lines = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
 
 	if (lines > 255) {

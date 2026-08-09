@@ -278,7 +278,24 @@ typedef struct raSnapshot {
 	u32 heapSize;        /* +0x60 */
 	u32 heapUsed;        /* +0x64 */
 	u8  wramStage;       /* +0x68  RA_STAGE_*, how far it got */
-	u8  reserved2[3];    /* +0x69 */
+	u8  reserved2;       /* +0x69 */
+	/*
+	    The deepest excursion rcheevos made on the private stack, in bytes -- and it is the
+	    number that explains why a real achievement set crashed a retail game twice.
+
+	    Everything in this binary runs inside the game's VCOUNT interrupt handler, on the game's
+	    IRQ stack. Measured on a host, rc_runtime_do_frame() needs **767 bytes** and has run every
+	    frame for many sessions without trouble; rc_runtime_activate_achievement() needs
+	    **2,383** -- 3.1 times as much. So the parse was overflowing an IRQ stack that the
+	    evaluation fits in, trampling whatever the game keeps below it, and both crashes had the
+	    ARM9 executing the game's own data with a wild PC.
+
+	    rcheevos runs on a stack of ours now, and this reports the high-water mark of it so the
+	    2,383 stops being a host extrapolation. Measured by painting the region and finding the
+	    deepest word that changed -- which works here, unlike on the host, because we own the
+	    whole region rather than borrowing the end of someone else's.
+	*/
+	u16 rcStackUsed;     /* +0x6A */
 	/*
 	    rcheevos. Appended for the same reason the heap fields were -- every offset above
 	    keeps its address, so the hardware checklist in docs/retroachievements.md stays

@@ -532,6 +532,12 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, heapSize) == 0x60);
 	CHECK(__builtin_offsetof(raSnapshot, heapUsed) == 0x64);
 	CHECK(__builtin_offsetof(raSnapshot, wramStage) == 0x68);
+	/*
+	    rcStackUsed went into reserved2, at the only aligned u16 slot in it, so the offsets below
+	    are untouched. It is the field that says how deep rcheevos went on the stack this binary
+	    now gives it -- see the note in ra.h about the IRQ stack it was borrowing before.
+	*/
+	CHECK(__builtin_offsetof(raSnapshot, rcStackUsed) == 0x6A);
 	CHECK(__builtin_offsetof(raSnapshot, rcStage) == 0x6C);
 	CHECK(__builtin_offsetof(raSnapshot, rcTriggered) == 0x70);
 	CHECK(__builtin_offsetof(raSnapshot, rcMeasured) == 0x74);

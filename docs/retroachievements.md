@@ -121,10 +121,13 @@ apart, because they have different fixes.
 
 **First, and it needs no network at all:** copy `docs/logs/ra_definitions-14856.txt` to
 `sd:/_nds/nds-bootstrap/ra_achievements.txt` and boot Super Mario 64 DS with a **normal** build.
-The first attempt at this **crashed** — a Data Abort with the ARM9 executing the definition text as
-instructions — so the build now activates one definition per frame and publishes `rcActivated` after
-each, which makes a repeat name the line it dies on. See *First run: a Data Abort* below for the
-three hypotheses that were measured and killed, and the real bug that turned up instead.
+It took **three crashed runs to find the cause, and it is not any of the things that were
+suspected**: everything in this project runs inside the game's VCOUNT interrupt handler, on the
+game's IRQ stack, and `rc_runtime_activate_achievement()` needs **2,383 bytes** where
+`rc_runtime_do_frame()` — which has run every frame for many sessions — needs 767. The parse was
+overflowing it. rcheevos has its own 8 KB stack now, and `rcStackUsed` (`+0x6A`) reports the
+high-water mark. See *Second and third runs: it is the game's IRQ stack* below, including what the
+earlier flat-depth measurement got right and what was wrongly concluded from it.
 That is the server's own 56 definitions going through `loadRaDefinitions()` into the cardengine,
 and it answers "can rcheevos run a real set on this hardware" on its own. Two numbers are open and
 everything else is already answered on the host: **`rcInitTotal`** (`+0x9E`), the one-time parse,
@@ -3332,6 +3335,7 @@ Re-run `tools/ra_snapshot_addr.sh` after any rebuild.
 | `rcTriggered` | `+0x70` | ≥ 1 within ~5 s | 0 after a minute = `do_frame` is not reaching memory; check `rcPeeks` |
 | `rcPeeksRejected` | `+0x80` | **0** | non-zero = a definition asked for an address this console cannot supply. **This is the field most likely to be non-zero**, and it is why `rc_runtime_validate_addresses()` was put in before there was a real set to need it |
 | **`rcInitTotal`** | **`+0x9E`** | **unknown — this is the reading** | 263 per frame. Under ~500 is a non-event; several thousand is ten-plus frames inside the game's VCOUNT handler, and then the parse has to be amortised across frames |
+| **`rcStackUsed`** | **`+0x6A`** | **near 2,383** — the host's figure, on hardware for the first time. 8192 exactly means 8 KB is not enough either |
 | `rcInitLines` | `+0x6F` | < 255 | 255 = one activation alone exceeded a frame, and `rcInitTotal` is a floor rather than a total |
 | **`rcLinesMax`** | **`+0x85`** | **unknown — the other reading** | steady-state cost of 1,946 conditions per frame, out of 263. Three definitions cost **1** |
 
@@ -3444,6 +3448,75 @@ wedging a console. Two smaller things fell out of that: `ra_rc_prepare()` now re
 it uses, because the test prepares twice and a count carried over from the first run showed up
 immediately; and a test asserting `wramTicks == 10` became `before + 9`, since the absolute number
 encoded how many ticks happened earlier in the file.
+
+#### Second and third runs: it is the game's IRQ stack
+
+The build that spread activation over frames crashed too, and so did a set trimmed to almost
+nothing:
+
+| Run | Set | Crash |
+| --- | --- | --- |
+| all 56, one tick | 1,946 conditions, 28,585 bytes | `PC 0377EEEA` (in the definition text), `ADDR 0377EEF2` |
+| all 56, one per frame | same | `PC 023C39B8`, **`ADDR 00000000`** |
+| **48 light lines** | **311 conditions, 5,311 bytes** | `PC 023C3C58`, **`ADDR 00000000`** |
+
+The third run is the one that settles it. `A-liviano` is lines 9-56 — no 6,264-byte monsters, 16% of
+the conditions, and **27,664 bytes of the arena out of 158,644**. It still crashes, with the same
+signature. That kills three hypotheses at once: the frame budget, total memory, and any particular
+heavy definition.
+
+And `0x023C3C58` is not ours. Nothing nds-bootstrap places in DSi mode lives at `0x023Cxxxx` —
+those addresses in `locations.h` are B4DS — and SM64DS's ARM9 binary ends at `0x0205D544`. So both
+of the last two crashes have the ARM9 executing **the game's own data** with a null data address,
+which is what corrupted game memory looks like from the outside.
+
+##### The measurement that names it
+
+`ra_tick()` is called from `myIrqHandlerVcount()` in `cardenginei_arm9`. Everything in this project
+runs **inside the game's VCOUNT interrupt handler, on the game's IRQ stack**, whose size is the
+game's business and was never checked. Measured on a host with `-finstrument-functions`:
+
+| | |
+| --- | --- |
+| `rc_runtime_do_frame()` | **767 bytes** |
+| `rc_runtime_activate_achievement()` | **2,383 bytes** |
+
+`do_frame` has run every frame for many sessions without trouble, so the IRQ stack accommodates
+767 bytes plus the cardengine's own frames. **The parse wants 3.1 times as much**, and the parse is
+what a real achievement set multiplied: three of them became fifty-six.
+
+Note what the earlier stack measurement did and did not prove. It showed depth is *flat* — 2,079 to
+2,383 across the set, and the same 2,383 for the definitions that have always worked — and that
+correctly killed "the big definitions recurse deeper". It was read as exonerating the stack
+entirely, and that was the wrong conclusion from a right measurement: **flat and too large is still
+too large.** What changed between working and crashing was not the depth of one excursion but how
+many times it was taken, and over memory the game was by then using.
+
+Which makes the three-definition builds luck rather than a result. They overflowed too — three
+times, during boot, over memory the game had not started using yet. This document has a section
+about the last time luck was mistaken for a result, and it now has two.
+
+##### The fix, and the number that will confirm it
+
+rcheevos gets **a stack of its own**: 8 KB in the cardengine's window, against a measured 2,383,
+with the arena still holding 130 KB of margin at this set size. `ra_rc_on_stack()` switches `sp`
+around each step and puts it back — `r4` and `r5` carry the old `sp` and the target and are in the
+clobber list, which is what stops the compiler placing an input in either. `do_frame` runs on it
+too, so there is one stack to reason about rather than two and the high-water mark covers
+everything rcheevos does.
+
+That mark is reported as **`rcStackUsed`** (`+0x6A`, `0x027FEDBA`), measured the way the host test
+could not: the region is painted once and the deepest word that changed bounds every excursion of
+the session. It went into `reserved2`, so no offset above it moved.
+
+The reading to take is therefore a *prediction*: **`rcStackUsed` should land near 2,383** — the
+host's figure, on real hardware, for the first time. Well under it would mean ARM frames are
+tighter than x86-64's, which is plausible and worth knowing. **8192 exactly** would mean the paint
+was consumed to the last word, and then 8 KB is not enough either.
+
+The host build calls straight through instead of switching stacks, so `tools/ra_reader_test.sh`
+does not exercise the switch. What it does exercise is that everything reached through it still
+works — which is worth saying plainly rather than leaving implied.
 
 ### What is deliberately not being changed yet
 
