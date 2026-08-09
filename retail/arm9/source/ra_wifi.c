@@ -84,6 +84,9 @@
     other, which a bare timeout would blame on the hardware.
 */
 #define RA_WIFI_ARM7_READY_CHANNEL FIFO_USER_04
+/* Mode 2's teardown handshake. Must match retail/arm7/source/ra_wifi7.c. */
+#define RA_WIFI_ARM7_STOP_CHANNEL  FIFO_USER_07
+#define RA_WIFI_WAIT_STOP          3   /* seconds */
 
 /* Seconds. Generous, because the cost of being wrong is a run that reports the wrong rung. */
 #define RA_WIFI_WAIT_ARM7   3
@@ -609,6 +612,26 @@ static void raWifiIdentify(void) {
     request carries it, the log records that a request was made.
 */
 /*
+    The fetch failed, so put the user's own file back.
+
+    Stage 12 streams the reply straight into the definitions block, which is where
+    loadRaDefinitions() had already put sd:/_nds/nds-bootstrap/ra_achievements.txt -- so by the time
+    a fetch fails, the file's text is already gone. In mode 1 that did not matter, because that build
+    never boots a game. In mode 2 it means a console with no network would lose the definitions it
+    would otherwise have run, which is strictly worse than not having tried.
+
+    Re-staging rather than preserving, because the reply is three times the size of the block and
+    there is nowhere else to scan it. Cheap: one file read, and only on the path that already failed.
+*/
+static void raWifiRestoreDefinitionsFile(void) {
+	loadRaDefinitions();
+	if (*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION == CARDENGINEI_ARM9_RA_DEFS_MAGIC) {
+		raWifiLog("restored         ra_achievements.txt (%lu bytes)\n",
+		          (unsigned long)*(u32*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + 4));
+	}
+}
+
+/*
     A heartbeat on the screen while the set streams in, and screen *only*.
 
     The recv() loop cannot yield -- it blocks on the socket -- so nothing else can report
@@ -685,10 +708,12 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 
 	if (got < -1000) {
 		raWifiLog("\x1b[31mthe server answered HTTP %d\x1b[37m\n", -got - 1000);
+		raWifiRestoreDefinitionsFile();
 		return;
 	}
 	if (got < 0) {
 		raWifiLog("\x1b[31mpatch HTTP failed at step %d\x1b[37m\n", -got);
+		raWifiRestoreDefinitionsFile();
 		return;
 	}
 
@@ -718,6 +743,7 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 
 	if (!patch.kept) {
 		raWifiLog("\x1b[31mno definitions in the reply\x1b[37m\n");
+		raWifiRestoreDefinitionsFile();
 		return;
 	}
 
@@ -816,6 +842,65 @@ static void raWifiDumpDefinitions(bool sdFound) {
 		fclose(out);
 		raWifiLog("\x1b[33m%s is short -- the card refused a write\x1b[37m\n", path);
 	}
+}
+
+/*
+    Give the radio back, so the bootloader can have both CPUs.
+
+    This is the whole reason mode 2 can exist. Four things are live once the ladder has run, and
+    every one of them is a thing that fires after the bootloader has replaced the code it belongs
+    to:
+
+      the ARM7's SDIO card interrupt and its TIMER3, which dsiwifi's own wifi_card_deinit() masks;
+      the ARM9's TIMER3, which drives ath_lwip_tick() every 100 ms;
+      and dsiwifi's datamsg handler on FIFO_DSWIFI.
+
+    Order is deliberate. The ARM7 goes first, because it is the one holding the chip: until its
+    card interrupt is masked the radio can still call it, and a call into overwritten code is the
+    failure being avoided. Only then are the ARM9's own two stopped -- if it were the other way
+    round, the ARM7's log messages would arrive at a channel with no handler while it was still
+    working.
+
+    Returns false when the ARM7 never acknowledges. That is the one outcome where booting is worse
+    than not booting, and the caller is the one that decides.
+*/
+bool raWifiShutdown(void) {
+	int frames = RA_WIFI_WAIT_STOP * 60;
+
+	raWifiLog("\n-- giving the radio back --\n");
+
+	fifoSendValue32(RA_WIFI_ARM7_STOP_CHANNEL, 1);
+	while (frames-- > 0) {
+		if (fifoCheckValue32(RA_WIFI_ARM7_STOP_CHANNEL)) {
+			break;
+		}
+		raWifiIdle();
+	}
+	if (frames <= 0) {
+		raWifiLog("\x1b[31mthe ARM7 never confirmed wifi_card_deinit()\x1b[37m\n"
+		          "not booting: its card IRQ may still be live.\n");
+		return false;
+	}
+	fifoGetValue32(RA_WIFI_ARM7_STOP_CHANNEL);
+	raWifiLog("ARM7            deinitted\n");
+
+	/*
+	    The ARM9's two. timerStop(3) because dsiwifi's ARM9 half starts a 100 ms TIMER3 in
+	    wifi_host_init() and nothing else in this launcher uses that timer; clearing the datamsg
+	    handler because FIFO_DSWIFI is the channel dsiwifi drives its whole sequence over, and a
+	    handler pointing into replaced code is the same hazard as a live interrupt.
+
+	    The log handler goes too. raWifiCapture() only writes to a buffer, so it is harmless -- but
+	    "harmless" is a property of this build rather than of the arrangement, and the drain below
+	    is the last one there will be.
+	*/
+	timerStop(3);
+	fifoSetDatamsgHandler(FIFO_DSWIFI, 0, 0);
+	DSiWifi_SetLogHandler(0);
+
+	raWifiDrain();
+	raWifiLog("ARM9            timer and FIFO handler stopped\n");
+	return true;
 }
 
 void raWifiProbe(bool sdFound, const char* ndsPath) {
@@ -1057,6 +1142,43 @@ done:
 		raWifiSync();
 	}
 
+#if RA_WIFI_BOOTS_GAME
+	/*
+	    Mode 2: give the radio back and return, and the launcher goes on to boot the game with the
+	    set already staged. Nothing above this line is different from the diagnostic -- same ladder,
+	    same log, same summary -- which is deliberate: the reading and the thing that plays are the
+	    same code, so a difference between them cannot be ours.
+	*/
+	if (!raWifiShutdown()) {
+		/*
+		    The one refusal. An ARM7 that never confirmed the teardown may still be taking SDIO
+		    interrupts, and the bootloader is about to overwrite the code those interrupts vector
+		    into -- so this stops on the summary exactly as the diagnostic does, rather than handing
+		    a live radio to a CPU that is about to forget how to answer it.
+
+		    A halt is a bad outcome and it is the *better* bad outcome: the alternative is a crash
+		    somewhere in the game, minutes later, with nothing on the card explaining it.
+		*/
+		raWifiSync();
+		raWifiLog("\nstopped rather than boot with a live radio.\n");
+		while (1) {
+			raWifiIdle();
+		}
+	}
+
+	raWifiSync();
+	raWifiLog("\nradio down -- booting the game.\n");
+	/*
+	    Closed here, unlike the diagnostic's log, and for the opposite reason. There it is left open
+	    because a hang must not lose the late lines; here the launcher is about to hand both CPUs to
+	    the bootloader, so there are no late lines and close() is what writes the directory entry.
+	*/
+	if (logFile) {
+		fclose(logFile);
+		logFile = 0;
+	}
+	return;
+#else
 	raWifiLog("\nlog written and synced -- safe to power off.\n"
 	          "this build does not boot games.\n");
 
@@ -1075,6 +1197,7 @@ done:
 	while (1) {
 		raWifiIdle();
 	}
+#endif
 }
 
 #endif /* RA_LAUNCHER_WIFI */

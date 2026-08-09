@@ -28,25 +28,39 @@
 #include <stddef.h>   /* size_t, for the ra_net entry points below */
 
 /*
-    Master switch, and it is off in every shipped build.
+    Master switch, and it is off in every shipped build. Three values:
 
-    A build with this on is a *diagnostic build that does not boot games*. Two reasons, and
-    the second is the one that decides it:
+      **0** -- not built. The launcher is byte-for-byte what it was.
 
-      The measurement wants the console to stop on a summary, so a reading is a reading
-      rather than something to catch before the game covers it.
+      **1** -- the diagnostic. Runs the whole ladder and *stops on a summary*, so a reading is a
+      reading rather than something to catch before a game covers it. This is the mode every
+      measurement in docs/retroachievements.md was taken in and it stays.
 
-      dsiwifi's bring-up blocks. wifi_card_wlan_init() spins in `while (1)` waiting for the
-      firmware-ready flag and again in `while (!wmi_is_ready())`, with no timeout, inside a
-      FIFO handler on the ARM7. If the chip does not come up, that ARM7 is wedged -- and
-      handing a wedged ARM7 to the bootloader, which is about to overwrite its code while a
-      timer IRQ and an AUX IRQ are still live, is not something to do for a diagnostic.
+      **2** -- fetch, then boot. Same ladder, but it tears the radio down and returns, so the
+      launcher goes on to start the game with the server's own achievement set already staged.
 
-    So: `make RA_LAUNCHER_WIFI=1` builds the probe, and nothing else should.
+    Mode 1 halts for a second reason that mode 2 had to answer before it could exist. dsiwifi's
+    bring-up blocks: wifi_card_wlan_init() spins in `while (1)` waiting for the firmware-ready
+    flag and again in `while (!wmi_is_ready())`, with no timeout, inside a FIFO handler on the
+    ARM7. If the chip does not come up that ARM7 is wedged -- and handing a wedged ARM7 to the
+    bootloader, which is about to overwrite its code while a timer IRQ and an AUX IRQ are still
+    live, is not something to do for a measurement.
+
+    What makes mode 2 possible is that the teardown turned out to already exist. dsiwifi's
+    DSiWifi_DisconnectAP() is an unimplemented sassert(false), but wifi_card_deinit() in its ARM7
+    half does exactly the right four things: masks the SDIO card IRQ, disables the AUX IRQ,
+    disables the ARM7's TIMER3, and clears the chip's own interrupt enables. The ARM9 half adds a
+    TIMER3 of its own and a FIFO_DSWIFI handler, and both of those are ours to stop. See
+    raWifiShutdown().
+
+    So: `make RA_LAUNCHER_WIFI=1` measures, `=2` plays, and neither is a shipped build yet.
 */
 #ifndef RA_LAUNCHER_WIFI
 #define RA_LAUNCHER_WIFI 0
 #endif
+
+/* Mode 2 and above return to the launcher instead of halting on the summary. */
+#define RA_WIFI_BOOTS_GAME (RA_LAUNCHER_WIFI >= 2)
 
 /*
     Where the launcher writes what it saw. Root of the card, next to NDSBTSRP.LOG and
@@ -385,6 +399,33 @@ void raPatchFinish(raPatch* p);
 
 /* The ARM7 half: hand this CPU to dsiwifi. One call, and where it goes matters. */
 void raWifiInstall(void);
+
+/*
+    ...and take it back. Called from the ARM7's idle loop rather than from the FIFO handler that
+    asks for it, because wifi_card_deinit() writes SDIO registers and polls for the controller to
+    answer -- a bounded wait, but not one to take inside an interrupt on a CPU that is about to be
+    overwritten. The handler sets a flag; this does the work.
+
+    A no-op until asked, so the loop pays a compare per FIFO wake-up.
+*/
+void raWifiPoll(void);
+
+/*
+    retail/arm9/source/conf_sd.cpp -- stage sd:/_nds/nds-bootstrap/ra_achievements.txt into the
+    definitions block. Called once during loadFromSD(), and again by stage 12 when a fetch fails,
+    because the fetch streams into that same block and destroys the file's text on its way.
+*/
+void loadRaDefinitions(void);
+
+/*
+    Mode 2's teardown, on the ARM9: stop dsiwifi's TIMER3 and its FIFO handler, ask the ARM7 to run
+    wifi_card_deinit(), and wait a bounded time for it to say it did.
+
+    Returns false if the ARM7 never answered, which is the one case where booting the game is worse
+    than not booting it -- an ARM7 still taking SDIO interrupts when the bootloader overwrites its
+    code. The caller decides; this only reports.
+*/
+bool raWifiShutdown(void);
 #endif
 
 #ifdef __cplusplus

@@ -58,8 +58,8 @@ CFLAGS	+=	$(INCLUDE) -DARM9 -DNO_CARDID -DDEFAULT_CARD_READ_DMA
 # arpa/inet.h and netinet/ for its lwip, and this ARM9 builds mbedtls and polarssl next
 # door. On the -I path those would shadow newlib's; -iquote applies to #include "..." only,
 # so <sys/socket.h> still means newlib's. Same choice tools/wifiprobe/arm7 makes.
-ifeq ($(RA_LAUNCHER_WIFI),1)
-CFLAGS	+=	-DRA_LAUNCHER_WIFI=1 \
+ifneq ($(filter 1 2,$(RA_LAUNCHER_WIFI)),)
+CFLAGS	+=	-DRA_LAUNCHER_WIFI=$(RA_LAUNCHER_WIFI) \
 			-iquote $(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../../libs/dsiwifi/include)
 endif
 
@@ -80,7 +80,7 @@ DSIWIFI9	:=	$(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../dsiwifi9)
 #---------------------------------------------------------------------------------
 RCHEEVOS	:=	$(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../cardenginei/arm9_ra/rcheevos)
 
-ifeq ($(RA_LAUNCHER_WIFI),1)
+ifneq ($(filter 1 2,$(RA_LAUNCHER_WIFI)),)
 CFLAGS	+=	-iquote $(RCHEEVOS)/src
 endif
 
@@ -97,7 +97,7 @@ LIBS	:=	-lfat -lnds9
 
 # Named by path rather than -l, so a stale or missing archive is a clear error instead of the
 # linker quietly finding another copy. Before -lfat/-lnds9, since it needs them.
-ifeq ($(RA_LAUNCHER_WIFI),1)
+ifneq ($(filter 1 2,$(RA_LAUNCHER_WIFI)),)
 LIBS	:=	$(DSIWIFI9)/libdsiwifi9_ndsbs.a $(LIBS)
 endif
 
@@ -145,7 +145,7 @@ export OFILES	:=	$(addsuffix .o,$(BINFILES)) \
 
 # md5.c by name rather than by adding its directory to SOURCES: that directory is all of
 # rhash, and the rest of it is the server-side and disc code this launcher must not carry.
-ifeq ($(RA_LAUNCHER_WIFI),1)
+ifneq ($(filter 1 2,$(RA_LAUNCHER_WIFI)),)
 export VPATH	:=	$(VPATH) $(RCHEEVOS)/src/rhash
 export OFILES	:=	$(OFILES) md5.o
 endif
@@ -163,7 +163,10 @@ export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 # source list, so make cannot see it change; without this, flipping it reuses stale objects
 # and produces a .nds that looks built and has no probe in it.
 #---------------------------------------------------------------------------------
-RA_WIFI_MODE	:=	$(if $(filter 1,$(RA_LAUNCHER_WIFI)),on,off)
+# The raw value, not on/off. There are three modes now -- 0 not built, 1 the diagnostic that
+# halts, 2 fetch-then-boot -- and a stamp that could not tell 1 from 2 would hand back objects
+# built for the wrong one, which is the exact failure this stamp exists to prevent.
+RA_WIFI_MODE	:=	$(if $(RA_LAUNCHER_WIFI),$(RA_LAUNCHER_WIFI),0)
 RA_WIFI_STAMP	:=	$(BUILD)/.ra_launcher_wifi-$(RA_WIFI_MODE)
 
 $(BUILD):

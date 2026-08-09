@@ -113,7 +113,8 @@ The five things a new session needs that are not obvious from the source:
 | Magic to look for | ASCII `RA2S` (`52 41 32 53`). `RA1S`/`RA0S` means a stale address from an older build. |
 | Host test | `./tools/ra_reader_test.sh` — no toolchain, no hardware, seconds. Builds and runs **three** binaries: the reader/watchlist, the launcher's pure logic, and `ra_fit_test` (a real 56-definition set against the cardengine's arena). Run it before anything. |
 | Full build | `make` from the top level, **serially**, with `lzss` on `PATH`. See *Building*. |
-| WiFi build | `make RA_LAUNCHER_WIFI=1` — the network diagnostic, now 12 rungs: the chip, DHCP, DNS, HTTP, the ROM's hash, `r=login`, `r=gameid` and `r=patch`. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
+| WiFi build | `make RA_LAUNCHER_WIFI=1` — the network diagnostic, 12 rungs: the chip, DHCP, DNS, HTTP, the ROM's hash, `r=login`, `r=gameid` and `r=patch`. **It does not boot games**; it stops on a summary and writes `/ra_wifi_launcher.log`. Needs `git submodule update --init`. |
+| Fetch-and-play build | `make RA_LAUNCHER_WIFI=2` — same ladder, then tears the radio down and boots the game with the server's set staged. See *Step 4, online half*. |
 | RA config | `sd:/_nds/nds-bootstrap/ra.cfg`, odelot's format — copy `tools/ra.example.cfg`. Username and password, in the clear, by decision; see *Step 3c*. |
 
 Two working habits this document was largely written by, both of which were learned by
@@ -3640,6 +3641,104 @@ fires.
 And nothing amortises the parse across frames. That is the obvious fix if `rcInitTotal` comes back
 large, and doing it before measuring would be guessing at a cost — the same mistake as the three
 wrong heap lines in step 3.
+
+## Step 4, online half: fetch at boot, then boot
+
+The offline half proved the game runs the server's set. The online half is two separate problems that
+have been conflated all along, and separating them is most of the work:
+
+**4a — fetch in the launcher, then boot the game.** No network inside the game at all. The launcher
+already does the whole ladder and stages the set; the only reason it never booted afterwards is that
+mode 1 halts deliberately. This is the one that makes the thing usable.
+
+**4b — network *inside* the game**, which is what `r=awardachievement` needs to tell the server an
+achievement unlocked. That is context B, where the ARM7 belongs to the game, and it is the unknown
+*#1g* has flagged from the beginning.
+
+4a is done. 4b is not started.
+
+### What made 4a possible: the teardown already existed
+
+Mode 1 halts because handing a live radio to the bootloader is dangerous in a specific, nameable
+way. Four things are running when the ladder finishes, and every one of them fires *after* the
+bootloader has replaced the code it belongs to:
+
+| | |
+| --- | --- |
+| ARM7 | `IRQ_WIFI_SDIO_CARDIRQ` on the AUX controller |
+| ARM7 | `TIMER3`, dsiwifi's 100 ms SDIO tick |
+| ARM9 | `TIMER3`, which drives `ath_lwip_tick()` |
+| ARM9 | dsiwifi's datamsg handler on `FIFO_DSWIFI` |
+
+`DSiWifi_DisconnectAP()` is an unimplemented `sassert(false, ...)`, so the obvious call is not there.
+But **`wifi_card_deinit()` in dsiwifi's ARM7 half does exactly the right four things** — masks the
+SDIO card IRQ, disables the AUX IRQ, disables `TIMER3`, and writes zero to the chip's
+`F1_INT_STATUS_ENABLE` and CCCR `irq_enable`. It is declared in `arm_iop/source/wifi_card.h`, which
+is not on the exported include path, so it is declared by hand the way dsiwifi's own `test_app`
+does. The ARM9's two are ours to stop.
+
+What none of it does is **power the chip down** — dsiwifi has no path for that. So the game boots
+with the radio still associated to the access point and its interrupts masked. Said plainly rather
+than glossed: nothing can poke either CPU and nothing is moving memory, but the chip is on. That is
+also the most interesting thing 4b inherits.
+
+#### Order, and the one refusal
+
+The ARM7 goes first, because it is the one holding the chip: until its card interrupt is masked the
+radio can still call it. Only then are the ARM9's timer and FIFO handler stopped — the other way
+round and the ARM7's log messages would arrive at a channel with no handler while it was still
+working.
+
+The handshake is a round trip on `FIFO_USER_07` (01 through 06 are all spoken for; a channel with
+two owners is the bug this project already paid for once with `FIFO_DSWIFI`). And
+`wifi_card_deinit()` is called from the ARM7's **idle loop, not from the FIFO handler that asks for
+it** — it writes SDIO registers and polls for the controller to answer, which is a bounded wait but
+not one to take inside an interrupt on a CPU that is about to be overwritten.
+
+**If the ARM7 never acknowledges, mode 2 halts exactly as mode 1 does.** A halt is a bad outcome and
+it is the *better* bad outcome: the alternative is a crash somewhere inside the game, minutes later,
+with nothing on the card explaining it.
+
+### The regression 4a introduced, and the fix
+
+Stage 12 invalidates the definitions block before it sends the request, so that a reply which never
+arrives cannot leave stale bytes looking valid. In mode 1 that was free. In mode 2 it is not,
+because **the block already contains the user's own `ra_achievements.txt`** — `loadRaDefinitions()`
+stages it during `loadFromSD()`, well before the ladder runs. A console with no network would
+therefore lose the definitions it would otherwise have played with, which is strictly worse than not
+having tried.
+
+Preserving it is not available: the reply is three times the size of the block, which is the whole
+reason it is streamed into it. So the file is **re-staged** on every failure path that happens after
+the invalidation — one file read, only on a path that already failed. `loadRaDefinitions()` stopped
+being static for that, and says why in its own comment.
+
+### Three modes now, and the stamp had to learn to count
+
+`RA_LAUNCHER_WIFI` is 0, 1 or 2: not built, the diagnostic that halts, and fetch-then-boot. Mode 1
+stays exactly as it was, because every measurement in this document was taken in it.
+
+The build stamp that wipes objects when the mode changes was `$(if $(filter 1,...),on,off)` — which
+cannot tell 1 from 2, and would have handed back objects built for the wrong mode. That is the same
+silent-success failure the stamp was added to prevent, so it now records the raw value. Verified by
+building 2, then 1, then 0 and checking for each mode's own strings in the `.nds`.
+
+One thing worth checking that turned out to be a non-issue: mode 2 calls `myConsoleDemoInit()` and
+then boots, which no build had done before. It is fine, and not by luck — `createRamDumpBin()` and
+the pagefile creation both do exactly that on the first run of any game.
+
+### What the run has to answer
+
+| | |
+| --- | --- |
+| does the game boot at all after the radio is torn down | the whole question |
+| `sd:/ra_wifi_launcher.log` ends with `radio down -- booting the game` | the teardown was clean |
+| the definitions the game runs are the **server's**, not the file's | `rcDefLength` should be the fetched length, not 28,584 |
+| how long the boot takes | the ladder is ~10-20 s, and it is on every boot |
+
+And the failure that would be worth the most: a log ending at `the ARM7 never confirmed
+wifi_card_deinit()`. That is mode 2 refusing to boot rather than crashing, and it would mean the
+teardown needs more than dsiwifi's own four steps.
 
 ## Known graphical limitations of the overlay (deferred)
 

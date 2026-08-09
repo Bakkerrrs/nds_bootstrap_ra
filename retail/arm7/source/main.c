@@ -189,6 +189,12 @@ int main(void) {
 			my_sdmmc_get_cid(true, (u32*)0x2FFD7BC);	// Get eMMC CID
 			*(u32*)(0x2FFFD0C) = 0;
 		}
+#if RA_LAUNCHER_WIFI
+		// Mode 2 asks for the radio back before booting the game. Done here rather than in the
+		// FIFO handler that asks: wifi_card_deinit() polls SDIO registers, and that is not a wait
+		// to take inside an interrupt. A compare per wake-up when nobody has asked.
+		raWifiPoll();
+#endif
 		swiIntrWait(0, IRQ_FIFO_NOT_EMPTY);
 	}
 	

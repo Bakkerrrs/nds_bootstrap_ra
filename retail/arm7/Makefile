@@ -47,8 +47,8 @@ CFLAGS	+=	$(INCLUDE) -DARM7
 # -iquote and not -I: see the same note in retail/arm9/Makefile. dsiwifi's include directory
 # carries a netdb.h and a sys/socket.h of its own, and neither should ever win against
 # newlib's for an angle-bracket include.
-ifeq ($(RA_LAUNCHER_WIFI),1)
-CFLAGS	+=	-DRA_LAUNCHER_WIFI=1 -iquote $(DSIWIFI)/include
+ifneq ($(filter 1 2,$(RA_LAUNCHER_WIFI)),)
+CFLAGS	+=	-DRA_LAUNCHER_WIFI=$(RA_LAUNCHER_WIFI) -iquote $(DSIWIFI)/include
 endif
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 
@@ -63,7 +63,7 @@ LIBS	:= -lnds7
 # Named by path rather than -ldsiwifi7, so a stale or missing archive is a clear error
 # instead of the linker quietly finding some other copy. Before -lnds7, since it needs
 # libnds and not the other way round.
-ifeq ($(RA_LAUNCHER_WIFI),1)
+ifneq ($(filter 1 2,$(RA_LAUNCHER_WIFI)),)
 LIBS	:=	$(DSIWIFI)/lib/libdsiwifi7.a $(LIBS)
 ARM7ELF_EXTRA_DEPS	:=	dsiwifi-check
 endif
@@ -126,7 +126,10 @@ endif
 # failure shape this project fears most, and it happened on the first attempt to use the
 # switch -- so the mode is stamped in the build directory and a change of mode wipes it.
 #---------------------------------------------------------------------------------
-RA_WIFI_MODE	:=	$(if $(filter 1,$(RA_LAUNCHER_WIFI)),on,off)
+# The raw value, not on/off. There are three modes now -- 0 not built, 1 the diagnostic that
+# halts, 2 fetch-then-boot -- and a stamp that could not tell 1 from 2 would hand back objects
+# built for the wrong one, which is the exact failure this stamp exists to prevent.
+RA_WIFI_MODE	:=	$(if $(RA_LAUNCHER_WIFI),$(RA_LAUNCHER_WIFI),0)
 RA_WIFI_STAMP	:=	$(BUILD)/.ra_launcher_wifi-$(RA_WIFI_MODE)
 
 $(BUILD):

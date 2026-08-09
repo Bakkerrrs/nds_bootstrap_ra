@@ -204,7 +204,17 @@ extern void loadDSi2DSSavePatch(configuration* conf, const char* bootstrapPath, 
     and the WRAM binary falls back to its built-in self-test. Nothing about a missing file
     should stop a game from booting.
 */
-static void loadRaDefinitions(void) {
+/*
+    Not static, because step 4's mode 2 has to be able to put it back.
+
+    The launcher stages this file, and then -- if `RA_LAUNCHER_WIFI=2` -- `r=patch` streams the
+    server's own set into the *same block*, destroying the file's text as it goes. That is the
+    design and not an accident: the reply is three times the block, so there is nowhere else for it
+    to be scanned into. Which means a fetch that fails partway leaves the user with neither the
+    server's set nor their own file, and the fix is to re-stage rather than to preserve. See
+    raWifiFetchPatch().
+*/
+extern "C" void loadRaDefinitions(void) {
 	FILE* file = fopen(RA_DEFINITIONS_PATH, "rb");
 	long  size;
 

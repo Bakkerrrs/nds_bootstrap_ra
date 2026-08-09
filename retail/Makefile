@@ -109,7 +109,7 @@ $(OUTPUT):	$(BIN) arm7/$(TARGET).elf arm9/$(TARGET).elf
 # phony dependency it has no use for.
 DSIWIFI := ../libs/dsiwifi
 
-ifeq ($(RA_LAUNCHER_WIFI),1)
+ifneq ($(filter 1 2,$(RA_LAUNCHER_WIFI)),)
 ARM7_EXTRA_DEPS := dsiwifi
 ARM9_EXTRA_DEPS := dsiwifi9
 endif

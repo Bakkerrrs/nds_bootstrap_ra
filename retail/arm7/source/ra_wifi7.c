@@ -37,9 +37,46 @@
 
 /* Must match the ARM9's RA_WIFI_ARM7_READY_CHANNEL. */
 #define RA_WIFI_ARM7_READY_CHANNEL FIFO_USER_04
+/*
+    And the channel mode 2 uses to ask for the radio back. FIFO_USER_07 because 01 through 06 are
+    all spoken for by the launcher's own handshake and by nds-bootstrap; a channel with two owners
+    is the bug this project already paid for once with FIFO_DSWIFI.
+*/
+#define RA_WIFI_ARM7_STOP_CHANNEL  FIFO_USER_07
+
+/*
+    dsiwifi's own teardown, declared rather than included: wifi_card.h lives in its arm_iop/source
+    directory and is not on the exported include path. dsiwifi's own test_app declares it exactly
+    this way, which is the closest thing to a blessing available.
+
+    It masks the SDIO card IRQ, disables IRQ_WIFI_SDIO_CARDIRQ on the AUX controller, disables the
+    ARM7's TIMER3, and writes zero to the chip's F1_INT_STATUS_ENABLE and CCCR irq_enable. That is
+    every path by which the chip could interrupt this CPU after the bootloader has replaced its
+    code, which is the whole requirement.
+
+    What it does *not* do is power the chip down -- dsiwifi has no path for that -- so the radio is
+    left associated to the access point with its interrupts masked. Stated rather than glossed:
+    nothing will poke this CPU, and nothing is reading or writing memory, but the chip is still on.
+*/
+extern void wifi_card_deinit(void);
+
+static volatile bool raWifiStopAsked;
+
+/*
+    Asked from an interrupt, done from the idle loop. wifi_card_deinit() writes SDIO registers and
+    waits for the controller to answer -- bounded, but not a wait to take inside a FIFO handler on
+    a CPU whose code is about to be overwritten.
+*/
+static void raWifiStopHandler(u32 value, void* userdata) {
+	(void)value;
+	(void)userdata;
+	raWifiStopAsked = true;
+}
 
 void raWifiInstall(void) {
 	installWifiFIFO();
+
+	fifoSetValue32Handler(RA_WIFI_ARM7_STOP_CHANNEL, raWifiStopHandler, 0);
 
 	/*
 	    Told rather than assumed. The ARM9 waits a bounded time for this and reports its
@@ -47,6 +84,22 @@ void raWifiInstall(void) {
 	    blame on the hardware.
 	*/
 	fifoSendValue32(RA_WIFI_ARM7_READY_CHANNEL, 1);
+}
+
+void raWifiPoll(void) {
+	if (!raWifiStopAsked) {
+		return;
+	}
+	raWifiStopAsked = false;
+
+	wifi_card_deinit();
+
+	/*
+	    The acknowledgement is the point of the round trip. Without it the ARM9 would have to
+	    guess, and the thing it would be guessing about is whether an ARM7 that is still taking
+	    SDIO interrupts is about to have its code replaced.
+	*/
+	fifoSendValue32(RA_WIFI_ARM7_STOP_CHANNEL, 1);
 }
 
 #endif /* RA_LAUNCHER_WIFI */
