@@ -93,6 +93,31 @@ static bool brightActive(void) {
 	return (mode == 0x4000 || mode == 0x8000) && (b & 0x1F) != 0;
 }
 
+/*
+    Is the sub engine showing its backgrounds at all right now?
+
+    Two ways it can be told not to, neither of which the fade gate had ever looked at, and neither of
+    which any counter here could have detected:
+
+      bit 7        forced blank. The engine outputs white and displays nothing -- not a layer, not a
+                   sprite. Games set it while rebuilding a scene, which is exactly when an achievement
+                   for finishing that scene fires.
+      bits 16-17   the display mode. 0 is off, and no background appears in it however its own
+                   registers read.
+
+    This is correct on its own terms rather than because it is suspected of anything: a notification
+    drawn into a screen that is not being displayed spends its 180 frames invisible and is gone. It is
+    the same argument the fade gate is built on, applied to the two conditions that outrank a fade.
+
+    Whether it is *this* bug is not decided here -- raSnapshot.overlayDispcnt is what will say, and no
+    reading of it exists yet for the moment a real unlock fires.
+*/
+static bool screenHidden(void) {
+	const u32 d = SUB_DISPCNT;
+
+	return (d & (1u << 7)) != 0 || ((d >> 16) & 3) == 0;
+}
+
 #define OVERLAY_PAL_BANK 15
 
 /*
@@ -499,7 +524,7 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 	    notification is one notification, and `lastUnlocks` has already moved past both.
 	*/
 	if (pending) {
-		if (brightActive() && pendingFrames < OVERLAY_FADE_WAIT_TICKS) {
+		if ((brightActive() || screenHidden()) && pendingFrames < OVERLAY_FADE_WAIT_TICKS) {
 			pendingFrames++;
 			return;
 		}

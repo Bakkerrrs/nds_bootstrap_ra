@@ -5306,6 +5306,55 @@ keep the tail of the previous *achievement name* — which would read as a plaus
 as obvious corruption, and is the worst way for this to fail. And a character outside the font renders
 as a space rather than as a box, because the text that reaches that path is a JSON escape nobody chose.
 
+### The overlay is fine; the moment is not
+
+Two hypotheses died in one session, and the tool that killed them cost no achievements.
+
+**The probe.** `-DRA_OVERLAY_DEMO=60` raises the notification once a second with nothing unlocked. It
+had stopped fitting -- 20 bytes over the ARM9 window -- and the cause was the direct `show()` call:
+`show()` is static, and a second call site stops gcc inlining it. Raising it through `pending` instead
+fits and is better, because the probe then takes the same path a real unlock does, deferral included.
+The other half was that a pulse with nothing rendered draws a blank box, so `arm9_ra` renders a
+placeholder strip during `ra_rc_prepare()` and `overlayText` is a valid address from the first frame.
+
+**What it showed.** On Contra 4 the notification is **visible and legible**, both lines, on the title
+screen *and* thirty seconds into stage 1 gameplay. `shows` 11 over 2,680 ticks, which is exactly
+2,680 ÷ 240 (60 frames of interval plus 180 of display), with `denied`, `evicted` and `deniedNoLayer`
+all zero across eleven borrow-and-return cycles. `overlayText` 0x037542B8, matching `nm`.
+
+So the font, the blit, the two-line layout and the whole VRAM negotiation work — during gameplay, in
+the game where a real unlock shows nothing.
+
+That kills the leading hypothesis. The pulse got `overlayState` 0x08 (layer **0**) and the real unlock
+got 0x4A (layer **1**), and the DS resolves equal priorities by layer number, so the game's BG0 would
+be drawn in front of our BG1. Plausible, mechanically sound, and wrong: the pulse is visible during
+gameplay, where the game certainly has BG0 enabled.
+
+What is left is **when**. Achievement 302329 is *stage 1 clear* — it fires during the stage-clear
+sequence, which is the one moment the game tears down and rebuilds its entire screen.
+
+**A reading that does not exist yet.** `overlayDispcnt` and `overlayWindow` were added for exactly this
+question and have never been captured at the moment of a real unlock: the build that has them has only
+ever been run without one, and the run with the unlock predates them.
+
+### Two conditions the gate never checked
+
+Added on their own merits rather than on suspicion, because both are unambiguously right:
+
+| `DISPCNT` | Meaning |
+|---|---|
+| bit 7 | **Forced blank.** The engine outputs white and displays nothing — not a layer, not a sprite. Games set it while rebuilding a scene. |
+| bits 16-17 | **Display mode.** 0 is off, and no background appears in it however its own registers read. |
+
+A notification drawn into a screen that is not being displayed spends its 180 frames invisible and is
+gone, which is the same argument the fade gate is built on applied to the two conditions that outrank
+a fade. Neither could ever have been detected by a counter here: the survey sees VRAM, `brightActive()`
+sees brightness, and nothing saw whether the engine was displaying at all.
+
+It may be this bug. It is not recorded as the cause, because the reading that would say so does not
+exist and this section has already spent four hypotheses — three of them because something got built
+before it was measured.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
