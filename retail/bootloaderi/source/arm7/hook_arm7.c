@@ -133,6 +133,7 @@ int hookNdsRetailArm7(
 	u32 fileCluster,
     u32 patchOffsetCacheFileCluster,
 	u32 srParamsFileCluster,
+	u32 raUnlocksCluster,
 	u32 ramDumpCluster,
 	u32 screenshotCluster,
 	u32 wideCheatFileCluster,
@@ -372,6 +373,30 @@ int hookNdsRetailArm7(
 	ce7->fileCluster              = fileCluster;
 	ce7->patchOffsetCacheFileCluster = patchOffsetCacheFileCluster;
 	ce7->srParamsCluster          = srParamsFileCluster;
+	ce7->raUnlocksCluster         = raUnlocksCluster;
+	/*
+	    cardengineArm7 is the second positional mirror in this project: card_engine_header.s declares
+	    the same fields as labels in order, the ARM7 cardengine reads them as externs, and nothing in
+	    either language checks the other. loadCrt0 has the same shape and got it wrong once -- .align 4
+	    is sixteen bytes in GNU as for ARM, which put a field twelve bytes out of place with a clean
+	    build.
+
+	    So the offsets are pinned on the writing side, against what arm-none-eabi-nm reports for those
+	    labels. A C-side change fails this build instead of handing the ARM7 a cluster read out of the
+	    wrong four bytes.
+
+	    Not covered by tools/ra_reader_test.sh the way loadCrt0's are, and the reason is worth writing
+	    down: that check compiles the struct on the host, which is only valid because loadCrt0 has no
+	    pointers. This one does, and a 64-bit host gives them eight bytes -- the first attempt at
+	    exactly that reported a mismatch that was the probe's fault and not the code's.
+	*/
+	{
+		typedef char raCe7OffsetsPinned[
+			(__builtin_offsetof(cardengineArm7, srParamsCluster)   == 0x34
+			 && __builtin_offsetof(cardengineArm7, romMap)           == 0x8C
+			 && __builtin_offsetof(cardengineArm7, raUnlocksCluster) == 0xEC) ? 1 : -1];
+		(void)sizeof(raCe7OffsetsPinned);
+	}
 	ce7->ramDumpCluster           = ramDumpCluster;
 	ce7->screenshotCluster        = screenshotCluster;
 	ce7->pageFileCluster          = pageFileCluster;

@@ -117,6 +117,7 @@ extern u32 cheatSize;
 extern u32 patchOffsetCacheFileCluster;
 extern u32 ramDumpCluster;
 extern u32 srParamsFileCluster;
+extern u32 raUnlocksCluster;   /* step 3b; 0 when the launcher found no queue file */
 extern u32 screenshotCluster;
 extern u32 apFixOverlaysCluster;
 extern u32 pageFileCluster;
@@ -2121,6 +2122,7 @@ int arm7_main(void) {
 			romFile->firstCluster,
 			patchOffsetCacheFileCluster,
 			srParamsFileCluster,
+			raUnlocksCluster,
 			ramDumpCluster,
 			screenshotCluster,
 			wideCheatFileCluster,
@@ -2462,6 +2464,7 @@ int arm7_main(void) {
 			romFile->firstCluster,
 			patchOffsetCacheFileCluster,
 			srParamsFileCluster,
+			raUnlocksCluster,
 			ramDumpCluster,
 			screenshotCluster,
 			wideCheatFileCluster,

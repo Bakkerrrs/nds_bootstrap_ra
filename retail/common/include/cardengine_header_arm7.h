@@ -133,6 +133,13 @@ typedef struct cardengineArm7 {
 	u32 romPartFrame;
 	u32 romMapLines;
 	u32 romMap[8][3]; // 0: ROM part start, 1: ROM part start in RAM, 2: ROM part end in RAM
+	/*
+	    Step 3b: sd:/ra_unlocks.txt, so this CPU can append an achievement id the ARM9 earned while
+	    playing. Appended at the very end on purpose -- this struct's layout is shared with a
+	    separately linked binary, so a field inserted anywhere else silently moves every field after
+	    it. Zero means no queue file, and the consumer treats that as "do nothing".
+	*/
+	u32 raUnlocksCluster;
 } cardengineArm7;
 
 //

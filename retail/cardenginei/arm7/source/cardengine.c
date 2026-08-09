@@ -28,6 +28,9 @@
 #include <nds/arm7/audio.h>
 #include <nds/arm7/i2c.h>
 #include <nds/memory.h> // tNDSHeader
+/* Step 3b: RA_SHARED_UNLOCK_* -- the contract with the ARM9, in one place rather than two. */
+#include "ra.h"
+#include "ra_wifi.h"   /* RA_QUEUE_RECORD, RA_QUEUE_MAX -- defined whether or not the WiFi switch is on */
 #include <nds/debug.h>
 
 #include "ndma.h"
@@ -106,6 +109,7 @@ extern u32 saveCluster;
 extern u32 saveSize;
 extern u32 patchOffsetCacheFileCluster;
 extern u32 srParamsCluster;
+extern u32 raUnlocksCluster;   /* step 3b; 0 when the launcher found no queue file */
 extern u32 ramDumpCluster;
 extern u32 screenshotCluster;
 extern u32 pageFileCluster;
@@ -169,6 +173,7 @@ static aFile* apFixOverlaysFile = (aFile*)OVL_FILE_LOCATION;
 static aFile patchOffsetCacheFile;
 static aFile ramDumpFile;
 static aFile srParamsFile;
+static aFile raUnlocksFile;
 static aFile screenshotFile;
 static aFile pageFile;
 static aFile manualFile;
@@ -290,6 +295,12 @@ static void driveInitialize(void) {
 	getFileFromCluster(&patchOffsetCacheFile, patchOffsetCacheFileCluster, (valueBits & gameOnFlashcard));
 	getFileFromCluster(&ramDumpFile, ramDumpCluster, (valueBits & bootstrapOnFlashcard));
 	getFileFromCluster(&srParamsFile, srParamsCluster, (valueBits & gameOnFlashcard));
+	/*
+	    Step 3b. Zero when the launcher found no queue file, and getFileFromCluster on zero yields a
+	    file the append path refuses -- see raUnlockAppend(). Same flashcard flag as srParams, because
+	    the queue lives beside the game rather than beside nds-bootstrap.
+	*/
+	getFileFromCluster(&raUnlocksFile, raUnlocksCluster, (valueBits & gameOnFlashcard));
 	getFileFromCluster(&screenshotFile, screenshotCluster, (valueBits & bootstrapOnFlashcard));
 	getFileFromCluster(&pageFile, pageFileCluster, (valueBits & bootstrapOnFlashcard));
 	getFileFromCluster(&manualFile, manualCluster, (valueBits & bootstrapOnFlashcard));
@@ -934,6 +945,86 @@ void returnToLoader(bool reboot) {
 
 	rebootConsole();		// Reboot into TWiLight Menu++
 #endif
+}
+
+/*
+    Step 3b: append one earned achievement id to sd:/ra_unlocks.txt.
+
+    This is the half of the loop with no network in it. rcheevos fires on the ARM9, inside the game's
+    VCOUNT handler, where there is no SD card -- on a DSi the card is this CPU's. So the id crosses
+    through sharedAddr and lands here, and the *next* boot's launcher sends it. See RA_QUEUE_PATH.
+
+    Fixed 16-byte records, so record N is at offset N*16 and no index has to be stored anywhere: the
+    append point is found once, by reading the first byte of each record until one is not a digit. The
+    launcher zero-fills the file and packs the ids it could not send to the front, so that byte is
+    exactly the boundary. Sixty-four one-record reads, on the frame of the first unlock of a session,
+    and never again.
+
+    Refuses rather than grows. The file's length is fixed because this CPU can only write into clusters
+    that already exist -- it cannot allocate -- so a full queue is dropped and counted rather than
+    extended. A session earning sixty-four achievements before a reboot is not a thing.
+
+    The statics are magic-guarded for the same reason the overlay's are: this binary is copied in
+    without a crt0, so .bss holds whatever the previous occupant left and a plain zero means nothing.
+*/
+#define RA_UNLOCK_STATE_MAGIC 0x314C5541   /* 'AUL1' */
+
+static u32 raUnlockStateMagic;
+static u8  raUnlockSlot;      /* next record to write, RA_QUEUE_MAX when full */
+static u8  raUnlockWritten;   /* appended this session */
+static u8  raUnlockDropped;   /* fired with the queue already full */
+
+static void raUnlockAppend(u32 id) {
+	char record[RA_QUEUE_RECORD];
+	char digits[11];
+	u32  value = id;
+	int  n = 0;
+	int  i;
+
+	if (raUnlocksCluster == 0 || id == 0) {
+		return;
+	}
+
+	if (raUnlockStateMagic != RA_UNLOCK_STATE_MAGIC) {
+		u8 slot;
+
+		raUnlockStateMagic = RA_UNLOCK_STATE_MAGIC;
+		raUnlockWritten    = 0;
+		raUnlockDropped    = 0;
+
+		for (slot = 0; slot < RA_QUEUE_MAX; slot++) {
+			fileRead(record, &raUnlocksFile, slot * RA_QUEUE_RECORD, 1);
+			if (record[0] < '0' || record[0] > '9') {
+				break;
+			}
+		}
+		raUnlockSlot = slot;
+	}
+
+	if (raUnlockSlot >= RA_QUEUE_MAX) {
+		if (raUnlockDropped < 255) {
+			raUnlockDropped++;
+		}
+		return;
+	}
+
+	while (value && n < (int)sizeof(digits)) {
+		digits[n++] = (char)('0' + (value % 10));
+		value /= 10;
+	}
+	for (i = 0; i < RA_QUEUE_RECORD; i++) {
+		record[i] = 0;
+	}
+	for (i = 0; i < n; i++) {
+		record[i] = digits[n - 1 - i];
+	}
+	record[n] = '\n';
+
+	fileWrite(record, &raUnlocksFile, raUnlockSlot * RA_QUEUE_RECORD, RA_QUEUE_RECORD);
+	raUnlockSlot++;
+	if (raUnlockWritten < 255) {
+		raUnlockWritten++;
+	}
 }
 
 void dumpRam(void) {
@@ -1989,6 +2080,31 @@ void myIrqHandlerVBlank(void) {
 	} else {
 		ramDumpTimer = 0;
 	} */
+
+	/*
+	    Step 3b: an achievement the ARM9 earned, on its way to the queue file.
+
+	    A critical section and no mutex, and that is a considered choice rather than an omission. The
+	    mutex the old ramDump path used, cardEgnineCommandMutex, is commented out at its declaration --
+	    dead code -- and taking a private one would protect nothing, because the card-read path would
+	    not be taking it. What does matter is that a competing read cannot *start* underneath this
+	    write, and on this CPU reads are driven from interrupt handlers, which IME off prevents.
+
+	    Said plainly: I did not establish what else serialises card access here, so this is the
+	    conservative subset rather than a claim of correctness. The cost of the section is that an ARM9
+	    read request waits a few milliseconds -- a stall, not corruption -- and only on the frame an
+	    achievement unlocks.
+
+	    The flag is cleared after the append, not before, so a frame that could not do the work leaves
+	    the request standing and the next one retries.
+	*/
+	if (sharedAddr[RA_SHARED_UNLOCK_REQ] == RA_SHARED_UNLOCK_MAGIC) {
+		int oldIME = enterCriticalSection();
+
+		raUnlockAppend(sharedAddr[RA_SHARED_UNLOCK_ID]);
+		leaveCriticalSection(oldIME);
+		sharedAddr[RA_SHARED_UNLOCK_REQ] = 0;
+	}
 
 	if (sharedAddr[3] == (vu32)0x52534554) {
 		reset(false);

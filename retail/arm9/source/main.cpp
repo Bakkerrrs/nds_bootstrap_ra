@@ -31,6 +31,7 @@ std::string cheatFilePath;
 std::string ramDumpPath;
 std::string srParamsFilePath;
 /* Step 3b: the unlock queue the cardengine appends to. Set in conf_sd.cpp. */
+/* Step 3b: the unlock queue the cardengine appends to. Set in conf_sd.cpp. */
 std::string raUnlocksFilePath;
 std::string screenshotPath;
 std::string apFixOverlaysPath;
@@ -467,6 +468,7 @@ static int runNdsFile(configuration* conf) {
 	u32 clusterPatchOffsetCache = 0;
 	u32 clusterRamDump = 0;
 	u32 clusterSrParams = 0;
+	u32 clusterRaUnlocks = 0;
 	u32 clusterScreenshot = 0;
 	u32 apFixOverlaysCluster = 0;
 	u32 musicCluster = 0;
@@ -536,6 +538,18 @@ static int runNdsFile(configuration* conf) {
 		clusterSrParams = stSrParams.st_ino;
 	}
 
+	/*
+	    Step 3b: the unlock queue. Left at zero when the file is not there, and the ARM7 reads zero as
+	    "no queue" -- so a card without one behaves exactly as it did before any of this existed.
+	*/
+	{
+		struct stat stRaUnlocks;
+
+		if (stat(raUnlocksFilePath.c_str(), &stRaUnlocks) >= 0) {
+			clusterRaUnlocks = stRaUnlocks.st_ino;
+		}
+	}
+
 
 	if (stat(cheatFilePath.c_str(), &stCheat) >= 0) {
 		clusterCheat = stCheat.st_ino;
@@ -583,7 +597,7 @@ static int runNdsFile(configuration* conf) {
 		clusterTwlFont = stTwlFont.st_ino;
 	}
 
-	return runNds(st.st_ino, clusterSav, clusterDonor, /* clusterGba, clusterGbaSav, */ clusterQuit, clusterWideCheat, clusterApPatch, clusterApPatchPostCardRead, clusterDSi2DSSave, clusterCheat, clusterPatchOffsetCache, clusterRamDump, clusterSrParams, clusterScreenshot, apFixOverlaysCluster, musicCluster, clusterPageFile, clusterManual, clusterTwlFont, conf);
+	return runNds(st.st_ino, clusterSav, clusterDonor, /* clusterGba, clusterGbaSav, */ clusterQuit, clusterWideCheat, clusterApPatch, clusterApPatchPostCardRead, clusterDSi2DSSave, clusterCheat, clusterPatchOffsetCache, clusterRamDump, clusterSrParams, clusterScreenshot, apFixOverlaysCluster, musicCluster, clusterPageFile, clusterManual, clusterTwlFont, clusterRaUnlocks, conf);
 }
 
 int main(int argc, char** argv) {
