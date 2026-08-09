@@ -4124,7 +4124,8 @@ space rather than correctness.
 | | |
 | --- | --- |
 | `already earned    N` in stage 12 | how many the account holds, from the server |
-| `already earned   N left out of the block` in stage 13 | how many of those were in this set |
+| `  earned id      X` in stage 12 | the ids themselves, up to eight |
+| `already earned   M of N matched this set` in stage 13 | how many of those were in this set, printed even when M is 0 |
 | `definitions      M kept` | should be 55 minus that |
 | `block ... used` | should fall by the same definitions' worth |
 | `reached stage 13 of 13` | the ladder grew a rung |
@@ -4201,6 +4202,70 @@ written twice and could have drifted.
 **`attempts` is reported.** A retry that succeeds silently would turn a measurable race into an
 impression, so every request prints `needed N connect attempts` when N is more than one. That is the
 number to watch across runs: rare is a curiosity, common is a reason to look at lwip properly.
+
+#### Hardware: the ladder reached 13, and the skip list matched nothing
+
+The run with the retry in it walked the whole ladder. Log at
+`docs/logs/ra_wifi_launcher_unlocks-3ds.log`:
+
+```
+-- stage 12: what has this account already earned --
+931 bytes back
+already earned    1
+-- stage 13: fetch the set --
+body was         87747 bytes
+definitions      55 kept, 3 unofficial
+ids              55 with, 0 without
+1 server notice(s) dropped, first id 101000001
+block            28924 of 32759 used, 28924 wanted
+reached stage 13 of 13
+```
+
+Two readings, and they point opposite ways.
+
+**The race did not recur.** No `needed N connect attempts` line appeared, on any of the three
+requests, so all three sockets connected first try. That is consistent with what a race is and is not
+evidence the retry works — the retry has still never been observed doing its job. What it does prove
+is that the retry costs nothing when it is not needed: same three stages, same timings, no extra line.
+
+**The skip list matched nothing.** `already earned 1` and yet `definitions 55 kept` — the same 55, the
+same 28,924 bytes, the same block as the run before `r=unlocks` existed
+(`docs/logs/ra_wifi_launcher_55-3ds.log`, byte for byte). The account holds one achievement in this
+game and the scanner found no definition to leave out.
+
+This was predicted as the outcome that would be a finding rather than a bug: it means the two requests
+are not naming the same thing. It is not a filter that fired too hard — a filter that dropped a
+matching id would still have counted it.
+
+##### A count cannot say which, and *which* is the whole question
+
+The old report printed `already earned N left out of the block` only when N was non-zero, so this run
+produced **no line at all** — and absence is indistinguishable from a line that was never written.
+That is a reading by silence, which this project does not accept anywhere else, so both halves now say
+their numbers out loud:
+
+- stage 12 prints the earned ids themselves, up to eight, then `...and N more`. Eight because the
+  point is to identify a mismatch, not to dump an account.
+- stage 13 prints `already earned M of N matched this set` **whenever there was a skip list at all**,
+  and adds `the server named ids this set does not contain` when M is zero. `0 of 1` says what a
+  silence only implies.
+
+Three possibilities remain, and the id is what separates them:
+
+| the earned id is | what that means |
+| --- | --- |
+| ≥ 100,000,000 | the account "earned" the `Warning: Unknown Emulator` notice, which this client filters — the mismatch is our own doing and harmless |
+| a five- or six-digit id not among the 55 | it belongs to a **different subset** of game 9983; the site redirects to `?set=6112`, and `r=patch&g=14856` returns one subset's definitions while `r=unlocks&g=14856` may answer for another |
+| a number in no plausible range | `r=unlocks` and `r=patch` do not share a numbering, and step 6b cannot be built on the assumption that they do |
+
+The first is a curiosity. The second is a real constraint on submitting unlocks — the id you award has
+to be the id the set defines. The third would mean rethinking step 6b entirely. Nothing in the count
+distinguishes them, which is why the next run reports the id and not a tally.
+
+The prediction for that run, stated before it happens: **`earned id 101000001`**, because the notice is
+an achievement the server injects into this game's set and the account has been shown it on every boot.
+If that is what the log says, the mismatch closes as an artefact of our own filter and step 6b proceeds
+on the 55. If it is a five-digit id, the subset question becomes the next thing to answer.
 
 ## Known graphical limitations of the overlay (deferred)
 

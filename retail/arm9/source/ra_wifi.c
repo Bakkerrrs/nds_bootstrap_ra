@@ -674,6 +674,27 @@ static void raWifiUnlocks(const raConfig* cfg) {
 	verdict.unlocksKnown  = 1;
 	verdict.unlockCount   = unlockCount;
 	raWifiLog("\x1b[32malready earned    %d\x1b[37m\n", count);
+
+	/*
+	    The ids themselves, and this line exists because a run reported `already earned 1` while the
+	    fetch kept all 55 -- so the server named an achievement that is not in the set we staged. A
+	    count cannot say which, and *which* is the only thing that distinguishes the possibilities:
+	    an unofficial achievement we filter, one belonging to a different subset of this game, or a
+	    numbering that does not match `r=patch`'s at all.
+
+	    Eight at most, because the point is to identify a mismatch rather than to dump a full account.
+	*/
+	{
+		int shown = (count < 8) ? count : 8;
+		int i;
+
+		for (i = 0; i < shown; i++) {
+			raWifiLog("  earned id      %lu\n", (unsigned long)unlockedIds[i]);
+		}
+		if (count > shown) {
+			raWifiLog("  ...and %d more\n", count - shown);
+		}
+	}
 	if (count >= RA_WIFI_UNLOCKS_MAX) {
 		/*
 		    Truncation is safe and is still said out loud: a short skip list only means a few
@@ -826,8 +847,17 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	    the block alone cannot say which of those happened.
 	*/
 	raWifiLog("ids              %u with, %u without\n", patch.withId, patch.withoutId);
-	if (patch.alreadyDone) {
-		raWifiLog("already earned   %u left out of the block\n", patch.alreadyDone);
+	if (patch.skipCount) {
+		/*
+		    Printed whenever there was a skip list at all, matched or not. A missing line used to mean
+		    "nothing matched", which is a reading by absence -- and absence is indistinguishable from
+		    a line that was never written. `0 of 1` says the thing that a silence only implies.
+		*/
+		raWifiLog("already earned   %u of %u matched this set\n",
+		          patch.alreadyDone, patch.skipCount);
+		if (patch.alreadyDone == 0) {
+			raWifiLog("\x1b[33mthe server named ids this set does not contain\x1b[37m\n");
+		}
 	}
 	/*
 	    The one this project cannot explain, with the reply's own bytes around it. Two lookups
