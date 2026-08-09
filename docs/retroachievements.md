@@ -4615,6 +4615,13 @@ The second reading is the one that matters and it got worse, not better: 93119 w
 `Success:true` and **is not on the account**. So the accept-and-discard branch is now the live one, and
 "`r=unlocks` is just cached" is much weaker — the site is not a cache.
 
+> **Both paragraphs above are wrong, and the run in the next section is what proved it.** 93119 *was*
+> recorded — `r=startsession` returned it with a `When` matching the run that awarded it. And 91467 *is*
+> associated with game 14856 by the server, so "not in the set" was not the reason `r=unlocks` withheld
+> it; the reason is that 91467 is a **hardcore** unlock and `h=0` asks for the softcore list. They are
+> left here rather than edited away because the next section is a correction and needs something to
+> correct, but do not carry either conclusion forward.
+
 ### `r=startsession`, the verb this client never sent
 
 Before blaming the User-Agent, there is a plainer candidate that was never eliminated because it was
@@ -4666,6 +4673,94 @@ The fix, if that is the cause, is **to ask RetroAchievements to recognise the cl
 known emulator's string. That would be against their rules, and it would also destroy the evidence: a
 client that lies about what it is cannot answer this question. The honest name stays.
 
+### The loop closed, and it closed the argument too
+
+Log at `docs/logs/ra_wifi_launcher_session-3ds.log`. `93120` typed into the queue by hand, one boot after
+`93119`. Every open question in the two sections above is answered by these three replies, which is what
+logging them verbatim was for.
+
+```
+-- stage 12: start a play session --
+session reply:
+  {"Success":true,"ServerNow":1786244358,
+   "HardcoreUnlocks":[{"ID":91467,"When":1786166850}],
+   "Unlocks":[{"ID":93119,"When":1786243172},{"ID":101000001,"When":1786244358}]}
+session started
+session unlocks  2 soft, 1 hard
+
+-- stage 13: report what the last session earned --
+  93120  awarded
+award reply:
+  {"Success":true,"AchievementID":93120,"AchievementsRemaining":53,"Score":1126,"SoftcoreScore":597}
+
+-- stage 14: what has this account already earned --
+unlocks reply:
+  {"Success":true,"GameID":14856,"HardcoreMode":false,"UserUnlocks":[93119,93120,101000001]}
+already earned    3
+
+-- stage 15: fetch the set --
+definitions      53 kept, 3 unofficial
+already earned   2 of 3 matched this set
+block            16382 of 32759 used
+```
+
+#### The correction: nothing was ever discarded
+
+`Unlocks` contains **93119, with `When` 1786243172** — the second the previous run awarded it. It was
+recorded the whole time. My conclusion that the award had been accepted and thrown away was wrong, and
+the reasoning behind it was wrong in a specific, avoidable way: the account's page was read as "the
+account holds one achievement", when what it showed was one achievement *on the set the player had been
+playing*. 93119 belongs to a different set of the same game. Inferring a server-side discard from a page
+that was never going to list it was not a measurement.
+
+The lesson is the same one this project keeps relearning, and it is worth the space: the reply is the
+artifact. Three runs of `r=unlocks` reported a parsed count with the body unlogged, and I filled the gap
+with an inference. One logged body ended the argument.
+
+#### And `r=unlocks&h=0` is the softcore list, not the whole list
+
+91467 is in `HardcoreUnlocks` and **not** in `Unlocks`, from the same reply, for the same game. So the
+server does associate it with game 14856 — "it is not in this set" was not why `r=unlocks` withheld it.
+It withheld it because `h=0` asks for softcore, and the two lists are tracked **independently**: a
+hardcore unlock does not imply the softcore one here.
+
+That makes a design decision that was made for a weak reason turn out right for a strong one. The skip
+list still comes only from `r=unlocks`, with the session's hardcore count reported beside it and never
+merged in — and merging it would now be an outright bug. In a softcore session, an achievement held only
+in hardcore has *not* been earned yet, so it belongs in the block where the player can earn it. Counted,
+not merged.
+
+#### What the numbers cross-check
+
+Two independent confirmations fell out that nothing was set up to produce:
+
+- the server says **`AchievementsRemaining":53`** and the scanner staged **`53 kept`**. The server's own
+  arithmetic about what is left agrees with what the block holds, from two different endpoints;
+- the block went from **28,924 bytes to 16,382** — down 43% for two achievements out of 55, because 93119
+  and 93120 were precisely the two 6,270-byte definitions the earlier logs printed as `def 2` and `def 3`.
+  The reason to filter before staging was never about the count, and this is what it looks like when it
+  pays.
+
+`already earned 2 of 3 matched this set` with `of those, 1 is the server's own notice` — three ids, two
+real ones matched, the notice accounted for, no yellow warning. Every line in that report now says a
+true thing about a case it was written before.
+
+#### The notice is re-awarded on every session
+
+Small and worth writing down: `101000001`'s `When` is `1786244358`, which **is** `ServerNow` in the same
+reply. The server does not remember having told us; it unlocks the `Warning: Unknown Emulator`
+pseudo-achievement again at the start of every session. That is why it has appeared in every unlocks list
+since the beginning, and it confirms the notice is a live statement about this client rather than a stale
+row.
+
+#### One thing this run does not settle
+
+In the previous run, `r=unlocks` ran seconds *after* the award and did not report it. In this run, with
+`r=startsession` ahead of it, `r=unlocks` reported `93120` immediately. That is consistent with the
+session being what makes an unlock visible within the same run — and equally consistent with a short
+cache that happened to expire differently. One run each is not enough to tell those apart, and it does
+not matter enough to spend runs on: the award is recorded either way, and the next boot always sees it.
+
 ### What is not built, and what it needs
 
 3b — the cardengine writing to the queue — is not started. Sizing it honestly, from reading the code
@@ -4688,6 +4783,11 @@ One known inaccuracy to write down now rather than discover later: unlocks are s
 earned. For a queue drained on the next boot that is usually minutes to days out. The fix is the `o=`
 parameter plus the DSi's RTC read at both ends, and it changes the signature to the four-append form
 in the code quoted above.
+
+The sending half is now **confirmed on hardware end to end** — awarded, recorded, cross-checked against
+the server's own `AchievementsRemaining`, and filtered out of the next boot's block. 3b is the only part
+of the loop still missing, and it is the part with no network in it at all: the cardengine writing an id
+into a file whose bytes are already allocated. Everything it needs to talk to has been measured.
 
 ## Known graphical limitations of the overlay (deferred)
 
@@ -5104,11 +5204,12 @@ question of which one to believe.
       `rc_client` remains ruled out, see open question #4.
 - [ ] Phase 2 rest: a real achievement set, which needs the client and therefore the
       network transport — open question #1 is now the critical path.
-- [ ] Phase 3: real network, softcore unlocks. The read half is **confirmed on hardware**:
-      login, `r=gameid`, `r=unlocks` and `r=patch` all answer over plain HTTP from the
-      launcher, the radio comes back down, and the game boots with the server's own 55
-      definitions staged. The write half is half-built — `r=awardachievement` is
-      implemented, signed against rcheevos' own formula and pinned to a coreutils oracle,
-      but it has never been exercised against the server, and the cardengine cannot yet
-      write to the queue it drains. See step 6b.
+- [ ] Phase 3: real network, softcore unlocks. Both halves are **confirmed on hardware**
+      from the launcher: `login`, `gameid`, `startsession`, `awardachievement`, `unlocks`
+      and `patch` all answer over plain HTTP, an unlock is recorded by the server and
+      cross-checks against its own `AchievementsRemaining`, the already-earned ones are
+      filtered out of the staging block, the radio comes back down, and the game boots.
+      What is missing is the half with no network in it: the **cardengine writing an
+      earned id into the queue file**, so that the loop starts from play rather than from
+      a text editor. See step 6b.
 - [ ] Phase 4: rich presence, achievement list, login status

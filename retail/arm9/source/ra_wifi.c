@@ -758,9 +758,14 @@ static void raWifiStartSession(const raConfig* cfg) {
 	raWifiLog("\x1b[32msession started\x1b[37m\n");
 
 	/*
-	    Counted, not merged into the skip list. The skip list still comes from r=unlocks, so that the two
-	    can disagree in the log instead of one quietly overwriting the other -- which is the entire reason
-	    for asking twice while this question is open.
+	    Counted, not merged into the skip list -- and hardware turned that from a cautious choice into a
+	    correct one. A reply for this game returned 91467 in HardcoreUnlocks and *not* in Unlocks, so the
+	    two lists are tracked independently: a hardcore unlock does not imply the softcore one. This fork
+	    plays softcore, so an achievement held only in hardcore has not been earned yet and belongs in the
+	    block where the player can earn it. Merging the hardcore list would silently remove exactly those.
+
+	    The skip list therefore stays with r=unlocks, whose h=0 form is the softcore list. Asking twice
+	    also keeps the two able to disagree in the log rather than one quietly overwriting the other.
 	*/
 	soft = raNetJsonObjectField(response, "Unlocks", "ID", unlocks, RA_WIFI_UNLOCKS_MAX);
 	hard = raNetJsonObjectField(response, "HardcoreUnlocks", "ID", unlocks, RA_WIFI_UNLOCKS_MAX);
