@@ -767,6 +767,21 @@ int main(void) {
 	    anything it should not.
 	*/
 	printf("\nrcheevos parses the definition and evaluates it\n");
+	/*
+	    rcheevos comes up over several ticks now -- see RA_RC_LOADING. Ticked until it settles,
+	    and bounded, so a state machine that never reports ACTIVE fails here in milliseconds
+	    rather than by wedging a console inside an interrupt handler.
+	*/
+	{
+		int ticks = 0;
+
+		while (snapshot.rcStage < RA_RC_ACTIVE && ticks < RA_DEFS_MAX_LINES + 8) {
+			ra_wram_tick(&snapshot);
+			ticks++;
+		}
+		/* One tick to activate the single self-test definition, one to finish and evaluate. */
+		CHECK(ticks == 2);
+	}
 	CHECK(snapshot.rcActivate == 0);                  /* RC_OK */
 	CHECK(snapshot.rcStage == RA_RC_FRAME);
 	CHECK(snapshot.rcTriggerState != RC_TRIGGER_STATE_DISABLED);
@@ -981,11 +996,21 @@ int main(void) {
 
 	printf("\nthe WRAM binary's own counter persists across ticks\n");
 	*DISPCNT = 0x0100;
-	for (i = 0; i < 9; i++) {
-		snapshot.ticks++;
-		ra_wram_tick(&snapshot);
+	/*
+	    Relative, not absolute. This used to assert `== 10`, which encoded how many ticks
+	    happened earlier in this file -- so adding the two ticks rcheevos now needs to come up
+	    broke a test about a counter persisting. What is being checked is that nine ticks add
+	    nine, and that is what it says now.
+	*/
+	{
+		const u32 before = snapshot.wramTicks;
+
+		for (i = 0; i < 9; i++) {
+			snapshot.ticks++;
+			ra_wram_tick(&snapshot);
+		}
+		CHECK(snapshot.wramTicks == before + 9);
 	}
-	CHECK(snapshot.wramTicks == 10);
 	CHECK(snapshot.results[1].value == 16);   /* ticks went 7 -> 16 */
 	CHECK(snapshot.results[0].value == 0x0100);
 
@@ -1302,7 +1327,30 @@ int main(void) {
 			*(u32*)(block + 4) = (u32)len;
 			*(u32*)block       = CARDENGINEI_ARM9_RA_DEFS_MAGIC;
 
-			CHECK(ra_rc_init(&probe) == RA_RC_ACTIVE);
+			/*
+			    Driven the way hardware drives it: prepare once, then one definition per
+			    call. That is not a mechanical adaptation of the old single ra_rc_init() --
+			    it is the test for the amortisation itself. The loop is bounded so a state
+			    machine that never reports RA_RC_ACTIVE fails here in milliseconds instead
+			    of hanging a console inside an interrupt handler.
+			*/
+			{
+				u8  stage  = ra_rc_prepare(&probe);
+				int passes = 0;
+
+				CHECK(stage == RA_RC_LOADING);
+				while (stage == RA_RC_LOADING && passes < RA_DEFS_MAX_LINES + 4) {
+					stage = ra_rc_activate_next(&probe);
+					passes++;
+				}
+				CHECK(stage == RA_RC_ACTIVE);
+				/*
+				    One pass per line plus the one that finishes: a machine that silently
+				    skipped definitions would still reach ACTIVE, and this is what says it
+				    did not.
+				*/
+				CHECK(passes == 4);
+			}
 			CHECK(probe.rcFromFile == 1);
 			/*
 			    Every line accounted for: no line was rejected, and the definitions that

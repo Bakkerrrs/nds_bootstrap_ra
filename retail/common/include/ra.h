@@ -393,7 +393,27 @@ typedef struct raSnapshot {
 #define RA_RC_NO_MEMREFS  2  /* malloc() worked but rc_runtime_init()'s allocation did not */
 #define RA_RC_NO_ADDRESS  3  /* the snapshot has no console address; self-test only */
 #define RA_RC_PARSE_BAD   4  /* the definition was rejected; see rcActivate */
-#define RA_RC_ACTIVE      5  /* one achievement activated and validated */
-#define RA_RC_FRAME       6  /* rc_runtime_do_frame() has run */
+/*
+    Still activating, one definition per frame.
+
+    Exists because fifty-six definitions cannot be parsed inside a single interrupt. Each one
+    costs the same ~2.4 KB of stack -- measured, and flat, so it is not depth that scales -- and
+    its own slice of time, and doing all of them in one VCOUNT handler means holding the game's
+    interrupt for however long that adds up to. That total is unmeasured and is the leading
+    suspect for the Data Abort the first fifty-six-definition run produced.
+
+    Splitting it also makes a failure *name itself*: rcActivated is published before each
+    activation is attempted, so a crash localises to one line of the set rather than to the set.
+
+    **Inserted at 5, which moved RA_RC_ACTIVE to 6 and RA_RC_FRAME to 7.** Every guard in the
+    cardengine is written as `rcStage < RA_RC_ACTIVE` and so needs no change, but any reading
+    photographed before this build reads one lower -- the "rcStage 06 = RA_RC_FRAME" in the
+    hardware checklist is now 07. Renumbered rather than parked above RA_RC_ACTIVE because a
+    loading state that sorts *after* active would invert every one of those guards, and a wrong
+    guard is worse than a stale number in a document I control.
+*/
+#define RA_RC_LOADING     5  /* activating, one per frame; rcActivated says how far */
+#define RA_RC_ACTIVE      6  /* every definition activated and validated */
+#define RA_RC_FRAME       7  /* rc_runtime_do_frame() has run */
 
 #endif /* RA_H */

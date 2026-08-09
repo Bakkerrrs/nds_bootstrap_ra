@@ -104,8 +104,8 @@ static u32 triggeredCount;
 static u32 eventCount;
 /*
     Which definition unlocked first, and how expensive the one-time parse was. Statics rather
-    than locals because the event handler has no user-data pointer and because ra_rc_init()
-    reports through the snapshot it is handed rather than owning one.
+    than locals because the event handler has no user-data pointer and because the activation
+    functions report through the snapshot they are handed rather than owning one.
 */
 static u8  firstTriggered;
 static u8  initMaxLines;
@@ -120,9 +120,14 @@ static u8  linesMax;
 #define RA_TEST_ACHIEVEMENT_ID 1
 
 /*
-    rcheevos asks for memory through this, once per distinct address per frame. num_bytes
-    is only ever 1, 2 or 4 -- rc_peek_value() decomposes every other size into one of
-    those before it gets here.
+    rcheevos asks for memory through this, once per distinct address per frame.
+
+    **num_bytes is not only 1, 2 or 4.** This comment used to say it was, on the reasoning that
+    rc_peek_value() decomposes larger widths -- and the code below trusted that with an alignment
+    mask of `numBytes - 1`. A definition using `0xW` asks for **three**, the mask becomes 2, and a
+    32-bit load happens at an address that is 1 mod 4. The first achievement set this project did
+    not write contains a `0xW`, which is how the assumption was found. Widths are handed to
+    ra_read() unfiltered now and it assembles anything that is not a native aligned width.
 
     There is no error channel: peek returns a value, so a read this console cannot serve
     has to return something. Zero is the right something. It makes the condition compare
@@ -142,21 +147,17 @@ static uint32_t ra_rc_peek(uint32_t consoleAddress, uint32_t numBytes, void* ud)
 	}
 
 	/*
-	    Aligned reads go through the watchlist's own read. Unaligned ones are assembled
-	    little-endian from bytes, because an unaligned LDR on the ARM9 returns the word
-	    rotated rather than faulting -- so the hardware would answer, just wrongly.
+	    Every width goes through the watchlist's own read now, including the odd ones, because
+	    that is where the byte assembly belongs -- there is one answer in this binary to "read
+	    these bytes" rather than two that can drift apart.
+
+	    The test this replaced was `(address & (numBytes - 1)) == 0`, and it is worth recording
+	    why it was wrong rather than just deleting it. It assumes numBytes is a power of two.
+	    rcheevos asks for **three** when a definition uses `0xW`, and then the mask is 2 -- so an
+	    address that is 1 mod 4 passes a test it should fail, and a 32-bit load happens at an odd
+	    address. The first set this project did not write contains a `0xW`.
 	*/
-	if ((address & (numBytes - 1)) == 0) {
-		return ra_read(address, (u8)numBytes);
-	}
-	{
-		u32 value = 0;
-		u32 i;
-		for (i = 0; i < numBytes; i++) {
-			value |= (u32)(*(const vu8*)(address + i)) << (i * 8);
-		}
-		return value;
-	}
+	return ra_read(address, (u8)numBytes);
 }
 
 /*
@@ -256,6 +257,20 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
     each other so raising one without the other fails on the host.
 */
 #define RA_DEFS_MAX_LINES 128
+
+/*
+    The split definitions, and how far activation has got through them.
+
+    File statics rather than locals because activation is spread over frames now: ra_rc_prepare()
+    fills these in once and ra_rc_activate_next() is called on later ticks. The pointers are into
+    the staging block, which is not going anywhere -- ra_split_definitions() writes its
+    terminators in place and never copies.
+*/
+static char* defLines[RA_DEFS_MAX_LINES];
+static u8    defCount;
+static u8    defIndex;
+static u8    activatedCount;
+static int   defFirstError;
 
 /*
     Split the staged text into lines, in place.
@@ -424,15 +439,29 @@ static const char* ra_definition(raSnapshot* snapshot) {
 }
 
 /*
-    Bring rcheevos up, once, and report how far it got. Returns the stage reached.
+    Bring rcheevos up and report how far it got. Two functions rather than one, and the split is
+    the whole point of this build.
 
-    The malloc probe is not defensive habit. rc_runtime_init() allocates the memref list
-    and does not check the result before writing through it, so an exhausted arena would
-    be a null dereference inside the library rather than a failure it reports. Proving the
-    allocation can be made before calling it turns that into RA_RC_NO_MEMORY.
+    ra_rc_prepare() runs once: it probes the arena, initialises the runtime, reads the staged
+    definitions and installs any watch lines. ra_rc_activate_next() then activates **one**
+    definition per frame until the set is in.
+
+    Why: fifty-six definitions cannot be parsed inside a single interrupt. Each costs the same
+    ~2.4 KB of stack -- measured on a host, and flat, so depth is not what scales -- plus its own
+    slice of time, and the first run that tried all fifty-six in one VCOUNT handler ended in a
+    Data Abort with the ARM9 executing the definition text as code. That total time is still
+    unmeasured, which is exactly why it is the leading suspect and why the fix is to stop doing
+    it rather than to reason about it further.
+
+    The second reason is diagnostic and matters just as much. rcActivated is published *before*
+    each activation is attempted, so a crash names the line it died on. A set that dies at the
+    same definition every time is one definition's problem; a set that gets through all of them
+    and dies later is the frame budget's. Those are different bugs and the old code could not
+    tell them apart.
 */
-static u8 ra_rc_init(raSnapshot* snapshot) {
-	int activate;
+static u8 ra_rc_prepare(raSnapshot* snapshot) {
+	char* text;
+	u8    i;
 
 	{
 		void* probe = malloc(sizeof(rc_memrefs_t));
@@ -448,122 +477,153 @@ static u8 ra_rc_init(raSnapshot* snapshot) {
 		return RA_RC_NO_MEMREFS;
 	}
 
+	text        = (char*)ra_definition(snapshot);
+	defLines[0] = text;
+	defCount    = 1;
+	if (snapshot->rcFromFile) {
+		defCount = ra_split_definitions(text, snapshot->rcDefLength, defLines);
+	}
+	/*
+	    All of it reset, not just the index. On hardware this runs once, so it would never have
+	    mattered there -- and tools/ra_reader_test.c prepares twice, which is how a static that
+	    carried a previous run's count showed up. A function whose correctness depends on being
+	    called only once is a function that will eventually be called twice.
+	*/
+	defIndex       = 0;
+	defFirstError  = RC_OK;
+	activatedCount = 0;
+	initMaxLines   = 0;
+	initTotalLines = 0;
+
+	snapshot->rcActivated = 0;
+	snapshot->rcActivate  = 0;
+	snapshot->rcInitLines = 0;
+	snapshot->rcInitTotal = 0;
+
+	/*
+	    Watches first, and only clearing the defaults if the file actually supplies some -- a
+	    file of definitions alone should still show the self-test watches, which are the thing
+	    that says the reader is alive at all.
+
+	    Still done in one go: a watch line is a handful of hex fields, not a parse.
+	*/
 	{
-		char*        text = (char*)ra_definition(snapshot);
-		static char* lines[RA_DEFS_MAX_LINES];
-		u8           count = 1;
-		u8    i;
+		bool anyWatch = false;
 
-		lines[0] = text;
-		if (snapshot->rcFromFile) {
-			count = ra_split_definitions(text, snapshot->rcDefLength, lines);
-		}
+		for (i = 0; i < defCount; i++) {
+			const char* rest  = 0;
+			u8          flags = 0;
 
-		/*
-		    Every line gets its own achievement id, numbered from RA_TEST_ACHIEVEMENT_ID, so
-		    the first one keeps the id the measured-progress fields report on and the rest
-		    still count toward rcTriggered. rcActivate carries the first *failure* rather
-		    than the last result -- a file with one bad line among three should say so
-		    instead of being reported by whichever happened to be last.
-		*/
-		/*
-		    Watches first, and only clearing the defaults if the file actually supplies
-		    some -- a file of definitions alone should still show the self-test watches,
-		    which are the thing that says the reader is alive at all.
-		*/
-		{
-			bool anyWatch = false;
-			for (i = 0; i < count; i++) {
-				const char* rest = 0;
-				u8          flags = 0;
-
-				/* `W:` is a plain chain; `W24:` masks each pointer to 24 bits. */
-				if (lines[i][0] == 'W' && lines[i][1] == ':') {
-					rest = lines[i] + 2;
-				} else if (lines[i][0] == 'W' && lines[i][1] == '2'
-				        && lines[i][2] == '4' && lines[i][3] == ':') {
-					rest  = lines[i] + 4;
-					flags = RA_WATCH_FLAG_PTR24;
-				}
-				if (!rest) {
-					continue;
-				}
-				if (!anyWatch) {
-					ra_watch_clear();
-					anyWatch = true;
-				}
-				if (!ra_add_watch_line(rest, flags)) {
-					snapshot->rcBadLine = i + 1;
-				}
+			/* `W:` is a plain chain; `W24:` masks each pointer to 24 bits. */
+			if (defLines[i][0] == 'W' && defLines[i][1] == ':') {
+				rest = defLines[i] + 2;
+			} else if (defLines[i][0] == 'W' && defLines[i][1] == '2'
+			        && defLines[i][2] == '4' && defLines[i][3] == ':') {
+				rest  = defLines[i] + 4;
+				flags = RA_WATCH_FLAG_PTR24;
 			}
-		}
-
-		activate = RC_OK;
-		snapshot->rcActivated = 0;
-		for (i = 0; i < count; i++) {
-			int one;
-			u16 startLine;
-			u16 spent;
-
-			if (lines[i][0] == 'W' && (lines[i][1] == ':' || lines[i][1] == '2')) {
-				continue;   /* a watch, handled above */
+			if (!rest) {
+				continue;
 			}
-
-			/*
-			    Timed one definition at a time, and that is the only way this total can be
-			    right. A single VCOUNT delta around the whole loop is taken modulo 263, so a
-			    parse that spans four frames reports the remainder and a slow init reads as a
-			    fast one -- and there is no way to count frames from inside a handler that is
-			    not being re-entered. Per-definition deltas sum correctly as long as no single
-			    activation exceeds one frame, and initMaxLines is what says whether that held.
-			*/
-			startLine = RA_VCOUNT;
-			one = rc_runtime_activate_achievement(
-				&runtime, RA_TEST_ACHIEVEMENT_ID + i, lines[i], 0, 0);
-			spent = (u16)((RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME)
-			              % RA_SCANLINES_PER_FRAME);
-
-			initTotalLines += spent;
-			if (spent > initMaxLines) {
-				initMaxLines = (u8)((spent > 255) ? 255 : spent);
+			if (!anyWatch) {
+				ra_watch_clear();
+				anyWatch = true;
 			}
-
-			if (one == RC_OK) {
-				snapshot->rcActivated++;
-			} else if (activate == RC_OK) {
-				activate = one;
+			if (!ra_add_watch_line(rest, flags)) {
 				snapshot->rcBadLine = i + 1;
 			}
-			/*
-			    Published as the loop runs, not after it. Fifty-six definitions is the first
-			    time this has been slow enough to hang in, and a snapshot that only becomes
-			    true at the end is exactly the snapshot you do not get from a hang -- so a RAM
-			    viewer can see how far it reached.
-			*/
-			snapshot->rcInitLines = initMaxLines;
-			snapshot->rcInitTotal = (u16)((initTotalLines > 0xFFFF) ? 0xFFFF
-			                                                        : initTotalLines);
-		}
-		snapshot->rcActivate = (s8)activate;
-		/*
-		    A file of watches alone is legitimate -- measuring memory is the point of this
-		    session -- so only a file that offered definitions and had none parse is a
-		    failure. The self-test keeps the runtime doing something either way.
-		*/
-		if (snapshot->rcActivated == 0) {
-			if (rc_runtime_activate_achievement(&runtime, RA_TEST_ACHIEVEMENT_ID,
-			                                    RA_TEST_DEFINITION, 0, 0) != RC_OK) {
-				return RA_RC_PARSE_BAD;
-			}
-			snapshot->rcActivated = 1;
 		}
 	}
 
+	return RA_RC_LOADING;
+}
+
+/*
+    One definition, then out. Returns RA_RC_LOADING while any remain.
+
+    Every line gets its own achievement id, numbered from RA_TEST_ACHIEVEMENT_ID, so the first
+    keeps the id the measured-progress fields report on and the rest still count toward
+    rcTriggered. rcActivate carries the *first* failure rather than the last -- a set with one bad
+    line among fifty-six should say which, not be overwritten by whichever came last.
+*/
+static u8 ra_rc_activate_next(raSnapshot* snapshot) {
+	int one;
+	u16 startLine;
+	u16 spent;
+	u8  line;
+
+	/* Skip watch lines; ra_rc_prepare() already dealt with them. */
+	while (defIndex < defCount
+	    && defLines[defIndex][0] == 'W'
+	    && (defLines[defIndex][1] == ':' || defLines[defIndex][1] == '2')) {
+		defIndex++;
+	}
+
+	if (defIndex < defCount) {
+		line = defIndex;
+		defIndex++;
+
+		/*
+		    Timed one definition at a time, which is also the only way the total can be right:
+		    a single VCOUNT delta around the whole set is taken modulo 263, so a parse spanning
+		    four frames reports the remainder and a slow init reads as a fast one. Per-definition
+		    deltas sum correctly as long as no single activation exceeds a frame, and
+		    initMaxLines is what says whether that held.
+		*/
+		startLine = RA_VCOUNT;
+		one = rc_runtime_activate_achievement(
+			&runtime, RA_TEST_ACHIEVEMENT_ID + line, defLines[line], 0, 0);
+		spent = (u16)((RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME)
+		              % RA_SCANLINES_PER_FRAME);
+
+		initTotalLines += spent;
+		if (spent > initMaxLines) {
+			initMaxLines = (u8)((spent > 255) ? 255 : spent);
+		}
+		snapshot->rcInitLines = initMaxLines;
+		snapshot->rcInitTotal = (u16)((initTotalLines > 0xFFFF) ? 0xFFFF : initTotalLines);
+
+		if (one == RC_OK) {
+			activatedCount++;
+		} else if (defFirstError == RC_OK) {
+			defFirstError        = one;
+			snapshot->rcBadLine  = (u8)(line + 1);
+		}
+		/*
+		    Published after each definition rather than after all of them, which is what makes a
+		    crash name its own line: rcActivated is the count that succeeded, so dying inside
+		    definition k leaves k-1 here. Kept as a count rather than briefly holding the index
+		    being attempted -- a field that means two things depending on when you read it is not
+		    a reading, and rcActivate being 0 already says none of the k-1 failed.
+		*/
+		snapshot->rcActivated = activatedCount;
+		snapshot->rcActivate  = (s8)defFirstError;
+
+		return RA_RC_LOADING;
+	}
+
 	/*
-	    Ask rcheevos to check every address the definition ended up referencing, now,
-	    against what this console has. Nothing should fail here -- the definition above
-	    points at the snapshot -- but a definition from the server will, and this is the
-	    call that has to already be in place when it does.
+	    A file of watches alone is legitimate -- measuring memory is a reason to boot -- so only
+	    a file that offered definitions and had none parse is a failure. The self-test keeps the
+	    runtime doing something either way.
+	*/
+	if (activatedCount == 0) {
+		if (rc_runtime_activate_achievement(&runtime, RA_TEST_ACHIEVEMENT_ID,
+		                                   RA_TEST_DEFINITION, 0, 0) != RC_OK) {
+			return RA_RC_PARSE_BAD;
+		}
+		activatedCount        = 1;
+		snapshot->rcActivated = 1;
+	}
+
+	/*
+	    Ask rcheevos to check every address the set ended up referencing, now, against what this
+	    console has. rcheevos disables any achievement that names one it cannot supply, so this
+	    is what turns "an achievement silently never fires" into rcPeeksRejected.
+
+	    Done once, here, and deliberately after the last definition rather than after each one:
+	    it walks the whole memref pool, so per-definition it would be O(n squared) over a pool
+	    that ends up hundreds long.
 	*/
 	rc_runtime_validate_addresses(&runtime, ra_rc_event_handler, ra_rc_validate_address);
 
@@ -582,21 +642,24 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	u16 startLine;
 	u16 lines;
 
-	if (rcStage == RA_RC_NONE) {
-		/*
-		    The one-time parse. Timed *inside* ra_rc_init(), one definition at a time, rather
-		    than wrapped here -- see rcInitLines in ra.h. A single delta around this call is
-		    taken modulo 263 and therefore reports the remainder of a multi-frame parse, which
-		    was correct for three definitions and is not for fifty-six.
-		*/
-		rcStage           = ra_rc_init(snapshot);
+	/*
+	    Coming up, spread over frames: prepare on one tick, then one definition per tick until
+	    the set is in. Nothing evaluates until it is -- do_frame on a half-loaded runtime would
+	    make rcLinesMax a measurement of a moving target.
+
+	    An error stage matches neither branch and is left alone, so a failure stays reported
+	    rather than being retried every frame forever.
+	*/
+	if (rcStage < RA_RC_ACTIVE) {
+		if (rcStage == RA_RC_NONE) {
+			rcStage = ra_rc_prepare(snapshot);
+		} else if (rcStage == RA_RC_LOADING) {
+			rcStage = ra_rc_activate_next(snapshot);
+		}
 		snapshot->rcStage = rcStage;
-		if (rcStage != RA_RC_ACTIVE) {
+		if (rcStage < RA_RC_ACTIVE) {
 			return;
 		}
-	}
-	if (rcStage < RA_RC_ACTIVE) {
-		return;
 	}
 
 	peeksThisFrame = 0;

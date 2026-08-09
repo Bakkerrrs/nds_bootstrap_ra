@@ -112,14 +112,40 @@ bool ra_readable(u32 addr, u32 len) {
 	    || (addr >= 0x04000000 && addr <= 0x04001100 - len);
 }
 
+/*
+    Read `size` bytes, and the three-byte case is why this is not a two-line function.
+
+    It used to fall through to a 32-bit load for anything that was not 1 or 2, which is correct
+    for the only sizes a watch line can carry -- ra_watch_add_flags() rejects everything but
+    1, 2 and 4. rcheevos is not so limited: `0xW` is a **24-bit** read, and the first achievement
+    set this project did not write contains one. A 32-bit load answers that with a fourth byte
+    that is not part of the value, and through AddAddress that byte becomes part of a *pointer* --
+    so the read that follows lands at an address the definition never named. Nothing would have
+    reported it; the achievement would simply never fire.
+
+    Anything that is not a native width is therefore assembled from bytes, which also makes it
+    alignment-proof: an unaligned LDR on the ARM9 returns the word *rotated* rather than
+    faulting, so the hardware would have answered, just wrongly.
+*/
 u32 ra_read(u32 addr, u8 size) {
 	if (size == 1) {
 		return *(const vu8*)addr;
 	}
-	if (size == 2) {
+	if (size == 2 && (addr & 1) == 0) {
 		return *(const vu16*)addr;
 	}
-	return *(const vu32*)addr;
+	if (size == 4 && (addr & 3) == 0) {
+		return *(const vu32*)addr;
+	}
+	{
+		u32 value = 0;
+		u32 i;
+
+		for (i = 0; i < size; i++) {
+			value |= (u32)(*(const vu8*)(addr + i)) << (i * 8);
+		}
+		return value;
+	}
 }
 
 /*

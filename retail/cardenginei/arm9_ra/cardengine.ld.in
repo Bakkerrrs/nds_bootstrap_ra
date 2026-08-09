@@ -11,13 +11,24 @@ MEMORY {
 
 __vram_start	=	ORIGIN(vram);
 __vram_top	=	ORIGIN(vram)+ LENGTH(vram);
-__sp_irq	=	__vram_top - 0x60;
-__sp_svc	=	__sp_irq - 0x100;
-__sp_usr	=	__sp_svc - 0x100;
 
-__irq_flags	=	__vram_top - 8;
-__irq_flagsaux	=	__vram_top - 0x40; /*__irq_flagsaux	=	0x04000000 - 0x40;*/
-__irq_vector	=	__vram_top - 4;
+/*
+    __sp_irq, __sp_svc, __sp_usr, __irq_flags, __irq_flagsaux and __irq_vector used to be
+    defined here, inherited from the libnds script this file was copied from. They are gone,
+    and the reason is a landmine rather than tidiness.
+
+    Every one of them was computed down from __vram_top -- 0x0377FFA0, 0x0377FEA0, 0x0377FDA0,
+    0x0377FFF8, 0x0377FFC0, 0x0377FFFC -- and __vram_top is 0x03780000, which puts all six
+    **inside CARDENGINEI_ARM9_RA_DEFS_LOCATION**, the 32 KB block the bootloader fills with the
+    achievement definitions. A stack seeded at __sp_usr would grow down through the set.
+
+    Nothing referenced them: this binary has no crt0 and is called as a function from
+    cardenginei_arm9, so it runs on the caller's stack (see "A C library in the window: the crt0
+    it does not have"). So they were harmless -- but only by accident, and an unused symbol
+    pointing at live data is exactly the kind of thing that gets used later by someone who has
+    no reason to suspect it. Deleted rather than moved below the block, because absent means a
+    link error if anything ever wants one, and a link error is the failure to want.
+*/
 
 SECTIONS
 {

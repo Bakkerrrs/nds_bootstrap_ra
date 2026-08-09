@@ -121,6 +121,10 @@ apart, because they have different fixes.
 
 **First, and it needs no network at all:** copy `docs/logs/ra_definitions-14856.txt` to
 `sd:/_nds/nds-bootstrap/ra_achievements.txt` and boot Super Mario 64 DS with a **normal** build.
+The first attempt at this **crashed** — a Data Abort with the ARM9 executing the definition text as
+instructions — so the build now activates one definition per frame and publishes `rcActivated` after
+each, which makes a repeat name the line it dies on. See *First run: a Data Abort* below for the
+three hypotheses that were measured and killed, and the real bug that turned up instead.
 That is the server's own 56 definitions going through `loadRaDefinitions()` into the cardengine,
 and it answers "can rcheevos run a real set on this hardware" on its own. Two numbers are open and
 everything else is already answered on the host: **`rcInitTotal`** (`+0x9E`), the one-time parse,
@@ -3323,7 +3327,7 @@ Re-run `tools/ra_snapshot_addr.sh` after any rebuild.
 | `rcDefLength` | `+0x9A` | **`6FA9`** (28,585) | anything else = the file was truncated or edited |
 | `rcActivated` | `+0x99` | **`38`** (56) | fewer = a definition the host accepted was refused on hardware, and `rcBadLine` says which |
 | `rcBadLine` | `+0x9C` | **0** | non-zero = the first line that failed to parse |
-| `rcStage` | `+0x6C` | `RA_RC_ACTIVE` | `RA_RC_NO_MEMORY` = the arena measurement was wrong |
+| `rcStage` | `+0x6C` | `RA_RC_FRAME` = **7** (was 6 before `RA_RC_LOADING` was inserted). **5 = still loading**, and then `rcActivated` says which definition it is on | `RA_RC_NO_MEMORY` = the arena measurement was wrong |
 | **`rcFirstTriggered`** | **`+0x9D`** | **1** | the set opens with `1=1.300.` — always true, 300 hits — so **line 1 should unlock about five seconds in.** Any other line first means a definition is reading memory it should not, which is a bug rather than a success |
 | `rcTriggered` | `+0x70` | ≥ 1 within ~5 s | 0 after a minute = `do_frame` is not reaching memory; check `rcPeeks` |
 | `rcPeeksRejected` | `+0x80` | **0** | non-zero = a definition asked for an address this console cannot supply. **This is the field most likely to be non-zero**, and it is why `rc_runtime_validate_addresses()` was put in before there was a real set to need it |
@@ -3339,6 +3343,107 @@ The host has already answered everything else — 56 of 56 parse, and the set fi
 the reader translates a console address by adding `0x02000000` — so they land in the game's main
 RAM and should all be readable. Should. Nothing has ever tested that with addresses this project
 did not choose, and a rejection is *better* than the alternative: it used to mean a Data Abort.
+
+#### First run: a Data Abort, with the ARM9 executing the definition text
+
+```
+Error: Data Abort!
+PC: 0377EEEA   ADDR: 0377EEF2
+lr: 0377EE05
+```
+
+Both `PC` and `lr` are inside `CARDENGINEI_ARM9_RA_DEFS_LOCATION`. `0x0377EEEA` is **offset 28,386
+into the definition text**, and `0x0377EE04` — the Thumb target `lr` came from — is 21 bytes into
+line 52, mid-string. So this is not rcheevos returning an error: **control flow left the code and
+the ARM9 has been decoding the achievement set as instructions.** `ADDR` is `PC + 8`, unaligned,
+which is just where the wandering happened to fault.
+
+That is the whole of what the photograph proves, and it is worth saying so plainly before the
+theories.
+
+##### Three hypotheses, measured rather than argued
+
+**Stack depth.** rcheevos' parser was the obvious suspect — a 6,264-byte definition with 416
+conditions, inside an interrupt handler with a small stack. Measured on a host by compiling
+rcheevos with `-finstrument-functions` and recording the deepest frame:
+
+| | |
+| --- | --- |
+| deepest definition in the set | **2,383 bytes** |
+| shallowest | 2,079 bytes |
+| `M:0xH000000>=0.600.` — the self-test that has always worked | **2,383 bytes** |
+| `I:0xM09cab4_0xH09f2f8=6` — the shape of the three that fired on hardware | **2,383 bytes** |
+
+Flat. The parser is iterative, so depth does not scale with the definition, and **the definitions
+that already worked use exactly as much stack as the ones that crashed.** Hypothesis dead — which
+is the value of measuring it, because it was the most plausible one.
+
+**The arena overrunning the block.** The definitions sit at `0x03778000` and the arena runs up to
+it from `__bss_end`. 128,352 bytes from `0x037516DC` reaches `0x03770B7C` — **29 KB short**. Not
+that either.
+
+**The linker script.** This one is real but is not the crash. `cardengine.ld.in` inherited
+`__sp_irq`, `__sp_svc`, `__sp_usr`, `__irq_flags`, `__irq_flagsaux` and `__irq_vector` from the
+libnds script it was copied from, every one computed down from `__vram_top` — so all six land at
+`0x0377F...`, **inside the definitions block.** A stack seeded at `__sp_usr` would grow straight
+down through the achievement set. Nothing references them (this binary has no crt0 and runs on the
+caller's stack, which the crash screen confirms: `sp` is in main RAM), so they were harmless by
+accident. They are deleted rather than relocated: an unused symbol pointing at live data gets used
+eventually by someone with no reason to suspect it, and absent means a link error, which is the
+failure to want.
+
+##### What was found instead, and it is a real bug
+
+`ra_read()` fell through to a 32-bit load for any size that was not 1 or 2. Correct for a watch
+line, which `ra_watch_add_flags()` restricts to 1, 2 and 4. rcheevos is not restricted: **`0xW` is
+a 24-bit read, and line 39 of this set contains one** — `I:0xW0009b450`.
+
+So the first achievement set this project did not write immediately falsified a comment in
+`ra_rcheevos.c` that said `num_bytes` is "only ever 1, 2 or 4". Two things followed from that
+belief:
+
+- a 24-bit read answered with **32 bits**, so the value carried a fourth byte that is not part of
+  it — and because that `0xW` is an `AddAddress`, the extra byte becomes part of a **pointer**, and
+  the read after it lands at an address the definition never named;
+- the alignment test was `(address & (numBytes - 1)) == 0`, which assumes a power of two. With
+  three the mask is 2, so an address that is 1 mod 4 **passes a test it should fail** and a 32-bit
+  load happens at an odd address — where the ARM9 returns the word rotated rather than faulting.
+
+Every width now goes through `ra_read()`, which assembles anything that is not a native aligned
+width from bytes. **This is not claimed to be the Data Abort** — the faulting address is in the
+definitions block, not in game RAM, so it was not a peek. It is a bug that would have made
+achievements silently never fire, found because a real set exercised a path our own definitions
+never did.
+
+##### The fix that makes the next run diagnose itself
+
+What is left unmeasured is the one thing that scales: **total time inside the game's VCOUNT
+handler.** Fifty-six parses in one interrupt, on a retail game that is booting, with
+nds-bootstrap's card hooks live. `rcInitTotal` was added to measure exactly that and the run died
+before it could be read.
+
+So activation is spread over frames — `RA_RC_LOADING`, one definition per tick, roughly one second
+for the set. That removes the suspected cause, and if it was not the cause it removes it from the
+list of suspects, which is worth as much.
+
+The second half matters more: **`rcActivated` is published after every definition**, so a crash
+names the line it died on. A set that dies at the same definition every time is one definition's
+problem; a set that gets through all fifty-six and dies later is the frame budget's. Those are
+different bugs with different fixes and the previous build could not tell them apart — it published
+nothing until all fifty-six were in, which is exactly the value you do not get from a crash.
+
+`RA_RC_LOADING` was inserted at 5, which moved **`RA_RC_ACTIVE` to 6 and `RA_RC_FRAME` to 7.** Every
+guard in the cardengine reads `rcStage < RA_RC_ACTIVE` and needed no change, but readings
+photographed before this build read one lower — the `rcStage 06` in the checklist above is now
+`07`. Renumbered rather than parked above `RA_RC_ACTIVE`, because a loading state that sorts after
+active would invert every one of those guards.
+
+The host test drives the state machine the way hardware does — prepare, then one call per
+definition, bounded — so a machine that never reports `ACTIVE` fails in milliseconds instead of
+wedging a console. Two smaller things fell out of that: `ra_rc_prepare()` now resets every static
+it uses, because the test prepares twice and a count carried over from the first run showed up
+immediately; and a test asserting `wramTicks == 10` became `before + 9`, since the absolute number
+encoded how many ticks happened earlier in the file.
 
 ### What is deliberately not being changed yet
 
