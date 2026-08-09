@@ -81,6 +81,12 @@ Confirmed on hardware, in order of when each was settled:
     `rc_runtime_activate_achievement()` in **128,352 of the arena's 158,132 bytes** — 29,780 to
     spare. Both numbers were open questions until this ran.
 
+13. **The server's own set running inside the game.** Super Mario 64 DS boots and plays with all
+    56 published definitions active. It took three crashed runs to get there: everything in this
+    project runs on the game's VCOUNT interrupt stack, and `rc_runtime_activate_achievement()`
+    needs **2,383 bytes** where `rc_runtime_do_frame()` needs 767. rcheevos has its own 8 KB stack
+    now. The cost figures — `rcStackUsed`, `rcInitTotal`, `rcLinesMax` — are still unread.
+
 **Step 3 is finished.** The launcher logs in, identifies the ROM, fetches the published set and
 stages it where the game will find it, allocating nothing. What has never been tried is *running*
 those definitions — that is step 4, and the cheapest first move is below.
@@ -3517,6 +3523,30 @@ was consumed to the last word, and then 8 KB is not enough either.
 The host build calls straight through instead of switching stacks, so `tools/ra_reader_test.sh`
 does not exercise the switch. What it does exercise is that everything reached through it still
 works — which is worth saying plainly rather than leaving implied.
+
+##### Confirmed on hardware: it runs
+
+Both sets boot and play with the private stack in place — `A-liviano` (48 definitions) and
+`C-todo-56` (the whole published set). Super Mario 64 DS reaches its file-select screen and plays.
+
+That is the diagnosis confirmed rather than a fix that merely stopped a symptom: the only thing
+that changed between the crashing builds and this one is *which stack rcheevos runs on*. The set,
+the arena, the definition count and the per-frame work are all identical to the run that produced a
+Data Abort.
+
+The three numbers the run was for — `rcStackUsed`, `rcInitTotal` and `rcLinesMax` — have not been
+read yet. Everything on this screen is in one place, so a single hex-viewer photograph settles all
+of them:
+
+| | |
+| --- | --- |
+| RAM Viewer at | **`0x027FEDB0`** |
+| covers | `0x027FEDB0`–`0x027FEDEF`, which is the whole rcheevos half of the snapshot |
+| `rcStackUsed` | `0x027FEDBA`, 2 bytes — **predicted near 2,383** |
+| `rcInitTotal` | `0x027FEDEE`, 2 bytes |
+| `rcLinesMax` | `0x027FEDD5`, 1 byte, out of 263 |
+| `rcFirstTriggered` | `0x027FEDED`, 1 byte — **predicted 1**, about five seconds in |
+| `rcPeeksRejected` | `0x027FEDD0`, 4 bytes — the field most likely to be non-zero |
 
 ### What is deliberately not being changed yet
 
