@@ -5161,6 +5161,43 @@ guarded by `RA_VBLANK_HOOK` from `ASFLAGS` rather than `RA_READER_ENABLED`, whic
 the two are set in the same three Makefiles, and if they drift apart the link fails on `raVblankHandler`
 instead of quietly producing a cardengine with no hook.
 
+### Confirmed on hardware, and `rearmIe` is the number that proves the reasoning
+
+Two runs on Contra 4 with the VBlank hook, and the flicker is gone — the message reads instead of
+flashing.
+
+| | VCOUNT hook | VBlank hook, opening minute | VBlank hook, ~3 min |
+|---|---|---|---|
+| `ticks` | 1,132 over several minutes | 2,293 | **10,715** |
+| against wall clock | ~8% of frames | ~38 s of frames | ~178 s of frames |
+| `rearmTable` | 1 | 2 | 2 |
+| `rearmIe` | 0 | **0** | **0** |
+| `rearmDispstat` | **255**, saturated | 0 | 0 |
+
+`ticks` now tracks the frame count one for one. And `rearmIe` reading **0** is the prediction verified
+directly rather than by consequence: the game never once cleared `IRQ_VBLANK`, because it needs that
+interrupt for itself. That was the entire argument for moving, and it did not have to be inferred.
+
+The unlock run read `shows 1` with `denied`, `evicted` and `deniedNoLayer` all 0, and `overlayState`
+**0x4A** — layer 1, block 1, extended palettes off, bit 5 clear so not inside a fade, bit 6 set so it had
+been deferred and released, bit 7 clear so nothing was still owed. Deferred, released, drawn on a clean
+screen, onto VRAM the game was not using.
+
+**A confirmation that came free.** `rcFirstId` was **302329** at `rcFirstTriggered` **1** — the stage 1
+trophy, the very achievement that started this hunt by unlocking with nothing on screen. It is line 1 of
+the set now. It had been 302349 at line 11, then line 12, because 302329 was the one being filtered as
+already earned; deleting it from the site put it back at line 1 and shifted everything after it.
+`rcActivated` 45 against 44, `rcDefLength` 7,415 against 7,332, `rcFirstTriggered` 1 against 12, and
+`rcFirstId` naming the difference. Four independent numbers telling one story, and the already-earned
+filter is now demonstrated in both directions rather than just asserted.
+
+**What it costs, stated rather than buried.** `rcLines` is 28-31 per frame in steady state, and that is
+now paid on every frame instead of on 8% of them — the real per-frame cost went up roughly twelvefold.
+The placement makes it affordable in a way the old hook did not: VBlank is 71 scanlines and this uses
+about 30, so in steady state the work fits entirely inside the blanking period and touches no visible
+line at all. The old hook fired at line 0 and spent those 30 lines on drawn pixels. Only the
+initialisation frames overrun (`rcInitLines` 85, `linesMax` 189), and those happen once per boot.
+
 And `cardengineArm9` is now pinned the way `cardengineArm7` is — `raCe9OffsetsPinned` in `misc.c` asserts
 five field offsets against what `nm` reports for the assembly labels. This file reads `irqTable` to install
 an interrupt handler now: a field that shifted would not fail to build, it would write a wild pointer into
