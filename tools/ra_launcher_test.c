@@ -614,9 +614,26 @@ static const char patchReply[] =
 
 /*
     The two published definitions, one per line, each prefixed with the achievement's own
-    RetroAchievements id -- 1 and 3 in the fixture; 2 is the unofficial one and is not here.
+    RetroAchievements id -- 1 and 3 in the fixture; 2 is the unofficial one and is not here -- and
+    each followed by a tab and the achievement's title.
+
+    Achievement 3's title is longer than RA_PATCH_TITLE_MAX and so arrives clipped. The expectation
+    is *computed* from the constant rather than typed out, for the reason patchFeedAll() exists: a
+    fixture measured by hand is a fixture that will eventually measure wrong, and a hand-clipped
+    31-character string is exactly that measurement.
 */
-#define PATCH_EXPECT "1:0xH0a1b2c=1_d0xH0a1b2c=0\n3:0xH000010>d0xH000010\n"
+#define PATCH_TITLE_1 "First Star"
+#define PATCH_TITLE_3 "They wrote \"MemAddr\":\" in the title"
+#define PATCH_HEAD    "1:0xH0a1b2c=1_d0xH0a1b2c=0\t" PATCH_TITLE_1 \
+                      "\n3:0xH000010>d0xH000010\t"
+
+static char patchExpect[512];
+
+static void patchExpectBuild(void) {
+	/* RA_PATCH_TITLE_MAX counts the terminator, so one fewer is what a title can hold. */
+	snprintf(patchExpect, sizeof(patchExpect), "%s%.*s\n",
+	         PATCH_HEAD, (int)(RA_PATCH_TITLE_MAX - 1), PATCH_TITLE_3);
+}
 
 /*
     A whole fixture into the scanner in one call.
@@ -650,14 +667,15 @@ static void test_patch(void) {
 
 	printf("\nthe patch scanner pulls the published set out of a streaming reply\n");
 
+	patchExpectBuild();
 	patchRun(&patch, block, sizeof(block) - 1, patchReply, 0);
-	CHECK(strcmp(block, PATCH_EXPECT) == 0);
+	CHECK(strcmp(block, patchExpect) == 0);
 	CHECK(patch.kept == 2);
 	CHECK(patch.unofficial == 1);
 	CHECK(patch.dropped == 0 && patch.tooLong == 0 && patch.cutShort == 0);
 	CHECK(patch.empty == 0 && patch.oddFlags == 0 && patch.noFlags == 0);
-	CHECK(patch.used == strlen(PATCH_EXPECT));
-	CHECK(patch.wanted == strlen(PATCH_EXPECT));
+	CHECK(patch.used == strlen(patchExpect));
+	CHECK(patch.wanted == strlen(patchExpect));
 	/* Decoded length, so the escaped slash counts as the one character it becomes. */
 	CHECK(patch.longest == strlen("0xH0a1b2c=1_d0xH0a1b2c=0"));
 	CHECK(patch.shortest == strlen("0xH000010>d0xH000010"));
@@ -667,6 +685,15 @@ static void test_patch(void) {
 	*/
 	CHECK(patch.withId == 2);
 	CHECK(patch.withoutId == 0);
+	/*
+	    And both carried a title. Note where they sit in the fixture: `MemAddr` comes *before* `Title`
+	    in each object here, and the one real reply this project has captured has them the other way
+	    round. Both work, because a title is captured on sight and spent at commit time -- which is
+	    the Flags field, after either order has gone past.
+	*/
+	CHECK(patch.withTitle == 2);
+	CHECK(patch.titleCut == 1);        /* achievement 3's, which is 35 characters */
+	CHECK(patch.titleNoRoom == 0);
 
 	/*
 	    Every split, because the boundary the network chooses is not ours -- and the interesting
@@ -681,7 +708,7 @@ static void test_patch(void) {
 
 		for (split = 0; split <= total; split++) {
 			patchRun(&patch, block, sizeof(block) - 1, patchReply, split);
-			if (strcmp(block, PATCH_EXPECT) != 0 || patch.kept != 2
+			if (strcmp(block, patchExpect) != 0 || patch.kept != 2
 			 || patch.unofficial != 1 || patch.dropped || patch.tooLong
 			 || patch.cutShort || patch.noFlags || patch.oddFlags) {
 				bad = split + 1;
@@ -703,7 +730,7 @@ static void test_patch(void) {
 			raNetStreamFeed(&s, patchReply + i, 1);
 		}
 		raPatchFinish(&patch);
-		CHECK(strcmp(block, PATCH_EXPECT) == 0 && patch.kept == 2);
+		CHECK(strcmp(block, patchExpect) == 0 && patch.kept == 2 && patch.withTitle == 2);
 	}
 
 	printf("\nthe needle restarts correctly, and escapes decode\n");
@@ -837,7 +864,7 @@ static void test_patch(void) {
 		*/
 		CHECK(patch.kept == 1);
 		CHECK(patch.withId == 1);
-		CHECK(strcmp(block, "93121:0xH1=1\n") == 0);
+		CHECK(strcmp(block, "93121:0xH1=1\tReal\n") == 0);
 		CHECK(patch.oddIds == 1 && patch.oddId == 101000001);
 		/* The capture starts at the byte after the id's digits, so the fields follow it verbatim. */
 		CHECK(strstr(patch.oddContext, "Odd One") != NULL);
@@ -963,13 +990,91 @@ static void test_patch(void) {
 		patchRun(&patch, small, sizeof(small) - 1, patchReply, 0);
 		CHECK(strcmp(small, "1:0xH0a1b2c=1_d0xH0a1b2c=0\n") == 0);
 		CHECK(patch.kept == 1 && patch.dropped == 1);
-		CHECK(patch.used == 27 && patch.wanted == strlen(PATCH_EXPECT));
+		CHECK(patch.used == 27 && patch.wanted == strlen(patchExpect));
 		CHECK(patch.used <= sizeof(small) - 1);
+		/*
+		    And this is the case the label guard exists for. With its title the first definition needs
+		    38 bytes and there are 27, so the *label* is what gets dropped -- the achievement is kept
+		    and still works. Before the guard this read `kept 0, dropped 2`: adding titles would have
+		    switched off an achievement that had been fine the day before.
+		*/
+		CHECK(patch.withTitle == 0 && patch.titleNoRoom == 1);
 
 		/* No room at all: nothing is written and everything is accounted for. */
 		patchRun(&patch, small, 0, patchReply, 0);
 		CHECK(patch.kept == 0 && patch.dropped == 2);
-		CHECK(patch.wanted == strlen(PATCH_EXPECT));
+		CHECK(patch.wanted == strlen(patchExpect));
+	}
+
+	printf("\ntitles survive what a title contains, and cannot forge the delimiter\n");
+	{
+		/*
+		    A colon in a title is the reason the delimiter is a tab and not a third colon-separated
+		    field. "Chapter 1: Beginnings" is an ordinary achievement name.
+		*/
+		patchRun(&patch, block, sizeof(block) - 1,
+		         "HTTP/1.1 200 OK\r\n\r\n{\"Achievements\":[{\"ID\":7,"
+		         "\"Title\":\"Chapter 1: Beginnings\",\"MemAddr\":\"0xH1=1\",\"Flags\":3}]}", 0);
+		CHECK(strcmp(block, "7:0xH1=1\tChapter 1: Beginnings\n") == 0);
+		CHECK(patch.kept == 1 && patch.withTitle == 1);
+
+		/*
+		    An escaped tab stays two characters. That is what makes the record parseable at all: if
+		    `\t` in a title decoded to a real tab, a title could split its own record and the text
+		    after it would be read as another title -- or worse, the memaddr boundary would move.
+		*/
+		patchRun(&patch, block, sizeof(block) - 1,
+		         "HTTP/1.1 200 OK\r\n\r\n{\"Achievements\":[{\"ID\":8,"
+		         "\"Title\":\"a\\tb\",\"MemAddr\":\"0xH1=1\",\"Flags\":3}]}", 0);
+		CHECK(strcmp(block, "8:0xH1=1\ta\\tb\n") == 0);
+		CHECK(strchr(block + 9, '\t') == NULL);   /* exactly one tab in the record, the delimiter */
+
+		/*
+		    Two achievements, the second with no Title at all. It gets *no* label rather than the
+		    first one's, because the title is cleared when a definition commits. Pinned, because the
+		    alternative -- a label bleeding from one achievement to the next -- would look like the
+		    notification naming the wrong thing.
+		*/
+		patchRun(&patch, block, sizeof(block) - 1,
+		         "HTTP/1.1 200 OK\r\n\r\n{\"Achievements\":["
+		         "{\"ID\":10,\"Title\":\"Named\",\"MemAddr\":\"0xH1=1\",\"Flags\":3},"
+		         "{\"ID\":11,\"MemAddr\":\"0xH2=2\",\"Flags\":3}]}", 0);
+		CHECK(strcmp(block, "10:0xH1=1\tNamed\n11:0xH2=2\n") == 0);
+		CHECK(patch.kept == 2 && patch.withTitle == 1);
+
+		/*
+		    The one case that does bleed, pinned so it is a decision: an *untitled first* achievement
+		    inherits the game's own Title from the root object. The id is still its own, which is the
+		    half that matters.
+		*/
+		patchRun(&patch, block, sizeof(block) - 1,
+		         "HTTP/1.1 200 OK\r\n\r\n{\"PatchData\":{\"ID\":14856,"
+		         "\"Title\":\"Contra 4\",\"Achievements\":["
+		         "{\"ID\":20,\"MemAddr\":\"0xH1=1\",\"Flags\":3}]}}", 0);
+		CHECK(strcmp(block, "20:0xH1=1\tContra 4\n") == 0);
+
+		/*
+		    And the reverse of the fixture's order, which is the order the one captured reply uses:
+		    Title first, MemAddr second. The root object's own Title must not leak into it -- and the
+		    brace inside the Description must not cost the achievement its id, which it did until the
+		    scanner learned to tell a brace in a string from a brace that opens an object.
+		*/
+		patchRun(&patch, block, sizeof(block) - 1,
+		         "HTTP/1.1 200 OK\r\n\r\n{\"PatchData\":{\"ID\":14856,"
+		         "\"Title\":\"Contra 4\",\"Achievements\":[{\"ID\":12,"
+		         "\"Title\":\"Stage 1 Clear\",\"Description\":\"has a { brace\","
+		         "\"MemAddr\":\"0xH3=3\",\"Flags\":3}]}}", 0);
+		CHECK(strcmp(block, "12:0xH3=3\tStage 1 Clear\n") == 0);
+
+		/*
+		    An achievement with an empty title writes no tab rather than a trailing one, so the reader
+		    never has to tell "no label" from "empty label".
+		*/
+		patchRun(&patch, block, sizeof(block) - 1,
+		         "HTTP/1.1 200 OK\r\n\r\n{\"Achievements\":[{\"ID\":13,"
+		         "\"Title\":\"\",\"MemAddr\":\"0xH1=1\",\"Flags\":3}]}", 0);
+		CHECK(strcmp(block, "13:0xH1=1\n") == 0);
+		CHECK(patch.kept == 1 && patch.withTitle == 0);
 	}
 
 	printf("\nthe real block is big enough for the set this fork is aiming at\n");

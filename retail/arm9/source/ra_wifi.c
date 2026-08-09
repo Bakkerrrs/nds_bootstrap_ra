@@ -1284,6 +1284,20 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	    the block alone cannot say which of those happened.
 	*/
 	raWifiLog("ids              %u with, %u without\n", patch.withId, patch.withoutId);
+	/*
+	    And the labels, so the on-screen notification naming the wrong thing -- or nothing -- has an
+	    account here rather than being diagnosed from a photograph. `clipped` is cosmetic by design;
+	    `no room` is the block being full enough that labels were traded away to keep the achievements
+	    themselves, which is the point at which the block size is worth revisiting.
+	*/
+	raWifiLog("titles           %u with", patch.withTitle);
+	if (patch.titleCut) {
+		raWifiLog(", %u clipped", patch.titleCut);
+	}
+	if (patch.titleNoRoom) {
+		raWifiLog("\x1b[33m, %u dropped for room\x1b[37m", patch.titleNoRoom);
+	}
+	raWifiLog("\n");
 	if (patch.skipCount) {
 		/*
 		    Printed whenever there was a skip list at all, matched or not. A missing line used to mean

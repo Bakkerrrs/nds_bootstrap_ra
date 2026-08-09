@@ -550,7 +550,42 @@ typedef struct raSnapshot {
 	    the missing half of that.
 	*/
 	u8  overlayState;     /* +0xB3  see the bit layout above */
-} raSnapshot;            /*              0xB4 bytes */
+	/*
+	    Where the notification's pixels are: a strip of 4bpp background tiles, RA_TEXT_BYTES of them,
+	    rendered by cardenginei_arm9_ra and blitted by the overlay in the ARM9 cardengine.
+
+	    The split is a consequence of the budget rather than a preference. A font for printable ASCII
+	    is 760 bytes and the ARM9 cardengine's window has 24 free -- it has already turned down a
+	    four-byte debug field and a fifty-six-byte diagnostic mode. So the side with 256K owns the
+	    font, the character lookup and the centring, and the side that negotiates with the game for
+	    VRAM owns the drawing. The overlay keeps every line of that negotiation, which was expensive
+	    to get right, and loses only the part that knew what letters look like.
+
+	    Zero until an unlock has rendered one, which is what lets the drawing side tell "nothing to
+	    say" from "something to say". ra_tick() checks it is inside the WRAM binary's window before
+	    passing it on: a wrong pointer here would be two kilobytes of arbitrary memory copied into a
+	    running game's VRAM.
+	*/
+	u32 overlayText;      /* +0xB4 */
+} raSnapshot;            /*              0xB8 bytes */
+
+/*
+    The shape of that strip, and it is here rather than with the code that fills it because **both
+    binaries compile from it**. cardenginei_arm9_ra renders RA_TEXT_BYTES and the ARM9 cardengine
+    copies RA_TEXT_BYTES; two constants that had to agree would eventually not.
+
+    32 by 2 tiles: the full width of the screen, and two rows -- a heading that says a
+    RetroAchievements unlock happened, and the achievement's own name underneath.
+
+    Fixed rather than sized to the message. A length carried across the boundary is a length the
+    receiving side has to trust, and a wrong one is two kilobytes written into a running game's VRAM.
+*/
+#define RA_TEXT_COLS  32
+#define RA_TEXT_ROWS  2
+#define RA_TEXT_TILES (RA_TEXT_COLS * RA_TEXT_ROWS)
+/* 4bpp: eight words of eight nibbles per tile. */
+#define RA_TEXT_WORDS (RA_TEXT_TILES * 8)
+#define RA_TEXT_BYTES (RA_TEXT_WORDS * 4)
 
 /*
     How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail

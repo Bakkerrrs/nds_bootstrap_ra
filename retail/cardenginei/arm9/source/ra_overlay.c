@@ -48,6 +48,22 @@
 #define CHAR_BLOCKS 8
 
 /*
+    ...but only the first four can be *borrowed*, and this is a bug fix rather than a restriction.
+
+    BGCNT holds the character base in bits 2-5 -- four bits, 16K units, so any of the eight -- and the
+    screen base in bits 8-12: **five bits, 2K units**, which reaches 62K and no further. The offsets
+    that would extend both (DISPCNT bits 24-29) are main-engine only; the sub engine has none. So a map
+    placed inside block 4 or above needs a screen base of 32 or more, which does not fit the field: it
+    truncates, and the map lands inside a low block the game may well be using. Two kilobytes of tilemap
+    written over somebody's tiles.
+
+    The survey still examines all eight, because a block the *game* is using has to be detected wherever
+    it is. Only the choice is narrowed. That makes `denied` a little more likely and silent corruption
+    impossible, which is the same trade the enable-bit fix made and it goes the same way.
+*/
+#define CHOOSABLE_BLOCKS 4
+
+/*
     Is the sub engine actually dimming or whitening the screen right now?
 
     Bits 0-4 are the blend factor and bits 14-15 are the mode: 0 and 3 mean *no effect at all*, 1 blends
@@ -88,7 +104,6 @@ static bool brightActive(void) {
 #define OVERLAY_PAL_INDEX 1
 #define OVERLAY_PAL_ENTRY (OVERLAY_PAL_BANK * 16 + OVERLAY_PAL_INDEX)
 #define OVERLAY_ROW 10
-#define OVERLAY_COL 10
 
 /*
     Frames the notification stays up, and it is three seconds again rather than whatever the tick rate
@@ -128,26 +143,6 @@ static bool brightActive(void) {
 #define OVERLAY_DEMO_INTERVAL 0
 #endif
 
-/*
-    "RA UNLOCKED", one 1bpp 8x8 glyph per character in message order. In order rather
-    than as a font, so there is no lookup table and no unused glyph -- the difference
-    between fitting in the cardengine and not. Bit 7 is the leftmost pixel.
-*/
-static const u8 glyphs[][8] = {
-	{ 0xFC, 0x82, 0x82, 0xFC, 0x88, 0x84, 0x82, 0x00 },  /* R */
-	{ 0x38, 0x44, 0x82, 0x82, 0xFE, 0x82, 0x82, 0x00 },  /* A */
-	{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },  /*   */
-	{ 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x7C, 0x00 },  /* U */
-	{ 0x82, 0xC2, 0xA2, 0x92, 0x8A, 0x86, 0x82, 0x00 },  /* N */
-	{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xFE, 0x00 },  /* L */
-	{ 0x7C, 0x82, 0x82, 0x82, 0x82, 0x82, 0x7C, 0x00 },  /* O */
-	{ 0x7C, 0x82, 0x80, 0x80, 0x80, 0x82, 0x7C, 0x00 },  /* C */
-	{ 0x82, 0x84, 0x88, 0xF0, 0x88, 0x84, 0x82, 0x00 },  /* K */
-	{ 0xFE, 0x80, 0x80, 0xFC, 0x80, 0x80, 0xFE, 0x00 },  /* E */
-	{ 0xF8, 0x84, 0x82, 0x82, 0x82, 0x84, 0xF8, 0x00 },  /* D */
-};
-
-#define GLYPH_COUNT ((int)(sizeof(glyphs) / sizeof(glyphs[0])))
 
 /*
     Guarded by a magic value rather than a bool: the cardengine's .bss is never
@@ -264,10 +259,18 @@ static void surveyBlocks(bool* used, int skipLayer) {
 	}
 }
 
-/* Tiles at the start of the borrowed block, map 2K in: one block covers both. */
+/*
+    Tiles at the start of the borrowed block, map 4K in: one block covers both.
+
+    4K rather than the 2K it used to be, because the tiles grew. Sixty-five of them are needed now --
+    one blank for clearing the map, then RA_TEXT_TILES of text -- which is 2,080 bytes and would have
+    run 32 bytes into a map sitting at 2K. The whole 16K block is ours while borrowed, so moving the
+    map costs nothing; leaving it would have put the last tile of the message underneath the tilemap
+    that displays it.
+*/
 static vu32* tilesOf(int b)   { return (vu32*)(SUB_BG_VRAM + b * 0x4000); }
-static vu16* mapOf(int b)     { return (vu16*)(SUB_BG_VRAM + b * 0x4000 + 0x800); }
-static u16   bgCntFor(int b)  { return (u16)((b << 2) | (((b * 8) + 1) << 8)); }
+static vu16* mapOf(int b)     { return (vu16*)(SUB_BG_VRAM + b * 0x4000 + 0x1000); }
+static u16   bgCntFor(int b)  { return (u16)((b << 2) | (((b * 8) + 2) << 8)); }
 
 /*
     A layer the game currently has switched off. Taking one it is using would displace
@@ -283,16 +286,12 @@ static int chooseLayer(void) {
 	return -1;
 }
 
-static void draw(int b) {
+static void draw(int b, const void* text) {
 	vu32* tiles = tilesOf(b);
 	vu16* map = mapOf(b);
-	int g, y, x;
+	const u32* src = (const u32*)text;
+	int i;
 
-	/*
-	    Recorded, not worked around. With BG extended palettes on, this write goes to memory the sub
-	    engine is not reading for backgrounds, so the glyphs come out in the game's own colour at this
-	    index -- which is the leading explanation for a notification that reports drawn and is not seen.
-	*/
 	/*
 	    Packed here, after the block and layer are chosen and before a single tile is written, so the
 	    reading is what surveyBlocks() had to work from paired with what it decided. One byte, because
@@ -308,34 +307,47 @@ static void draw(int b) {
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 
-	/* Words, never bytes: DS VRAM ignores 8-bit writes. */
-	for (g = 0; g < GLYPH_COUNT; g++) {
-		vu32* tile = tiles + (g + 1) * 8;
-		for (y = 0; y < 8; y++) {
-			const u8 bits = glyphs[g][y];
-			u32 row = 0;
-			for (x = 0; x < 8; x++) {
-				if (bits & (0x80 >> x)) {
-					row |= 1u << (x * 4);  /* leftmost pixel is the lowest nibble */
-				}
-			}
-			tile[y] = row;
-		}
+	/*
+	    Copied, not generated. This used to hold eleven glyphs in message order and expand them a bit at
+	    a time; the font and the expansion live in cardenginei_arm9_ra now, where a font for printable
+	    ASCII costs 760 bytes of a 256K window instead of competing with the code that draws it. What is
+	    left here is the part that had to stay: everything that negotiates with the game for the VRAM.
+
+	    Words, never bytes -- DS VRAM ignores 8-bit writes -- and tile 0 is skipped so it stays blank for
+	    the map clear below.
+	*/
+	for (i = 0; i < RA_TEXT_WORDS; i++) {
+		tiles[8 + i] = src[i];
 	}
 
-	for (y = 0; y < 32 * 32; y++) {
-		map[y] = 0;  /* tile 0 is blank, so this clears the layer */
+	for (i = 0; i < 32 * 32; i++) {
+		map[i] = 0;  /* tile 0 is blank, so this clears the layer */
 	}
-	for (g = 0; g < GLYPH_COUNT; g++) {
-		map[OVERLAY_ROW * 32 + OVERLAY_COL + g] = (g + 1) | (OVERLAY_PAL_BANK << 12);
+	for (i = 0; i < RA_TEXT_TILES; i++) {
+		const int row = i / RA_TEXT_COLS;
+		const int col = i % RA_TEXT_COLS;
+
+		map[(OVERLAY_ROW + row) * 32 + col] = (u16)((i + 1) | (OVERLAY_PAL_BANK << 12));
 	}
 }
 
-static void show(void) {
+static void show(const void* text) {
 	bool used[CHAR_BLOCKS];
 	int b;
-
 	const int l = chooseLayer();
+
+	/*
+	    Nothing to say, so nothing is drawn. The strip comes from cardenginei_arm9_ra, which is also
+	    where the unlock came from, so a trigger with no text means that binary rendered nothing -- a
+	    bug over there, not a shortage over here. Counted as a denial anyway rather than dropped
+	    silently: `shows` staying at 0 with `denied` climbing is a reading, and `shows` staying at 0
+	    with everything else at 0 is the ambiguity that already cost one hardware run.
+	*/
+	if (!text) {
+		raOverlayDenied++;
+		return;
+	}
+
 	if (l < 0) {
 		raOverlayDenied++;
 		raOverlayDeniedNoLayer++;
@@ -343,12 +355,12 @@ static void show(void) {
 	}
 
 	surveyBlocks(used, l);
-	for (b = 0; b < CHAR_BLOCKS; b++) {
+	for (b = 0; b < CHOOSABLE_BLOCKS; b++) {
 		if (!used[b]) {
 			break;
 		}
 	}
-	if (b == CHAR_BLOCKS) {
+	if (b == CHOOSABLE_BLOCKS) {
 		raOverlayDenied++;
 		return;  /* no spare VRAM: stay quiet rather than corrupt the game */
 	}
@@ -360,7 +372,7 @@ static void show(void) {
 	savedVofs  = SUB_BGVOFS(l);
 	savedDispcntBg = (SUB_DISPCNT & (1u << (8 + l))) != 0;
 
-	draw(b);
+	draw(b, text);
 
 	SUB_BGCNT(l)  = bgCntFor(b);
 	SUB_BGHOFS(l) = 0;
@@ -383,7 +395,7 @@ static void hide(void) {
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = savedPaletteEntry;
 }
 
-void ra_overlay_tick(u32 unlocks) {
+void ra_overlay_tick(u32 unlocks, const void* text) {
 	if (stateMagic != STATE_MAGIC) {
 		stateMagic = STATE_MAGIC;
 		framesLeft = 0;
@@ -476,7 +488,7 @@ void ra_overlay_tick(u32 unlocks) {
 		    zeroing it first would report every deferred notification as one that never waited, which
 		    is precisely the fact this bit exists to confirm.
 		*/
-		show();
+		show(text);
 		pendingFrames = 0;
 		return;
 	}
@@ -498,7 +510,7 @@ void ra_overlay_tick(u32 unlocks) {
 	#if OVERLAY_DEMO_INTERVAL
 	if (++demoCounter >= OVERLAY_DEMO_INTERVAL) {
 		demoCounter = 0;
-		show();
+		show(text);
 	}
 	#endif
 }

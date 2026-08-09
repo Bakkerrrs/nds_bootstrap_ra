@@ -64,6 +64,15 @@ static const char raPatchSayFlags[]   = "\"Flags\":";
     silently inherit the game's, and be counted as having one.
 */
 static const char raPatchSayId[]      = "\"ID\":";
+/*
+    And its Title, which arrives between the id and the MemAddr in each object. Captured for one
+    reason: so the notification on screen can say *which* achievement was earned rather than that one
+    was. See the record format at raPatch in ra_wifi.h.
+
+    `"Title":"` has no borders -- no proper prefix is also a suffix except the quote at length one,
+    which raPatchAdvance's retest already covers -- so the same matcher handles it unchanged.
+*/
+static const char raPatchSayTitle[]   = "\"Title\":\"";
 
 /* RA's own two values for the field. 3 is published; 5 is unofficial and not scored. */
 #define RA_PATCH_FLAGS_CORE       3
@@ -137,6 +146,7 @@ static u32 raPatchWriteId(char* out, u32 id) {
 static void raPatchCommit(raPatch* p) {
 	u32 length;
 	u32 idLength = 0;
+	u32 titleLength = 0;
 
 	if (!p->pendingOpen) {
 		return;
@@ -238,7 +248,31 @@ static void raPatchCommit(raPatch* p) {
 			idLength = 0;
 		}
 
-		p->wanted += idLength + length + 1;   /* id, memaddr, and the newline the reader splits on */
+		/*
+		    The title costs a tab and its own bytes. Counted into `wanted` with everything else, so the
+		    log's block accounting stays a measurement of what the set actually needs.
+		*/
+		if (p->titleLength) {
+			titleLength = (u32)p->titleLength + 1;   /* the tab and the text */
+		}
+
+		p->wanted += idLength + length + titleLength + 1;   /* id, memaddr, title, and the newline */
+
+		/*
+		    If the label is what does not fit, drop the label and keep the achievement.
+
+		    Without this, adding titles would silently turn working achievements off at the end of a
+		    large set: the block runs 88% full on a real one, and a definition that fitted yesterday
+		    would be `dropped` today for the sake of thirty bytes of text. An achievement with no
+		    label still unlocks, still reports to the server, and still shows a notification -- just a
+		    nameless one. That trade only goes one way.
+		*/
+		if (p->block && titleLength
+		 && p->used + idLength + length + titleLength + 1 > p->blockMax
+		 && p->used + idLength + length + 1 <= p->blockMax) {
+			titleLength = 0;
+			p->titleNoRoom++;
+		}
 
 		/*
 		    Zero is the unset marker rather than a counter, and it is safe as one: an empty value
@@ -248,13 +282,24 @@ static void raPatchCommit(raPatch* p) {
 			p->shortest = length;
 		}
 
-		if (p->block && p->used + idLength + length + 1 <= p->blockMax) {
+		if (p->block && p->used + idLength + length + titleLength + 1 <= p->blockMax) {
 			if (idLength) {
 				p->used += raPatchWriteId(p->block + p->used, p->pendingId);
 				p->block[p->used++] = ':';
 			}
 			memcpy(p->block + p->used, p->pending, length);
 			p->used += length;
+			/*
+			    After the memaddr, never before it, and that is the whole reason a tab works as the
+			    delimiter: a reader that knows nothing about titles finds the memaddr exactly where it
+			    always was and stops at the first character that cannot be part of one.
+			*/
+			if (titleLength) {
+				p->block[p->used++] = '\t';
+				memcpy(p->block + p->used, p->title, p->titleLength);
+				p->used += p->titleLength;
+				p->withTitle++;
+			}
 			p->block[p->used++] = '\n';
 			p->block[p->used]   = 0;
 			p->kept++;
@@ -275,6 +320,35 @@ static void raPatchCommit(raPatch* p) {
 	    id-less rather than inherit the game's.
 	*/
 	p->pendingId     = 0;
+	/*
+	    Cleared here and not on `{`. See raPatch::title in ra_wifi.h for why the id and the title are
+	    treated differently, and for what the difference costs.
+	*/
+	p->titleLength   = 0;
+	p->title[0]      = 0;
+}
+
+/*
+    One decoded byte of the title being read.
+
+    Truncates and says so, rather than refusing the definition the way an over-long memaddr is
+    refused. The asymmetry is the point: a clipped memaddr is a *different achievement* and must never
+    be kept, while a clipped title is the same achievement with a shorter label.
+*/
+static void raPatchTitleByte(raPatch* p, char c) {
+	if (p->titleLength < RA_PATCH_TITLE_MAX - 1) {
+		p->title[p->titleLength++] = c;
+		p->title[p->titleLength]   = 0;
+	} else if (!p->titleFull) {
+		/*
+		    A flag of its own rather than letting titleLength run past the buffer as a marker: commit
+		    copies titleLength bytes, so a length used as a sentinel would be a length that reads one
+		    byte past the text. Counted once per title, not once per dropped byte -- the question the
+		    log answers is how many labels were clipped, not by how much.
+		*/
+		p->titleFull = 1;
+		p->titleCut++;
+	}
 }
 
 /* One decoded byte of the value being read. */
@@ -336,13 +410,52 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 				    its Flags field arrives, because that is what decides whether it belongs to
 				    the published set. See the note at the top of the file.
 				*/
-				p->state   = RA_PATCH_SCAN;
-				p->memAt   = 0;
-				p->flagsAt = 0;
-				p->idAt    = 0;
+				p->state    = RA_PATCH_SCAN;
+				p->inString = 0;
+				p->memAt    = 0;
+				p->flagsAt  = 0;
+				p->idAt     = 0;
 				continue;
 			}
 			raPatchPending(p, c);
+			continue;
+		}
+
+		if (p->state == RA_PATCH_TITLE) {
+			if (p->escape) {
+				p->escape = 0;
+				/*
+				    The same three unescaped as a memaddr's, and everything else keeps its backslash --
+				    which is what guarantees the record's delimiters can never appear in a title. JSON
+				    cannot carry a raw tab or newline inside a string; they arrive as `\t` and `\n`, and
+				    this puts back a literal backslash and letter rather than a control character.
+
+				    A `\u` escape comes out as its own text for the same reason it does for a memaddr:
+				    inventing a decoder for one would be inventing a bug, and the cost here is a title
+				    with an odd-looking accent rather than a definition that will not parse.
+				*/
+				if (c == '/' || c == '\\' || c == '"') {
+					raPatchTitleByte(p, c);
+				} else {
+					raPatchTitleByte(p, '\\');
+					raPatchTitleByte(p, c);
+				}
+				continue;
+			}
+			if (c == '\\') {
+				p->escape = 1;
+				continue;
+			}
+			if (c == '"') {
+				p->state    = RA_PATCH_SCAN;
+				p->inString = 0;
+				p->memAt    = 0;
+				p->flagsAt  = 0;
+				p->idAt     = 0;
+				p->titleAt  = 0;
+				continue;
+			}
+			raPatchTitleByte(p, c);
 			continue;
 		}
 
@@ -425,18 +538,34 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 		    **game's** id. That is worse than having none: a wrong id reports an unlock for an
 		    achievement the player did not earn, where a missing one reports nothing.
 
-		    Safe against a brace inside a string because of the field order RA uses: `ID` comes
-		    first in each object and `MemAddr` immediately after, so there is no text between them
-		    for a stray `{` to sit in. A brace in a Title or Description lands after the id has
-		    already been consumed.
+		    **And it has to know when it is inside a string**, which is a correction. This used to fire
+		    on every `{`, justified by "ID comes first in each object and MemAddr immediately after, so
+		    there is no text between them for a stray brace to sit in". That is not the order RA sends:
+		    the one reply this project has captured reads
+		    `"ID":101000001,"Title":"...","Description":"Hardcore unlocks cannot be earned using this
+		    emulator.","MemAddr":"1=1.300.","Points":0,"Author":""`. A Description sits between the id
+		    and the memaddr, an Author sits between the memaddr and the Flags field that commits, and a
+		    brace in either would have cleared an id that was perfectly good -- leaving an achievement
+		    that cannot be reported to the server at all, silently.
+
+		    So the scanner tracks quoting for this one purpose. Only the brace rule consults it; the
+		    needles run over every byte exactly as before, because that is what makes them safe against
+		    a key name appearing inside a value.
 		*/
-		if (c == '{') {
+		if (p->scanEscape) {
+			p->scanEscape = 0;
+		} else if (c == '\\') {
+			p->scanEscape = 1;
+		} else if (c == '"') {
+			p->inString = !p->inString;
+		} else if (c == '{' && !p->inString) {
 			p->pendingId = 0;
 		}
 
 		p->memAt   = raPatchAdvance(raPatchSayMemAddr, p->memAt, c);
 		p->flagsAt = raPatchAdvance(raPatchSayFlags, p->flagsAt, c);
 		p->idAt    = raPatchAdvance(raPatchSayId, p->idAt, c);
+		p->titleAt = raPatchAdvance(raPatchSayTitle, p->titleAt, c);
 
 		if (raPatchSayMemAddr[p->memAt] == 0) {
 			/*
@@ -451,6 +580,7 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->memAt       = 0;
 			p->flagsAt     = 0;
 			p->idAt        = 0;
+			p->titleAt     = 0;
 			continue;
 		}
 		if (raPatchSayFlags[p->flagsAt] == 0) {
@@ -460,6 +590,7 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->memAt     = 0;
 			p->flagsAt   = 0;
 			p->idAt      = 0;
+			p->titleAt   = 0;
 			continue;
 		}
 		if (raPatchSayId[p->idAt] == 0) {
@@ -479,6 +610,25 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->memAt     = 0;
 			p->flagsAt   = 0;
 			p->idAt      = 0;
+			p->titleAt   = 0;
+		}
+		if (raPatchSayTitle[p->titleAt] == 0) {
+			/*
+			    No commit here either, and for the id's reason: a title belongs to the definition
+			    about to arrive. Started fresh rather than appended to, so a second Title key in one
+			    object -- which is not something RA sends, but is something a proxy could -- replaces
+			    the label instead of concatenating two.
+			*/
+			p->state       = RA_PATCH_TITLE;
+			p->titleLength = 0;
+			p->title[0]    = 0;
+			p->titleFull   = 0;
+			p->escape      = 0;
+			p->memAt       = 0;
+			p->flagsAt     = 0;
+			p->idAt        = 0;
+			p->titleAt     = 0;
+			continue;
 		}
 	}
 }

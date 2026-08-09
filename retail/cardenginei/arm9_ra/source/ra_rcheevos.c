@@ -38,6 +38,7 @@
 
 #include "ra.h"
 #include "locations.h"
+#include "ra_text.h"
 
 #include "rc_runtime.h"
 #include "rc_runtime_types.h"
@@ -259,6 +260,29 @@ static char* defLines[RA_DEFS_MAX_LINES];
     and the ids are not in it any more -- ra_take_id() consumes them on the way past.
 */
 static u32   defIds[RA_DEFS_MAX_LINES];
+/*
+    Each line's achievement title, or NULL when it carried none. Pointers into the staging block
+    exactly as defLines are -- the launcher writes `<id>:<memaddr>\t<title>` and ra_split_definitions()
+    turns the tab into the memaddr's terminator, so the title is already a C string sitting just past
+    it. Nothing is copied.
+*/
+static const char* defTitles[RA_DEFS_MAX_LINES];
+/*
+    The rendered notification, and why it is a pointer rather than a flag: the strip lives in this
+    binary's .bss and the overlay lives in the ARM9 cardengine, which has no room for a font. The
+    address crosses in the snapshot. NULL until an unlock has actually rendered something, so the
+    other side can tell "nothing to say" from "something to say".
+*/
+static const void* textStrip;
+
+/*
+    The first line of the notification, above the achievement's own name.
+
+    Kept, rather than letting the title stand alone, because the two lines answer different questions:
+    the heading says a RetroAchievements unlock just happened and the title says which. A bare game
+    phrase appearing over a game would read as part of the game.
+*/
+#define RA_TEXT_HEADING "RA UNLOCKED"
 static u8    defCount;
 static u8    defIndex;
 static u8    activatedCount;
@@ -419,28 +443,49 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
 		*/
 		ra_rc_queue_unlock(runtimeEvent->id);
 		/*
-		    The first one only, and recorded as a line number rather than an id so it can be
-		    looked up in the file by eye. With one definition loaded a counter was enough; with
-		    fifty-six, "something fired" is not a reading -- the set's first definition is
-		    `1=1.300.` and should unlock about five seconds in, so this is what turns that into
-		    a prediction that can be wrong.
+		    The line this id came from, looked up rather than derived. It used to be `id - base + 1`,
+		    which only worked because every definition was numbered from RA_TEST_ACHIEVEMENT_ID in
+		    order; with the server's own ids there is no arithmetic that recovers a line, and a search
+		    over at most 128 entries costs nothing on the frame an achievement unlocks.
+
+		    Done on every trigger now, not only the first, because the title hangs off it -- and one
+		    search serves both readers.
 		*/
-		if (firstId == 0) {
+		{
+			u8 line = 0xFF;
 			u8 i;
 
-			firstId = runtimeEvent->id;
-			/*
-			    The line is looked up rather than derived. It used to be `id - base + 1`, which only
-			    worked because every definition was numbered from RA_TEST_ACHIEVEMENT_ID in order;
-			    with the server's own ids there is no arithmetic that recovers a line, and a search
-			    over at most 128 entries costs nothing on the frame an achievement unlocks.
-			*/
 			for (i = 0; i < defCount; i++) {
 				if (defIds[i] == runtimeEvent->id) {
-					firstTriggered = (u8)(i + 1);
+					line = i;
 					break;
 				}
 			}
+			/*
+			    The first one only, and recorded as a line number rather than an id so it can be
+			    looked up in the file by eye. With one definition loaded a counter was enough; with
+			    fifty-six, "something fired" is not a reading -- the set's first definition is
+			    `1=1.300.` and should unlock about five seconds in, so this is what turns that into
+			    a prediction that can be wrong.
+			*/
+			if (firstId == 0) {
+				firstId = runtimeEvent->id;
+				if (line != 0xFF) {
+					firstTriggered = (u8)(line + 1);
+				}
+			}
+			/*
+			    Rendered here, on the frame the achievement fires, and that is the only moment it can
+			    be: this is where the id exists. The overlay may not raise the notification for another
+			    ninety frames -- it waits for the screen to stop fading -- so the strip has to be
+			    prepared now and left where it can be found.
+
+			    A trigger whose line cannot be found renders the heading alone rather than nothing. It
+			    means the id came from somewhere other than the staged set, which should not happen;
+			    saying "RA UNLOCKED" with no name is a better answer to that than silence.
+			*/
+			textStrip = ra_text_render(RA_TEXT_HEADING,
+			                           (line != 0xFF) ? defTitles[line] : 0);
 		}
 	}
 }
@@ -501,7 +546,7 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
     what each definition is meant to do -- which matters when the answer arrives hours later
     as a photograph.
 */
-static u8 ra_split_definitions(char* text, u32 length, char** lines) {
+static u8 ra_split_definitions(char* text, u32 length, char** lines, const char** titles) {
 	u8  count = 0;
 	u32 i     = 0;
 
@@ -532,6 +577,27 @@ static u8 ra_split_definitions(char* text, u32 length, char** lines) {
 			}
 		}
 		if (*start && *start != '#') {
+			/*
+			    The title, if the launcher attached one: `<memaddr>\t<title>`. Splitting here rather
+			    than at activation time is the same argument that put ra_take_id() here -- everything
+			    downstream uses these pointers, and a line that still had a tab in it is a line
+			    rcheevos would refuse.
+
+			    The first tab only. A title cannot contain one: JSON has no raw tabs inside strings
+			    and the launcher writes escapes through verbatim, so `\t` in a title arrives as two
+			    characters. See raPatch in ra_wifi.h.
+			*/
+			char* tab = start;
+
+			while (*tab && *tab != '\t') {
+				tab++;
+			}
+			if (*tab == '\t') {
+				*tab = 0;
+				titles[count] = tab + 1;
+			} else {
+				titles[count] = 0;
+			}
 			lines[count++] = start;
 		}
 	}
@@ -751,7 +817,7 @@ static u8 ra_rc_prepare(raSnapshot* snapshot) {
 	defLines[0] = text;
 	defCount    = 1;
 	if (snapshot->rcFromFile) {
-		defCount = ra_split_definitions(text, snapshot->rcDefLength, defLines);
+		defCount = ra_split_definitions(text, snapshot->rcDefLength, defLines, defTitles);
 	}
 	/*
 	    All of it reset, not just the index. On hardware this runs once, so it would never have
@@ -975,6 +1041,11 @@ static u8 ra_rc_frame_step(raSnapshot* snapshot) {
 	    the two apart and costs one compare on a frame with nothing to send.
 	*/
 	ra_rc_offer_unlock(snapshot);
+	/*
+	    Where the overlay's text is, published for the ARM9 cardengine because that is the side that
+	    draws and this is the side that has room for a font. NULL until an unlock has rendered one.
+	*/
+	snapshot->overlayText  = (u32)textStrip;
 	snapshot->unlockSent   = unlockSent;
 	snapshot->unlockQueued = unlockQueued;
 	snapshot->unlockLost   = unlockLost;

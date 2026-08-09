@@ -5203,6 +5203,109 @@ five field offsets against what `nm` reports for the assembly labels. This file 
 an interrupt handler now: a field that shifted would not fail to build, it would write a wild pointer into
 a running game's interrupt table. The check was verified by inserting a field and watching the build fail.
 
+## The notification says what was earned
+
+`RA UNLOCKED` was always a placeholder. It said something had happened and nothing about what — and
+with 45 definitions armed, "something fired" stopped being a reading a long time ago.
+
+Three pieces, and the interesting part is that the split went the opposite way to the one predicted.
+
+### The record grew a title, and the delimiter is a tab
+
+Each staged line was `<id>:<memaddr>`. It is now `<id>:<memaddr>\t<title>`.
+
+A tab, and the choice is what makes this unambiguous rather than merely convenient:
+
+- **Not another colon.** A title is whatever a person typed, colons very much included — *Chapter 1:
+  Beginnings* is an ordinary achievement name.
+- **Not another line.** The reader treats every line as a definition.
+- **A tab works because a memaddr has no whitespace anywhere in its syntax**, and JSON cannot carry a
+  raw tab inside a string: it arrives as `\t`, two characters, and the launcher writes unknown escapes
+  through verbatim. So a tab can appear in exactly one place in the record and means exactly one thing.
+
+Backward compatible in both directions. A block with no tabs parses as it always did, and a
+hand-written `ra_achievements.txt` needs no title.
+
+`RA_PATCH_TITLE_MAX` is 32 — 31 characters — and it is sized from the *display* rather than from what
+RA sends. The strip is one row of a 32-tile background with a tile of margin, so 30 characters is what
+can be shown; storing more would spend block space, the scarcest thing here at 88% full, on text
+nothing could draw.
+
+**And if the label is what does not fit, the label goes and the achievement stays.** Without that,
+adding titles would have silently switched off achievements at the end of a large set — a definition
+that fitted yesterday would be `dropped` today for the sake of thirty bytes of text. `titleNoRoom`
+counts it, and the log prints `titles N with, M clipped, K dropped for room`.
+
+### Two bugs this found, both older than the change
+
+**A brace in a string cost an achievement its id.** The scanner cleared the pending id on every `{`,
+justified by a comment reading "ID comes first in each object and MemAddr immediately after, so there
+is no text between them for a stray brace to sit in". That is not the order RA sends. The one reply
+this project has captured reads:
+
+```
+"ID":101000001,"Title":"Warning: Unknown Emulator","Description":"Hardcore unlocks cannot be
+earned using this emulator.","MemAddr":"1=1.300.","Points":0,"Author":""
+```
+
+A `Description` sits between the id and the memaddr and an `Author` sits between the memaddr and the
+`Flags` field that commits. A brace in either would have cleared a perfectly good id, leaving an
+achievement that can never be reported to the server — silently, because an id-less definition still
+evaluates and still unlocks. The scanner tracks quoting for this one purpose now; the needles still run
+over every byte, which is what makes them safe against a key name appearing inside a value.
+
+**The overlay could put a tilemap inside a block it had not borrowed.** `BGCNT` holds the character
+base in four bits (16K units, so any of the eight blocks) and the screen base in **five** (2K units,
+reaching 62K and no further). The offsets that would extend both — `DISPCNT` bits 24-29 — are main
+engine only. So a map placed inside block 4 or above needs a screen base of 32 or more, the field
+truncates, and two kilobytes of tilemap land in a low block the game may well be using. The survey
+still examines all eight, because a block the *game* is using has to be detected wherever it is; only
+the choice is narrowed to the first four.
+
+### The font is in `arm9_ra`, and the overlay did not move
+
+The prediction in `ra_overlay.h` was that the real notification "needs a font and layout code that will
+not fit in the cardengine's remaining ~840 bytes, and belongs in a separate ARM9 binary". Half right.
+The font did have to move — printable ASCII is 760 bytes and the ARM9 window had **24 free**, having
+already turned down a four-byte debug field and a fifty-six-byte diagnostic mode. But the file itself
+stayed.
+
+The split is at the pixels. `cardenginei_arm9_ra` owns the font, the character lookup, the centring and
+the bit expansion, and renders into a fixed 32×2 tile strip when an achievement fires — which is the
+only moment the id exists, and the strip has to survive up to 90 frames of fade deferral before it is
+drawn. The overlay is handed the address in `raSnapshot.overlayText`, range-checked by `ra_tick()` so
+the drawing side needs no opinion about where WRAM is, and blits it.
+
+What the overlay keeps is everything that negotiates with the game: choose a layer that is off, survey
+which VRAM blocks are referenced, borrow, re-assert every frame, hand back on eviction, restore. That
+was the expensive part to get right and there was no reason to move it.
+
+**It came out ahead.** The ARM9 window went from 24 bytes free to **116** — the glyph table and the bit
+expansion were bigger than the blit and the four-byte snapshot field that replaced them. On the other
+side the arena margin fell from 19,676 bytes to 15,932, which is where a 2K strip and 760 bytes of font
+should show up.
+
+The font is generated from pixel art rather than typed as hex, and that is not a detail: a wrong nibble
+in a hand-typed font is a letter that looks nearly right in one word and wrong in another, which is
+exactly the class of mistake a photograph taken hours later cannot diagnose.
+
+### Tested where a hardware run would otherwise have paid for it
+
+The nibble order is the one thing here that cannot be checked on hardware without spending a session. A
+4bpp DS tile stores the *leftmost* pixel in the low nibble; getting it backwards renders every glyph
+mirrored, which on a photograph of a three-second toaster reads as "the font is wrong" rather than as an
+ordering bug.
+
+So it is pinned against a glyph whose shape is known. `L` is `.##.....` six times over a foot of
+`.######.`: the upright spans nibbles 1-2 and reversing the order would move it to 5-6. Verified by
+reversing it and watching the check fail — the foot alone would not have caught it, because `.######.`
+is symmetric.
+
+Also pinned: the strip is cleared whole between calls, so a shorter message after a longer one cannot
+keep the tail of the previous *achievement name* — which would read as a plausible message rather than
+as obvious corruption, and is the worst way for this to fail. And a character outside the font renders
+as a space rather than as a box, because the text that reaches that path is a JSON escape nobody chose.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately

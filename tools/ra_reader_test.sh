@@ -76,7 +76,7 @@ rc_runtime_sources=$(ls "$RC"/src/rcheevos/*.c | grep -v 'rc_validate\.c$')
 #
 $CC -std=gnu99 -Wall -Wno-unused-function -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -O1 \
 	-DRA_LAUNCHER_WIFI=1 \
-	-I"$out/include" -Iretail/common/include \
+	-I"$out/include" -Iretail/common/include -Iretail/cardenginei/arm9_ra/include \
 	-I"$RC/include" -I"$RC/src" \
 	-no-pie -Wl,-Ttext-segment=0x02100000 \
 	-Wl,--defsym=__bss_start=0x03740000 \
@@ -87,6 +87,7 @@ $CC -std=gnu99 -Wall -Wno-unused-function -Wno-pointer-to-int-cast -Wno-int-to-p
 	"$RC"/src/rc_util.c "$RC"/src/rc_compat.c "$RC"/src/rc_version.c \
 	"$RC"/src/rhash/md5.c \
 	retail/arm9/source/ra_wifi_verdict.c \
+	retail/cardenginei/arm9_ra/source/ra_text.c \
 	-lm -o "$out/ra_reader_test"
 
 set +e
@@ -116,7 +117,7 @@ set -e
 $CC -std=gnu99 -Wall -O1 \
 	-DRA_LAUNCHER_WIFI=1 -DRC_HASH_NO_DISC -DRC_HASH_NO_ENCRYPTED -DRC_HASH_NO_ZIP \
 	-Dsniprintf=snprintf \
-	-I"$out/include" -Iretail/common/include -I"$RC/include" -I"$RC/src" \
+	-I"$out/include" -Iretail/common/include -Iretail/cardenginei/arm9_ra/include -I"$RC/include" -I"$RC/src" \
 	tools/ra_launcher_test.c \
 	retail/arm9/source/ra_hash.c retail/arm9/source/ra_cfg.c \
 	retail/arm9/source/ra_patch.c retail/arm9/source/ra_queue.c \
@@ -158,7 +159,7 @@ fi
 
 $CC -std=gnu99 -Wall -O1 \
 	$bss_end_flag \
-	-I"$out/include" -Iretail/common/include -I"$RC/include" -I"$RC/src" \
+	-I"$out/include" -Iretail/common/include -Iretail/cardenginei/arm9_ra/include -I"$RC/include" -I"$RC/src" \
 	tools/ra_fit_test.c \
 	$rc_runtime_sources \
 	"$RC"/src/rc_util.c "$RC"/src/rc_compat.c "$RC"/src/rc_version.c \
@@ -222,7 +223,7 @@ echo
 echo "loadCrt0's two layouts agree, field by field"
 crt0_obj=retail/bootloaderi/build/load_crt0.o
 if [ -f "$crt0_obj" ] && command -v arm-none-eabi-nm >/dev/null 2>&1; then
-	$CC -std=gnu99 -Wall -O1 -I"$out/include" -Iretail/common/include \
+	$CC -std=gnu99 -Wall -O1 -I"$out/include" -Iretail/common/include -Iretail/cardenginei/arm9_ra/include \
 		tools/ra_crt0_offsets.c -o "$out/ra_crt0_offsets"
 	# A file rather than process substitution, and shell arithmetic rather than awk's
 	# strtonum(): this script is #!/bin/sh, and strtonum is a gawk extension that is

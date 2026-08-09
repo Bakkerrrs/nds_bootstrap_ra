@@ -139,8 +139,27 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 	    Last frame's count: the WRAM binary that increments it runs below. One frame of latency on a
 	    180-frame notification, and passing this frame's would mean calling the overlay after the work
 	    it is meant to be independent of.
+
+	    The strip is checked here rather than trusted there.
+
+	    The strip is rendered by cardenginei_arm9_ra and lives in DSi WRAM; the overlay copies
+	    RA_TEXT_BYTES from it into borrowed VRAM. A pointer outside that window would be two kilobytes
+	    of arbitrary memory painted over a running game, so the range test happens in the file that
+	    owns the snapshot -- the overlay is handed either a usable strip or nothing, and needs no
+	    opinion about where WRAM is.
+
+	    Zero is the normal state before the first unlock and is not a failure.
 	*/
-	ra_overlay_tick(snapshot.rcTriggered);
+	{
+		const u32 text = snapshot.overlayText;
+		const void* strip = 0;
+
+		if (text >= CARDENGINEI_ARM9_RA_LOCATION
+		 && text + RA_TEXT_BYTES <= CARDENGINEI_ARM9_RA_LOCATION + CARDENGINEI_ARM9_RA_SIZE) {
+			strip = (const void*)text;
+		}
+		ra_overlay_tick(snapshot.rcTriggered, strip);
+	}
 
 	/*
 	    Hand the frame to cardenginei_arm9_ra, which evaluates the watchlist.

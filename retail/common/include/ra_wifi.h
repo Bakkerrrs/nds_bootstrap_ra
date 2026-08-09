@@ -507,10 +507,25 @@ typedef struct raNetStream {
 
 #define RA_PATCH_MEMADDR_MAX 8192
 
+/*
+    Bytes kept of an achievement's Title, terminator included -- so 31 characters.
+
+    Sized from the display rather than from what RA sends, which is the honest place to take it from:
+    the notification is one row of a 32-tile background with a tile of margin each side, so 30
+    characters is what can be shown and a 31st is already generous. Storing more would cost block
+    space -- the scarcest thing in this project at 88% full on a real set -- to hold text nothing
+    could ever draw.
+
+    Longer titles are truncated and counted in `titleCut`, so the log says it happened rather than
+    leaving a clipped label to be discovered on a photograph.
+*/
+#define RA_PATCH_TITLE_MAX 32
+
 #define RA_PATCH_SCAN   0
 #define RA_PATCH_VALUE  1
 #define RA_PATCH_FLAGS  2
 #define RA_PATCH_ID     3
+#define RA_PATCH_TITLE  4
 
 /*
     Each staged line is `<id>:<memaddr>`, and the id is the achievement's own number on
@@ -531,6 +546,19 @@ typedef struct raNetStream {
 
     A line with no id still works, and files written by hand are not expected to carry them. See
     RA_SYNTHETIC_ID_BASE.
+
+    **And the achievement's own title, after the memaddr, separated by a tab**: the full record is
+    `<id>:<memaddr>\t<title>`. The notification says what was earned rather than that something was.
+
+    A tab, and the choice is what makes this unambiguous rather than merely convenient. A title may
+    contain anything a person types, colons very much included -- "Chapter 1: Beginnings" -- so it
+    cannot be another colon-separated field. It cannot be a second line either, because the reader
+    treats every line as a definition. But a memaddr has no whitespace anywhere in its syntax, and
+    JSON cannot carry a raw tab inside a string -- it arrives as `\t`, two characters -- so a tab
+    can appear in exactly one place in the record and means exactly one thing.
+
+    Backward compatible in both directions. A block with no tabs parses as it always did, and a
+    hand-written file needs no title.
 */
 
 typedef struct raPatch {
@@ -539,6 +567,26 @@ typedef struct raPatch {
 	u32   used;
 
 	u32   pendingId;      /* the "ID" seen most recently, waiting for its MemAddr */
+	/*
+	    ...and the "Title" seen most recently, which arrives *before* the MemAddr in each object just
+	    as the id does -- `{"ID":1,"Title":"...","Description":"...","MemAddr":"..."` -- so it needs no
+	    deferral either.
+
+	    Cleared when a definition commits, so an achievement with no Title field of its own gets no
+	    label rather than the previous achievement's. The narrow case that remains is the *first*
+	    achievement in a reply: the root object carries the game's own Title before any achievement, so
+	    an untitled first achievement would be labelled with the game's name.
+
+	    Left there rather than chased, and the reason is proportion. Every achievement RA sends has a
+	    title, the consequence is one wrong *label*, and the id -- which decides what gets awarded to
+	    whom -- is not affected. A wrong label and a wrong id are different orders of mistake.
+	*/
+	u8    titleLength;
+	u8    titleFull;      /* the buffer filled, so titleCut is counted only once */
+	char  title[RA_PATCH_TITLE_MAX];
+	u16   withTitle;      /* definitions written with one */
+	u16   titleCut;       /* ...and titles clipped to RA_PATCH_TITLE_MAX on the way in */
+	u16   titleNoRoom;    /* ...and labels dropped so the achievement itself could be kept */
 	u16   withId;         /* definitions written with a RetroAchievements id */
 	u16   withoutId;      /* ...and without one, which is a set we cannot report on */
 	/*
@@ -576,9 +624,16 @@ typedef struct raPatch {
 	u8    memAt;
 	u8    flagsAt;
 	u8    idAt;
+	u8    titleAt;
 	u8    idBad;          /* the id being read will not fit a u32; treat the line as id-less */
 	u8    oddCapture;     /* copying the reply into oddContext right now */
 	u8    escape;
+	/*
+	    Quoting, tracked in the scanning state and consulted by exactly one rule: whether a `{` starts
+	    a JSON object or merely sits inside somebody's Description. See raPatchFeed().
+	*/
+	u8    scanEscape;
+	u8    inString;
 	u8    pendingOpen;    /* a value has started, so there is something to commit */
 	u8    pendingBad;     /* ...and it overran RA_PATCH_MEMADDR_MAX */
 	u8    flagsSeen;

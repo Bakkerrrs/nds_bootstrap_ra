@@ -236,6 +236,35 @@ static void wifi_feed_lines(raWifiVerdict* v, const char* const* lines) {
 	}
 }
 
+/*
+    Which nibbles of a 4bpp tile word carry ink, as a bitmask of pixel columns.
+
+    A mask rather than a nibble value, so a test can say "the ink spans columns 1 to 6" without
+    caring what colour index it is or how the font is bearing-shifted. See span().
+*/
+static u32 nibbleSpan(u32 word) {
+	u32 mask = 0;
+	int n;
+
+	for (n = 0; n < 8; n++) {
+		if (((word >> (n * 4)) & 0xF) != 0) {
+			mask |= 1u << n;
+		}
+	}
+	return mask;
+}
+
+/* The mask of pixel columns from `from` to `to` inclusive. */
+static u32 span(int from, int to) {
+	u32 mask = 0;
+	int n;
+
+	for (n = from; n <= to; n++) {
+		mask |= 1u << n;
+	}
+	return mask;
+}
+
 static void test_wifi_verdict(void) {
 	raWifiVerdict v;
 
@@ -611,16 +640,18 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, rearmIe) == 0xB1);
 	CHECK(__builtin_offsetof(raSnapshot, rearmDispstat) == 0xB2);
 	/*
-	    0xB4, grown 0xA0 -> 0xA8 by step 5, 0xA8 -> 0xB0 by step 3b and 0xB0 -> 0xB4 by the hook re-arm
-	    -- appended every time, so every offset above them keeps the address the hardware checklist
-	    reads it at.
+	    0xB8, grown 0xA0 -> 0xA8 by step 5, 0xA8 -> 0xB0 by step 3b, 0xB0 -> 0xB4 by the hook re-arm and
+	    0xB4 -> 0xB8 by the notification's text -- appended every time, so every offset above them keeps
+	    the address the hardware checklist reads it at.
 	*/
 	/*
 	    The overlay's packed state, and the size it has to stay inside. Four separate fields here took
 	    the ARM9 cardengine's window to -56 bytes free, so this is one byte on purpose.
 	*/
 	CHECK(__builtin_offsetof(raSnapshot, overlayState) == 0xB3);
-	CHECK(sizeof(raSnapshot) == 0xB4);
+	/* Where the rendered strip is; see RA_TEXT_BYTES and ra_overlay_tick(). */
+	CHECK(__builtin_offsetof(raSnapshot, overlayText) == 0xB4);
+	CHECK(sizeof(raSnapshot) == 0xB8);
 
 	/*
 	    The shared block's real size, pinned because overrunning it is silent: slot 13 is
@@ -953,8 +984,9 @@ int main(void) {
 		    skipped so the file can say what each line is meant to do.
 		*/
 		{
-			char*      lines[RA_DEFS_MAX_LINES];
-			const char file[] =
+			char*       lines[RA_DEFS_MAX_LINES];
+			const char* titles[RA_DEFS_MAX_LINES];
+			const char  file[] =
 				"# what this is for\n"
 				"0xH0012a4=1\n"
 				"\n"
@@ -963,12 +995,46 @@ int main(void) {
 			u8 count;
 
 			memcpy(text, file, sizeof(file));
-			count = ra_split_definitions(text, sizeof(file) - 1, lines);
+			count = ra_split_definitions(text, sizeof(file) - 1, lines, titles);
 			CHECK(count == 3);
 			CHECK(strcmp(lines[0], "0xH0012a4=1") == 0);
 			/* Leading and trailing whitespace and the CR all gone. */
 			CHECK(strcmp(lines[1], "I:0xW159164_0xX00009c=2") == 0);
 			CHECK(strcmp(lines[2], "0x159992>d0x159992") == 0);
+			/* A hand-written file carries no titles, and that is not an error. */
+			CHECK(titles[0] == 0 && titles[1] == 0 && titles[2] == 0);
+		}
+
+		/*
+		    ...and the record the launcher actually writes: `<memaddr>\t<title>`, the id having already
+		    been taken off by ra_take_id(). The tab becomes the memaddr's terminator, so rcheevos sees
+		    exactly what it always saw and the title is a C string sitting just past it -- nothing is
+		    copied.
+		*/
+		{
+			char*       lines[RA_DEFS_MAX_LINES];
+			const char* titles[RA_DEFS_MAX_LINES];
+			const char  file[] =
+				"0xH0012a4=1\tFirst Star\n"
+				"0xH1=1\tChapter 1: Beginnings\n"
+				"0xH2=2\n"
+				"0xH3=3\ttrailing spaces   \n";
+			u8 count;
+
+			memcpy(text, file, sizeof(file));
+			count = ra_split_definitions(text, sizeof(file) - 1, lines, titles);
+			CHECK(count == 4);
+			CHECK(strcmp(lines[0], "0xH0012a4=1") == 0);
+			CHECK(titles[0] && strcmp(titles[0], "First Star") == 0);
+			/* A colon in a title is the whole reason the delimiter is a tab. */
+			CHECK(titles[1] && strcmp(titles[1], "Chapter 1: Beginnings") == 0);
+			/* No tab, no title, and the line is unchanged. */
+			CHECK(strcmp(lines[2], "0xH2=2") == 0 && titles[2] == 0);
+			/*
+			    Trailing whitespace is trimmed off the whole line before the tab is found, so a title
+			    an editor padded does not arrive padded.
+			*/
+			CHECK(titles[3] && strcmp(titles[3], "trailing spaces") == 0);
 		}
 
 		/*
@@ -982,8 +1048,9 @@ int main(void) {
 		*/
 		{
 			enum { LINE_BYTES = sizeof("0xH00ffff=1\n") };
-			static char* lines[RA_DEFS_MAX_LINES];
-			static char  many[(RA_DEFS_MAX_LINES + 4) * LINE_BYTES];
+			static char*       lines[RA_DEFS_MAX_LINES];
+			static const char* titles[RA_DEFS_MAX_LINES];
+			static char        many[(RA_DEFS_MAX_LINES + 4) * LINE_BYTES];
 			int          n;
 			u32          len = 0;
 
@@ -993,11 +1060,121 @@ int main(void) {
 			/* And it has to fit where it is about to be copied. */
 			CHECK(len < CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER);
 			memcpy(text, many, len + 1);
-			CHECK(ra_split_definitions(text, len, lines) == RA_DEFS_MAX_LINES);
+			CHECK(ra_split_definitions(text, len, lines, titles) == RA_DEFS_MAX_LINES);
 		}
 
 		/* Back to no file, so the tests after this see the built-in. */
 		*(u32*)block = 0;
+	}
+
+	printf("\nthe notification's pixels come out the way the DS reads them\n");
+	{
+		/*
+		    The nibble order is the one thing here that cannot be checked on hardware without
+		    spending a run. A 4bpp DS tile stores the *leftmost* pixel in the low nibble of each
+		    word; getting it backwards renders every glyph mirrored, which on a photograph of a
+		    three-second toaster reads as "the font is wrong" rather than as an ordering bug.
+
+		    So it is checked against a glyph whose shape is known: 'L' is `.##.....` six times over a
+		    foot of `.######.`, which is asymmetric in both axes and cannot pass by accident. Reversing
+		    the order would move the upright's pixels from nibbles 1 and 2 to nibbles 5 and 6.
+
+		    Which pixel column a glyph starts in is *not* asserted -- that is the font's left bearing
+		    and it is free to change. What is asserted is where the ink sits relative to the word.
+		*/
+		const u32* strip = (const u32*)ra_text_render("L", 0);
+		const int  col   = (RA_TEXT_COLS - 1) / 2;   /* one character, centred */
+		const u32* tile  = &strip[col * 8];
+		int        y;
+		int        uprightRows = 0;
+
+		/* The foot spans nibbles 1 to 6. */
+		CHECK(nibbleSpan(tile[6]) == span(1, 6));
+		/* The upright spans nibbles 1 to 2, on every row above the foot. */
+		for (y = 0; y < 6; y++) {
+			if (nibbleSpan(tile[y]) == span(1, 2)) {
+				uprightRows++;
+			}
+		}
+		CHECK(uprightRows == 6);
+		/* Row 7 is the gap the font leaves between lines. */
+		CHECK(tile[7] == 0);
+		/* Every set pixel is colour index 1, which is the single entry the overlay borrows. */
+		{
+			int bad = 0;
+			for (y = 0; y < 8; y++) {
+				int n;
+				for (n = 0; n < 8; n++) {
+					const u32 nib = (tile[y] >> (n * 4)) & 0xF;
+					if (nib != 0 && nib != 1) {
+						bad++;
+					}
+				}
+			}
+			CHECK(bad == 0);
+		}
+	}
+
+	printf("\n...centred, clipped, and never showing the previous message\n");
+	{
+		const u32* strip;
+
+		/* Two lines land on the two rows, and each is centred on its own. */
+		strip = (const u32*)ra_text_render("A", "A");
+		CHECK(strip[((RA_TEXT_COLS - 1) / 2) * 8 + 2] != 0);
+		CHECK(strip[(RA_TEXT_COLS + (RA_TEXT_COLS - 1) / 2) * 8 + 2] != 0);
+
+		/*
+		    A long title is clipped to the strip rather than wrapping into the row below or running
+		    off the end of the array. RA_TEXT_COLS + 8 characters, so an unclipped write would be
+		    visible in the next row's tiles.
+		*/
+		strip = (const u32*)ra_text_render(0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+		{
+			int i;
+			int row0 = 0;
+
+			for (i = 0; i < RA_TEXT_COLS * 8; i++) {
+				if (strip[i]) {
+					row0++;
+				}
+			}
+			CHECK(row0 == 0);   /* line1 was NULL, so row 0 stays blank */
+		}
+
+		/*
+		    And the strip is cleared whole between calls. A shorter message after a longer one would
+		    otherwise keep the tail of the previous *achievement name* -- which reads as a plausible
+		    message rather than as obvious corruption, and is the worst way for this to fail.
+		*/
+		strip = (const u32*)ra_text_render("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", 0);
+		strip = (const u32*)ra_text_render("W", 0);
+		{
+			int i;
+			int set = 0;
+
+			for (i = 0; i < RA_TEXT_WORDS; i++) {
+				if (strip[i]) {
+					set++;
+				}
+			}
+			/* One glyph is at most 8 non-zero words, so anything more is leftover text. */
+			CHECK(set > 0 && set <= 8);
+		}
+
+		/* A character outside the font is a space, not a box and not a wrong letter. */
+		strip = (const u32*)ra_text_render("\x01\x02\x03", 0);
+		{
+			int i;
+			int set = 0;
+
+			for (i = 0; i < RA_TEXT_WORDS; i++) {
+				if (strip[i]) {
+					set++;
+				}
+			}
+			CHECK(set == 0);
+		}
 	}
 
 	printf("\nthe self-test definition is anchored where the map reaches\n");
