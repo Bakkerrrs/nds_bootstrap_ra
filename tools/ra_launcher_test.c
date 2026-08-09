@@ -380,6 +380,39 @@ static void test_config(void) {
 		CHECK(n == 1 && ids[0] == 7);
 	}
 
+	printf("\nsubmit defaults to on and only submit=0 turns it off\n");
+	{
+		const char* sp = "/tmp/ra_cfg_submit.cfg";
+		raConfig    scfg;
+		FILE*       sf;
+
+		/* Absent: sending stays on, so a card that never heard of the key behaves as it did. */
+		sf = fopen(sp, "w");
+		if (sf) {
+			fputs("username=Bakke\npassword=x\n", sf);
+			fclose(sf);
+			CHECK(raConfigRead(sp, &scfg) == true);
+			CHECK(scfg.submit == 1);
+
+			/* Present and off -- the whole point: an unlock is spent the moment it lands. */
+			sf = fopen(sp, "w");
+			fputs("username=Bakke\npassword=x\nsubmit=0\n", sf);
+			fclose(sf);
+			CHECK(raConfigRead(sp, &scfg) == true);
+			CHECK(scfg.submit == 0);
+
+			/* And back on explicitly. */
+			sf = fopen(sp, "w");
+			fputs("username=Bakke\npassword=x\nsubmit=1\n", sf);
+			fclose(sf);
+			CHECK(raConfigRead(sp, &scfg) == true);
+			CHECK(scfg.submit == 1);
+			remove(sp);
+		} else {
+			printf("  cannot write %s -- skipped\n", sp);
+		}
+	}
+
 	printf("\nthe gameid reply gives up a number, and zero is a number\n");
 	{
 		u32 id = 12345;

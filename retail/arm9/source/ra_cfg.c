@@ -43,6 +43,17 @@
 #define RA_CFG_PASSWORD  "password"
 #define RA_CFG_HARDCORE  "hardcore"
 #define RA_CFG_DEBUG     "debug"
+/*
+    Not one of odelot's -- this fork's own, and it exists for testing rather than for players.
+
+    `submit=0` reads the unlock queue and reports it, and then does not send it and does not clear
+    it. That matters because an achievement is spent the moment it lands: the server returns it in
+    r=unlocks, the scanner leaves it out of the block, and the cheapest repeatable test case on the
+    card is gone. Contra 4's stage 1 was exactly that case.
+
+    Defaults to 1, so a card without the key behaves as before.
+*/
+#define RA_CFG_SUBMIT    "submit"
 
 /*
     Keys odelot's file has that this fork parses and then does nothing with, because what they
@@ -109,6 +120,11 @@ bool raConfigRead(const char* path, raConfig* cfg) {
 	FILE* file;
 
 	memset(cfg, 0, sizeof(*cfg));
+	/*
+	    Sending is the default, so a card that has never heard of the key behaves as it did. Set after
+	    the memset and before parsing, so `submit=0` can turn it off and nothing else can.
+	*/
+	cfg->submit = 1;
 
 	file = fopen(path, "r");
 	if (!file) {
@@ -143,6 +159,8 @@ bool raConfigRead(const char* path, raConfig* cfg) {
 			cfg->hardcore = raCfgFlag(value);
 		} else if (strcmp(key, RA_CFG_DEBUG) == 0) {
 			cfg->debug = raCfgFlag(value);
+		} else if (strcmp(key, RA_CFG_SUBMIT) == 0) {
+			cfg->submit = raCfgFlag(value);
 		} else if (raCfgKnownUnused(key)) {
 			cfg->notYet++;
 		} else {

@@ -308,6 +308,12 @@ typedef struct raConfig {
 	char username[33];   /* RA usernames are short; 32 is well past any real one */
 	char password[65];
 	u8   hardcore;       /* the API's h= parameter. Softcore is h=0 and is what this fork does */
+	/*
+	    `submit=0` in ra.cfg: read the queue, report it, send nothing and clear nothing. For testing --
+	    an unlock is spent once it lands, because the server then returns it in r=unlocks and the
+	    scanner leaves it out of the block. Defaults to 1.
+	*/
+	u8   submit;
 	u8   debug;
 	u8   found;          /* the file existed */
 	u8   usable;         /* ...and both credentials are set */

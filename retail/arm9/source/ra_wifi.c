@@ -941,6 +941,20 @@ static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
 		raWifiLog("\x1b[33m%d beyond the %d the queue holds\x1b[37m\n", q.truncated, RA_QUEUE_MAX);
 	}
 
+	/*
+	    `submit=0` in ra.cfg: report the queue and leave it alone. For testing rather than for players
+	    -- an unlock is spent the moment it lands, because the server returns it in r=unlocks from then
+	    on and the scanner leaves it out of the block, so the cheapest repeatable test case on the card
+	    disappears. Checked after the queue has been read and counted, so the log still says what would
+	    have been sent.
+	*/
+	if (!cfg->submit) {
+		raWifiLog("\x1b[33msubmit=0 in ra.cfg; %d unlock(s) kept, nothing sent\x1b[37m\n", q.count);
+		verdict.submitDone = 1;
+		verdict.submitKept = (u16)q.count;
+		return;
+	}
+
 	if (!raToken[0]) {
 		/*
 		    Nothing was sent, so nothing is cleared. The ids stay in the file and the next boot with a
