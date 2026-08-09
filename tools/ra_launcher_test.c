@@ -326,6 +326,60 @@ static void test_config(void) {
 		CHECK(n == 1 && ids[0] == 7);
 	}
 
+	printf("\nand r=startsession's arrays of objects need a different reader\n");
+	{
+		/*
+		    The shape r=startsession answers with, which is not the shape r=unlocks answers with. The
+		    flat reader stops at the `{` and reports an empty list -- and an empty list is a meaningful
+		    answer from that endpoint, so the two must not share a reader.
+		*/
+		static const char SESSION[] =
+			"{\"Success\":true,"
+			"\"Unlocks\":[{\"ID\":93119,\"When\":1786243173},{\"ID\":93120,\"When\":1786243180}],"
+			"\"HardcoreUnlocks\":[{\"ID\":91467,\"When\":1700000000}],"
+			"\"ServerNow\":1786243200}";
+		u32 ids[8];
+		int n;
+
+		n = raNetJsonObjectField(SESSION, "Unlocks", "ID", ids, 8);
+		CHECK(n == 2 && ids[0] == 93119 && ids[1] == 93120);
+
+		/*
+		    And the two arrays are read separately. `Unlocks` is a prefix of nothing here, but
+		    `HardcoreUnlocks` *contains* `Unlocks` as a substring -- the needle is `"Unlocks":[` with
+		    the quote, which is what keeps the first lookup from landing inside the second.
+		*/
+		n = raNetJsonObjectField(SESSION, "HardcoreUnlocks", "ID", ids, 8);
+		CHECK(n == 1 && ids[0] == 91467);
+
+		/* Same contract as the flat reader: 0 is an empty array, -1 is no key at all. */
+		CHECK(raNetJsonObjectField("{\"Unlocks\":[]}", "Unlocks", "ID", ids, 8) == 0);
+		CHECK(raNetJsonObjectField("{\"Success\":true}", "Unlocks", "ID", ids, 8) == -1);
+
+		/* `When` is reachable by the same call, which is what makes the field a parameter. */
+		n = raNetJsonObjectField(SESSION, "HardcoreUnlocks", "When", ids, 8);
+		CHECK(n == 1 && ids[0] == 1700000000u);
+
+		/*
+		    Depth matters. A nested object's `ID` belongs to something else, and reading it would mix
+		    two levels of the reply into one list.
+		*/
+		n = raNetJsonObjectField("{\"Unlocks\":[{\"ID\":5,\"Extra\":{\"ID\":999}},{\"ID\":6}]}",
+		                         "Unlocks", "ID", ids, 8);
+		CHECK(n == 2 && ids[0] == 5 && ids[1] == 6);
+
+		/* It stops at its own array, not at whatever comes after it. */
+		n = raNetJsonObjectField("{\"Unlocks\":[{\"ID\":5}],\"Other\":[{\"ID\":77}]}",
+		                         "Unlocks", "ID", ids, 8);
+		CHECK(n == 1 && ids[0] == 5);
+
+		/* Truncation reported as the capacity, and overflow refused, like the flat reader. */
+		n = raNetJsonObjectField("{\"U\":[{\"ID\":1},{\"ID\":2},{\"ID\":3}]}", "U", "ID", ids, 2);
+		CHECK(n == 2);
+		n = raNetJsonObjectField("{\"U\":[{\"ID\":99999999999},{\"ID\":7}]}", "U", "ID", ids, 8);
+		CHECK(n == 1 && ids[0] == 7);
+	}
+
 	printf("\nthe gameid reply gives up a number, and zero is a number\n");
 	{
 		u32 id = 12345;

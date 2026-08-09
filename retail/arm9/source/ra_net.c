@@ -173,7 +173,7 @@ int raNetHttpGet(const char* host, const char* path, char* out, int outSize, raN
 	if (sniprintf(request, sizeof(request),
 	              "GET %s HTTP/1.1\r\n"
 	              "Host: %s\r\n"
-	              "User-Agent: nds-bootstrap-ra/0.1\r\n"
+	              "User-Agent: " RA_NET_USER_AGENT "\r\n"
 	              "Connection: close\r\n"
 	              "\r\n",
 	              path, host) >= (int)sizeof(request)) {
@@ -449,7 +449,7 @@ int raNetHttpGetStream(const char* host, const char* path, raNetSink sink, void*
 	if (sniprintf(request, sizeof(request),
 	              "GET %s HTTP/1.1\r\n"
 	              "Host: %s\r\n"
-	              "User-Agent: nds-bootstrap-ra/0.1\r\n"
+	              "User-Agent: " RA_NET_USER_AGENT "\r\n"
 	              "Connection: close\r\n"
 	              "\r\n",
 	              path, host) >= (int)sizeof(request)) {
@@ -696,6 +696,108 @@ int raNetJsonIdList(const char* json, const char* key, u32* out, int max) {
 		}
 		/* Anything else is not a list of integers any more. */
 		break;
+	}
+
+	return (count > max) ? max : count;
+}
+
+/*
+    A JSON array of *objects*, taking one numeric field out of each.
+
+    `r=startsession` answers with a different shape from `r=unlocks`, and the difference is not
+    cosmetic:
+
+        "Unlocks":[{"ID":93119,"When":1786243173},{"ID":93120,"When":1786243180}]
+
+    raNetJsonIdList() reads the first shape and would stop at the `{` here, returning nothing and
+    calling it an empty list -- which is the failure this exists to avoid, since an empty list is a
+    meaningful answer from that endpoint.
+
+    Same contract as raNetJsonIdList(): **-1 for a missing key, 0 for an empty array**, truncation
+    reported by returning `max`. Same refusal on overflow, for the same reason -- a truncated id is a
+    different achievement.
+
+    Deliberately not a JSON parser, and specific about what it will accept: it walks from `"key":[` to
+    the matching `]`, taking `"field":<digits>` inside each object. It tracks brace depth so a nested
+    object cannot smuggle a value in from a level this did not mean to read, and it stops at the array's
+    own close rather than at the first `]` it sees.
+
+    The limit, stated rather than discovered later: brace counting is not string-aware, so a `{`, `}` or
+    `]` *inside a string value* in one of those objects would throw the depth off. That is safe for the
+    two arrays this reads -- `Unlocks` and `HardcoreUnlocks` hold objects of two numbers, `ID` and
+    `When`, and no strings at all. Pointing it at an array of objects with titles in them would need a
+    real parser, and this should not be the function that gets reused there.
+*/
+int raNetJsonObjectField(const char* json, const char* key, const char* field, u32* out, int max) {
+	char        needle[40];
+	char        inner[40];
+	const char* at;
+	int         count = 0;
+	int         depth = 0;
+
+	if (sniprintf(needle, sizeof(needle), "\"%s\":[", key) >= (int)sizeof(needle)) {
+		return -1;
+	}
+	if (sniprintf(inner, sizeof(inner), "\"%s\":", field) >= (int)sizeof(inner)) {
+		return -1;
+	}
+	at = strstr(json, needle);
+	if (!at) {
+		return -1;
+	}
+	at += strlen(needle);
+
+	while (*at) {
+		if (*at == '{') {
+			depth++;
+			at++;
+			continue;
+		}
+		if (*at == '}') {
+			if (depth > 0) {
+				depth--;
+			}
+			at++;
+			continue;
+		}
+		if (*at == ']' && depth == 0) {
+			break;
+		}
+		/*
+		    Only at depth 1 -- directly inside one of the array's own objects. A deeper `"ID":` belongs
+		    to something else, and reading it would quietly mix two levels of the reply together.
+		*/
+		if (depth == 1 && strncmp(at, inner, strlen(inner)) == 0) {
+			u32 value  = 0;
+			int digits = 0;
+
+			at += strlen(inner);
+			while (*at == ' ' || *at == '\t') {
+				at++;
+			}
+			while (*at >= '0' && *at <= '9') {
+				const u32 digit = (u32)(*at - '0');
+
+				if (value > (0xFFFFFFFFu - digit) / 10u) {
+					digits = 0;
+					break;
+				}
+				value = value * 10 + digit;
+				digits++;
+				at++;
+			}
+			while (*at >= '0' && *at <= '9') {
+				at++;
+			}
+			if (digits > 0) {
+				if (count < max) {
+					out[count] = value;
+				}
+				count++;
+			}
+			continue;
+		}
+		at++;
 	}
 
 	return (count > max) ? max : count;

@@ -697,7 +697,84 @@ static void raWifiIdentify(void) {
 }
 
 /*
-    Stage 12: r=awardachievement -- report what the last play session earned.
+    Stage 12: r=startsession -- tell the server a play session exists.
+
+    Added because an award came back `Success:true` and the achievement did not appear on the account.
+    rcheevos sends this when a game loads, before anything else game-specific, and this client never
+    sent it at all -- so "the server will not record an unlock without a session" was a hypothesis with
+    no evidence either way, which is the worst kind to leave standing.
+
+    It is not built on spec. A correct RA client sends it regardless of how the current question turns
+    out, and its reply is a second source for something already in doubt: `Unlocks` and
+    `HardcoreUnlocks`, as arrays of `{"ID":n,"When":t}` -- a different shape from `r=unlocks`'s flat
+    array, of the same facts. Two sources that can be compared is what this needs.
+
+    Parameters read from rc_api_init_start_session_request_hosted(): g, then h and m together, then l.
+    `l` is the client library version; rcheevos sends its own, so this sends this project's, because
+    claiming to be a version of rcheevos that is not running would be a lie to a server that uses the
+    field to tell clients apart.
+
+    Fails open like every other rung: no session means the award below still tries, because an award
+    that might work is better than one that certainly does not.
+*/
+static void raWifiStartSession(const raConfig* cfg) {
+	static char   response[2048];
+	static u32    unlocks[RA_WIFI_UNLOCKS_MAX];
+	char          user[3 * sizeof(raUser)];
+	char          path[384];
+	raNetProgress p;
+	int           got;
+	int           soft;
+	int           hard;
+
+	if (!verdict.gameId || !raToken[0] || !raNetUrlEncode(raUser, user, sizeof(user))) {
+		raWifiLog("\x1b[33mno GameID or token; no session\x1b[37m\n");
+		return;
+	}
+	if (sniprintf(path, sizeof(path),
+	              "/dorequest.php?r=startsession&u=%s&t=%s&g=%lu&h=%d&m=%s&l=%s",
+	              user, raToken, (unsigned long)verdict.gameId, cfg->hardcore ? 1 : 0,
+	              romHash, RA_NET_CLIENT_VERSION) >= (int)sizeof(path)) {
+		raWifiLog("\x1b[31msession request too long\x1b[37m\n");
+		return;
+	}
+
+	memset(&p, 0, sizeof(p));
+	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+	raWifiReportAttempts("session", &p);
+	if (got < 0) {
+		raWifiLog("\x1b[33msession HTTP failed at step %d; awarding anyway\x1b[37m\n", -got);
+		return;
+	}
+	raWifiLog("%d bytes back\n", got);
+	raWifiLogBody("session reply", raNetBody(response));
+
+	if (!raNetJsonTrue(response, "Success")) {
+		raWifiLog("\x1b[33mthe server did not start a session\x1b[37m\n");
+		return;
+	}
+
+	verdict.sessionOk = 1;
+	raWifiLog("\x1b[32msession started\x1b[37m\n");
+
+	/*
+	    Counted, not merged into the skip list. The skip list still comes from r=unlocks, so that the two
+	    can disagree in the log instead of one quietly overwriting the other -- which is the entire reason
+	    for asking twice while this question is open.
+	*/
+	soft = raNetJsonObjectField(response, "Unlocks", "ID", unlocks, RA_WIFI_UNLOCKS_MAX);
+	hard = raNetJsonObjectField(response, "HardcoreUnlocks", "ID", unlocks, RA_WIFI_UNLOCKS_MAX);
+	verdict.sessionUnlocks = (u16)(soft > 0 ? soft : 0);
+	verdict.sessionHardcore = (u16)(hard > 0 ? hard : 0);
+	/*
+	    -1 is "the key was not there at all", which is a different statement from an empty list and is
+	    said differently. See raNetJsonObjectField().
+	*/
+	raWifiLog("session unlocks  %d soft, %d hard\n", soft, hard);
+}
+
+/*
+    Stage 13: r=awardachievement -- report what the last play session earned.
 
     This closes the loop, and it is the first rung that sends something rather than asking something.
     The cardengine cannot reach the network: it runs inside the game with the radio already torn down,
@@ -1526,15 +1603,23 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	    reported here is one the next rung sees the account holding, so the scanner leaves it out of
 	    the block and it does not trigger again next session. See RA_WIFI_STAGE_SUBMIT.
 	*/
-	raWifiLog("\n-- stage 12: report what the last session earned --\n");
+	/*
+	    First of the game-specific rungs, because it is what the official client does first and because
+	    the award below may depend on it existing. See RA_WIFI_STAGE_SESSION.
+	*/
+	raWifiLog("\n-- stage 12: start a play session --\n");
+	raWifiStartSession(&config);
+	raWifiReportHeap("after session");
+
+	raWifiLog("\n-- stage 13: report what the last session earned --\n");
 	raWifiSubmit(&config, sdFound);
 	raWifiReportHeap("after award");
 
-	raWifiLog("\n-- stage 13: what has this account already earned --\n");
+	raWifiLog("\n-- stage 14: what has this account already earned --\n");
 	raWifiUnlocks(&config);
 	raWifiReportHeap("after unlocks");
 
-	raWifiLog("\n-- stage 14: fetch the set --\n");
+	raWifiLog("\n-- stage 15: fetch the set --\n");
 	raWifiFetchPatch(&config);
 	raWifiReportHeap("after patch");
 
@@ -1593,6 +1678,14 @@ done:
 	    read and was empty, which is the normal boot; the line missing would leave no way to tell that
 	    from a rung that never ran.
 	*/
+	/*
+	    Both sources for the same fact, side by side, because they disagreed once and that is the whole
+	    reason the session rung exists. `session unlocks` comes from r=startsession's objects, `already
+	    earned` from r=unlocks' flat array.
+	*/
+	raWifiLog("session          %s, %u soft / %u hard\n",
+	          verdict.sessionOk ? "started" : "none",
+	          verdict.sessionUnlocks, verdict.sessionHardcore);
 	raWifiLog("submitted        %u ok, %u refused, %u owed\n",
 	          verdict.submitAccepted, verdict.submitRefused, verdict.submitKept);
 	if (verdict.unlocksKnown) {
@@ -1620,6 +1713,8 @@ done:
 		raWifiLog("the set is staged for the cardengine.\n");
 	} else if (stage >= RA_WIFI_STAGE_SUBMIT) {
 		raWifiLog("the queue is reported; the set is what is missing.\n");
+	} else if (stage >= RA_WIFI_STAGE_SESSION) {
+		raWifiLog("a play session is open on the server.\n");
 	} else if (stage >= RA_WIFI_STAGE_IDENTIFIED) {
 		raWifiLog("logged in, and the server knows the ROM.\n");
 	} else if (stage >= RA_WIFI_STAGE_LOGGED_IN) {

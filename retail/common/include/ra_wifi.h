@@ -170,14 +170,28 @@ typedef struct raQueue {
     account holds, so the very next rung filters it out of the block. The ordering is what makes the
     loop close instead of spin.
 */
-#define RA_WIFI_STAGE_SUBMIT      12
+#define RA_WIFI_STAGE_SUBMIT      13
+/*
+    r=startsession, which this client did not send at all until an award came back Success:true and the
+    achievement did not appear on the account.
+
+    rcheevos sends it when a game loads, before anything else game-specific, and it is the verb that
+    tells the server a play session exists. Whether RA requires one before it will record an unlock is
+    the open question it was added to answer -- but it is part of a correct client either way, so it is
+    not a guess being built on spec.
+
+    Its reply is independently useful: `Unlocks` and `HardcoreUnlocks`, as arrays of objects, which is a
+    second and differently-shaped source for the same thing `r=unlocks` reports. Two sources that can be
+    compared is exactly what the current question needs.
+*/
+#define RA_WIFI_STAGE_SESSION     12
 /*
     r=unlocks, and it sits *before* the patch because that is the only order in which it is useful:
     knowing which achievements the account already has is what lets the scanner leave them out of a
     block that is 88% full.
 */
-#define RA_WIFI_STAGE_UNLOCKS     13
-#define RA_WIFI_STAGE_PATCHED     14 /* r=patch put real definitions in the staging block */
+#define RA_WIFI_STAGE_UNLOCKS     14
+#define RA_WIFI_STAGE_PATCHED     15 /* r=patch put real definitions in the staging block */
 #define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_PATCHED
 
 /*
@@ -213,6 +227,9 @@ typedef struct raWifiVerdict {
 	u8   apiOk;
 	u8   loggedIn;         /* r=login returned a token */
 	u8   identified;       /* r=gameid returned a non-zero GameID */
+	u8   sessionOk;        /* r=startsession answered Success */
+	u16  sessionUnlocks;   /* ...with this many softcore unlocks for this game */
+	u16  sessionHardcore;  /* ...and this many hardcore ones */
 	/*
 	    The submit rung completed -- which includes having nothing to submit. An empty queue is a
 	    successful pass over it, and letting it read as a failure would cap the ladder at 11 on every
@@ -290,6 +307,26 @@ typedef struct raConfig {
     this is it. Negative returns so a failure names its own step instead of becoming a zero.
 */
 #define RA_NET_HOST           "retroachievements.org"
+
+/*
+    Who this client says it is.
+
+    In one place now, and that is not tidiness either: the User-Agent was written out twice in ra_net.c,
+    and it has become a *suspect*. RetroAchievements identifies clients by it, does not recognise this
+    one, and answers by injecting a `Warning: Unknown Emulator` achievement into every set it serves us
+    and blocking hardcore. Whether it also declines to record softcore unlocks is an open question -- see
+    docs/retroachievements.md -- and a value under investigation should not exist in two copies.
+
+    The honest name, not a known emulator's. Getting recognised is a request to make to
+    RetroAchievements, not a string to borrow; a client that lies about what it is would be both against
+    their rules and useless as evidence about this exact question.
+
+    RA_NET_CLIENT_VERSION is also `l=` in r=startsession, which is the client library version. rcheevos
+    sends its own there; this sends this project's, for the same reason.
+*/
+#define RA_NET_CLIENT_NAME    "nds-bootstrap-ra"
+#define RA_NET_CLIENT_VERSION "0.1"
+#define RA_NET_USER_AGENT     RA_NET_CLIENT_NAME "/" RA_NET_CLIENT_VERSION
 #define RA_NET_PORT           80
 #define RA_NET_RECV_TIMEOUT   5
 
@@ -555,6 +592,8 @@ bool        raNetJsonTrue(const char* json, const char* key);
     every definition must be staged.
 */
 int         raNetJsonIdList(const char* json, const char* key, u32* out, int max);
+int         raNetJsonObjectField(const char* json, const char* key, const char* field,
+                                 u32* out, int max);
 
 /*
     Step 3d. The streaming half: reset, feed the socket's bytes in whatever sizes they arrive,

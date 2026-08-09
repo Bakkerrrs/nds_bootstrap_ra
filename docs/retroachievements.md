@@ -4586,6 +4586,86 @@ account's page on retroachievements.org.** If 93119 shows as unlocked in softcor
 `r=unlocks` is a caching question. If it does not, the client is being accepted and ignored, and the
 User-Agent stops being a standing annoyance and becomes the blocker.
 
+#### The site said 91467, and that answers a question I had been asking wrong
+
+The account holds exactly one achievement in Super Mario 64 DS: **91467**, earned in **hardcore** on a PC
+emulator. Not 93119.
+
+Two readings, and the first one is free — it needed no console at all, only the definitions file already
+archived at `docs/logs/ra_definitions-14856-ids.txt`:
+
+```
+ids in set 14856:  92869 92870 92871 92872 92873 92874 92875 92876 ... 579308
+91467:             below all of them
+93119:             present
+```
+
+**91467 is not in the set our ROM hashes to, and it is not merely absent — it is below the entire
+range.** The set opens at 92869 and the first ids run consecutively, which is what a set authored in one
+batch looks like; 91467 was created earlier, for a different set. So `r=unlocks&g=14856` was *right* to
+not return it, and the "why doesn't the account's own unlock appear" half of the puzzle is closed with no
+bug in it.
+
+That is worth stating in its own right, because it is a property of this fork that users will hit: the
+site redirects game 9983 to `?set=6112`, our hash resolves to **14856**, and those are different
+achievement sets of the same game. **Achievements earned on a PC emulator against one set do not appear
+for a ROM that hashes to another.** Nothing is wrong; RA subsets simply mean the ROM decides the set.
+
+The second reading is the one that matters and it got worse, not better: 93119 was awarded with
+`Success:true` and **is not on the account**. So the accept-and-discard branch is now the live one, and
+"`r=unlocks` is just cached" is much weaker — the site is not a cache.
+
+### `r=startsession`, the verb this client never sent
+
+Before blaming the User-Agent, there is a plainer candidate that was never eliminated because it was
+never tried. rcheevos sends `r=startsession` when a game loads, before anything else game-specific. This
+client sent `login`, `gameid`, `unlocks`, `patch` and `awardachievement` — and never opened a session at
+all. "The server will not record an unlock without one" was a hypothesis with no evidence in either
+direction, which is the worst kind to leave standing.
+
+So it is **stage 12**, ahead of the award, which pushed the ladder to 15 rungs. Parameters read from
+`rc_api_init_start_session_request_hosted()` rather than guessed: `g`, then `h` and `m` together, then
+`l`.
+
+It is not speculative work. A correct RA client sends this regardless of how the current question turns
+out, and the reply is independently useful:
+
+```json
+{"Success":true,
+ "Unlocks":[{"ID":93119,"When":1786243173}],
+ "HardcoreUnlocks":[{"ID":91467,"When":1700000000}],
+ "ServerNow":1786243200}
+```
+
+That is a **second source, in a different shape, for the thing currently in doubt** — and the two are
+deliberately kept apart rather than merged. The skip list still comes from `r=unlocks`; the session's
+counts are reported beside it. If they disagree, the log will say so instead of one silently winning.
+
+The shape needed a new reader. `raNetJsonIdList()` reads `[93119,93120]` and would stop at the `{` here,
+returning nothing and calling it an empty array — and an empty array is a *meaningful* answer from that
+endpoint, so the two cannot share a reader. `raNetJsonObjectField()` walks from `"key":[` to the matching
+`]` and takes `"field":<digits>` at brace depth 1 only, so a nested object cannot contribute an id from a
+level it did not mean to read. Its limit is written down rather than left to be discovered: the brace
+counting is not string-aware, which is safe for `Unlocks` and `HardcoreUnlocks` because those hold two
+numbers and no strings, and would not be safe for an array with titles in it.
+
+One subtlety the test pins because it would have been a silent wrong answer: `HardcoreUnlocks` **contains**
+`Unlocks` as a substring. The needle is `"Unlocks":[` with the leading quote, and the character before
+`Unlocks` in `"HardcoreUnlocks"` is `e`, so the first lookup cannot land inside the second.
+
+#### The User-Agent, and what this project will not do about it
+
+`nds-bootstrap-ra/0.1`, now defined once in `ra_wifi.h` instead of written out twice in `ra_net.c` —
+because a value under investigation should not exist in two copies.
+
+RetroAchievements identifies clients by it, does not recognise this one, injects the
+`Warning: Unknown Emulator` achievement into every set it serves us, and blocks hardcore. Whether it also
+declines to record softcore unlocks is exactly the open question.
+
+The fix, if that is the cause, is **to ask RetroAchievements to recognise the client** — not to send a
+known emulator's string. That would be against their rules, and it would also destroy the evidence: a
+client that lies about what it is cannot answer this question. The honest name stays.
+
 ### What is not built, and what it needs
 
 3b — the cardengine writing to the queue — is not started. Sizing it honestly, from reading the code

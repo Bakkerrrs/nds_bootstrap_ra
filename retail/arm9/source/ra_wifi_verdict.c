@@ -188,6 +188,13 @@ int raWifiVerdictStage(const raWifiVerdict* v) {
 	if (v->submitDone) {
 		return RA_WIFI_STAGE_SUBMIT;
 	}
+	/*
+	    r=startsession, below the award because the award is what the session is for. A run that started
+	    a session and then could not report anything has got further than one that never started it.
+	*/
+	if (v->sessionOk) {
+		return RA_WIFI_STAGE_SESSION;
+	}
 	if (v->identified) {
 		return RA_WIFI_STAGE_IDENTIFIED;
 	}

@@ -392,6 +392,8 @@ static void test_wifi_verdict(void) {
 	    holds, *then* fetch. Reversing the first two would leave a just-awarded achievement in the
 	    block to trigger and re-queue forever -- see RA_WIFI_STAGE_SUBMIT.
 	*/
+	v.sessionOk = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_SESSION);
 	v.submitDone = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_SUBMIT);
 	v.unlocksKnown = 1;
@@ -403,7 +405,8 @@ static void test_wifi_verdict(void) {
 	    And the rungs are consecutive. Renumbering three constants by hand is exactly the edit that
 	    leaves a gap, and a gap makes "reached stage N of 14" mean nothing.
 	*/
-	CHECK(RA_WIFI_STAGE_SUBMIT == RA_WIFI_STAGE_IDENTIFIED + 1);
+	CHECK(RA_WIFI_STAGE_SESSION == RA_WIFI_STAGE_IDENTIFIED + 1);
+	CHECK(RA_WIFI_STAGE_SUBMIT == RA_WIFI_STAGE_SESSION + 1);
 	CHECK(RA_WIFI_STAGE_UNLOCKS == RA_WIFI_STAGE_SUBMIT + 1);
 	CHECK(RA_WIFI_STAGE_PATCHED == RA_WIFI_STAGE_UNLOCKS + 1);
 	/*
