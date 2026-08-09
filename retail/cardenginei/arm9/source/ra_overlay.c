@@ -57,8 +57,8 @@
     This is a correction, and it matters because the earlier reading was over-read. `overlayState` bit 5
     came back set on Contra 4 and was reported as "confirmed: the notification landed inside a fade".
     All it ever proved was that bits 0-4 were non-zero, which is a much weaker claim than the one made
-    from it. The register is published raw now (raSnapshot.overlayBright) so the next reading settles the
-    mode as well as the factor instead of leaving it inferred.
+    from it. There was no room in the window to publish the register itself, so bit 5 now consults the mode
+    and the raw value stays live at 0x0400106C for anyone who wants it.
 
     A function rather than a macro, because this window is measured in single bytes and there are two call
     sites: expanded at both, this overflowed it. It reads the register itself rather than taking it as a
@@ -90,22 +90,26 @@ static bool brightActive(void) {
 #define OVERLAY_ROW 10
 #define OVERLAY_COL 10
 
-/* Frames the notification stays up. */
+/*
+    Frames the notification stays up, and it is three seconds again rather than whatever the tick rate
+    happened to be. This counter advances once per call, and the reader now runs from the game's VBlank
+    handler -- so a call is a frame. It was not: on the VCOUNT hook Contra 4 cleared the Y-trigger every
+    frame and the reader ran on about 8% of them, which stretched this to half a minute.
+*/
 #define OVERLAY_SHOW_FRAMES 180
 
 /*
     How long a notification will wait for the screen to stop fading before giving up and showing anyway.
 
-    **Ticks, not frames**, and the difference is the whole reason this number came down from 600. This
-    counter advances once per call, and in Contra 4 the per-frame hook keeps getting torn out -- 1,720
-    ticks over a session long enough to score 43,425 points, so the reader runs a small fraction of the
-    frames and is re-armed from cardRead(). 600 of *those* is minutes of real time, not ten seconds, and
-    a notification owed for minutes is a notification that never arrives.
+    Ticks, and a tick is a frame again: the reader runs from the game's VBlank handler now. It was 600 and
+    described as ten seconds while the reader was on the VCOUNT hook, which was wrong by an order of
+    magnitude -- Contra 4 cleared the Y-trigger every frame, the reader ran on about 8% of them, and 600
+    of those was minutes rather than seconds. A notification owed for minutes is one that never arrives.
 
-    90 is a bound on the wait rather than an estimate of a fade: any transition is over well inside it in
-    a game that ticks normally, and in a game that does not, the notification is late by a second or two
-    instead of lost. Waiting longer buys nothing -- if the screen is still dimmed after 90 chances, it is
-    a dark room or a pause menu, which no amount of patience fixes.
+    90 stays, now meaning what it says: a second and a half, which is longer than any transition and short
+    enough that a game leaving the screen dimmed -- a dark room, a pause menu -- cannot swallow the
+    notification. Waiting longer buys nothing; if the screen is still dimmed after 90 frames it is not a
+    fade, and no amount of patience fixes that.
 */
 #define OVERLAY_FADE_WAIT_TICKS 90
 

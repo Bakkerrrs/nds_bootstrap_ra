@@ -112,20 +112,19 @@ bool IPC_SYNC_hooked = false;
 void hookIPC_SYNC(void) {
 	#ifndef GSDD
     if (!IPC_SYNC_hooked) {
-		// The RA reader needs the same per-frame VCOUNT hook the colour LUT uses.
-		// colorLutBlockVCount marks games that misbehave when a VCOUNT interrupt
-		// is forced on, so it vetoes the hook for the reader too.
+		// The VCOUNT hook is the colour LUT's alone again. The RA reader shared it until
+		// hardware showed the sharing could not work: a game that clears the Y-trigger in
+		// DISPSTAT every frame leaves the reader running on a fraction of them, and Contra 4
+		// does exactly that. It hooks VBlank instead -- see raRearmVBlank() below.
 		//
-		// consoleModel > 0 is the 3DS family. The RetroAchievements work targets it
-		// only -- see the scope note in docs/retroachievements.md -- so on a DSi the
-		// hook is not installed for the reader's sake and the fork behaves exactly
-		// like upstream. Forcing IRQ_VCOUNT on is a real behaviour change, and it is
-		// not one to impose on a console nobody is testing.
+		// A behaviour change worth having, in the direction that costs nothing: a build with
+		// the reader on no longer forces IRQ_VCOUNT onto a game that never asked for one. That
+		// only ever happened for the reader's sake, and the reader does not need it now.
 		//
 		// Only chain if there is a table to patch and a handler to install: with
 		// a null irqTable this would write over the exception vectors, and with a
 		// null handler the forced VCOUNT interrupt would jump to address zero.
-		if (((RA_READER_ENABLED && ce9->consoleModel > 0) || (ce9->valueBits & useColorLut))
+		if ((ce9->valueBits & useColorLut)
 		 && !(ce9->valueBits & colorLutBlockVCount)
 		 && ce9->irqTable && ce9->patches->vcountHandlerRef) {
 			u32* vcountHandler = ce9->irqTable + 2;
@@ -141,66 +140,91 @@ void hookIPC_SYNC(void) {
 }
 
 /*
-    Put the per-frame hook back if the game took it away.
-
-    hookIPC_SYNC() above installs it exactly once, guarded by IPC_SYNC_hooked, which was fine for every
-    game measured until Contra 4: the same binary ran 2,863 ticks on Super Mario 64 DS and froze at 19
-    there, three tenths of a second in, with the achievement set fully armed and rcheevos evaluating.
-    Nothing put it back because nothing was watching.
+    Install and maintain the reader's per-frame hook, and it is one function because installing and
+    re-arming are the same operation: if the game's VBlank table entry is not ours, save what is there
+    and put ours in.
 
     Called from cardRead(), and that choice is the whole point. cardRead is patched into the *game's
     code* rather than into its interrupt table, and it demonstrably runs for the entire session -- a game
-    that stopped reading its own ROM would not load a level. So it survives exactly the thing suspected
-    of killing the hook.
+    that stopped reading its own ROM would not load a level. So it survives exactly the thing that kills
+    interrupt hooks.
 
-    Three separate counters instead of one, because a blind re-arm would fix the symptom and destroy the
-    evidence. Three conditions have to hold for the handler to fire and any of them could be the one
-    Contra 4 disturbs; the next run says which by name. See raSnapshot.rearmTable.
+    **VBlank, not VCOUNT, and that is the fix for the flicker.** The reader chained onto the game's
+    VCOUNT handler with a Y-trigger at line 0 until Contra 4 measured what that costs: `ticks` reached
+    1,132 across a session of many thousands of frames while raRearmDispstat saturated at 255, so the
+    game was clearing DISP_YTRIGGER_IRQ constantly and each re-arm bought roughly one tick. The reader
+    ran on about 8% of frames -- and the overlay, which has to re-assert its borrowed layer every frame
+    because the game rewrites those registers every frame, was therefore visible about one frame in
+    twelve. That is a fast intermittent flash, which is what the screen showed.
 
-    Same guards as the install, in the same order, so a console or a game that never wanted this hook
-    still never gets one: the reader is 3DS-family only and colorLutBlockVCount vetoes it.
+    VBlank has none of that exposure. A DS game keeps IRQ_VBLANK on and keeps irqTable[0] pointed at
+    something of its own, because it needs the interrupt itself; there is no Y-trigger to lose. The two
+    conditions left are the table entry and the enable bit, and both are still counted rather than
+    blind-fixed -- raRearmDispstat now reads 0 forever, which is the clearest possible statement that the
+    fragile third condition is gone.
+
+    Taking the address of our own stub is valid because this image runs where it was linked: `ce9` itself
+    is a link-time address that every line above already depends on, and the block in patch_arm9.c that
+    would have relocated the patch table is commented out upstream. Nothing new is assumed here.
 */
 #if RA_READER_ENABLED
+extern void raVblankHandler(void);   /* card_engine_header.s */
+extern u32 raIntrVblankOrigReturn;   /* ...and the word it chains through */
+
 u8 raRearmTable;
 u8 raRearmIe;
-u8 raRearmDispstat;
+u8 raRearmDispstat;   /* kept, and now always 0; see above and raSnapshot.rearmDispstat */
 
-void raRearmVCount(void) {
-	u32* vcountHandler;
+/*
+    cardengineArm9 is the third positional mirror in this project: card_engine_header.s declares the
+    same fields as labels in order, this binary reads them through the struct, and nothing in either
+    language checks the other. loadCrt0 has the same shape and got it wrong once -- `.align 4` is
+    sixteen bytes in GNU as for ARM, which put a field twelve bytes out of place with a clean build.
 
-	if (ce9->consoleModel == 0
-	 || (ce9->valueBits & colorLutBlockVCount)
-	 || !ce9->irqTable
-	 || !ce9->patches->vcountHandlerRef) {
+    Pinned here rather than left to inspection because this file now reads `irqTable` to install an
+    interrupt handler. A field that shifted would not fail to build; it would write a wild pointer into
+    a running game's interrupt table. The numbers are what arm-none-eabi-nm reports for those labels.
+
+    Compile-time and on the target, not in tools/ra_reader_test.sh, for the same reason cardengineArm7's
+    pins are: that script compiles structs on the host, which is only valid because loadCrt0 has no
+    pointers. This one does, and a 64-bit host gives them eight bytes.
+*/
+typedef char raCe9OffsetsPinned[
+	(__builtin_offsetof(cardengineArm9, intr_vcount_orig_return) == 0x0C
+	 && __builtin_offsetof(cardengineArm9, valueBits)            == 0x2C
+	 && __builtin_offsetof(cardengineArm9, consoleModel)         == 0x34
+	 && __builtin_offsetof(cardengineArm9, irqTable)             == 0x38
+	 && __builtin_offsetof(cardengineArm9, strmLoadFlag)         == 0xA0) ? 1 : -1];
+
+void raRearmVBlank(void) {
+	u32* vblankHandler;
+
+	/*
+	    consoleModel > 0 is the 3DS family, which is what this fork supports -- see the scope note in
+	    docs/retroachievements.md. A null irqTable would mean writing over the exception vectors.
+	*/
+	if (ce9->consoleModel == 0 || !ce9->irqTable) {
 		return;
 	}
 
-	vcountHandler = ce9->irqTable + 2;
-	if (*vcountHandler != (u32)ce9->patches->vcountHandlerRef) {
+	vblankHandler = ce9->irqTable;
+	if (*vblankHandler != (u32)raVblankHandler) {
 		/*
 		    The game's own handler is saved again rather than kept from the first install: whatever it
-		    put there is what our handler has to chain to now, and using the stale one would return
-		    into code the game may have moved.
+		    put there is what our stub has to chain to now, and using the stale one would return into
+		    code the game may have moved.
 		*/
-		ce9->intr_vcount_orig_return = *vcountHandler;
-		*vcountHandler = (u32)ce9->patches->vcountHandlerRef;
+		raIntrVblankOrigReturn = *vblankHandler;
+		*vblankHandler = (u32)raVblankHandler;
 		if (raRearmTable < 255) {
 			raRearmTable++;
 		}
 	}
 
-	if (!(REG_IE & IRQ_VCOUNT)) {
-		REG_IE |= IRQ_VCOUNT;
+	if (!(REG_IE & IRQ_VBLANK)) {
+		REG_IE |= IRQ_VBLANK;
 		if (raRearmIe < 255) {
 			raRearmIe++;
-		}
-	}
-
-	if (!(REG_DISPSTAT & DISP_YTRIGGER_IRQ)) {
-		SetYtrigger(0);
-		REG_DISPSTAT |= DISP_YTRIGGER_IRQ;
-		if (raRearmDispstat < 255) {
-			raRearmDispstat++;
 		}
 	}
 }

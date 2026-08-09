@@ -24,7 +24,12 @@
 /*
     Master switch for the whole RA reader. Set to 0 to build a cardengine that
     behaves exactly like upstream nds-bootstrap: no extra per-frame work and no
-    VCOUNT interrupt forced on for games that did not ask for one.
+    interrupt hook of its own.
+
+    Note what it no longer switches off, because that changed: the reader used to force
+    IRQ_VCOUNT on for games that never asked for one, sharing the colour LUT's hook. It
+    chains onto the game's own VBlank handler now -- an interrupt the game already enables
+    for itself -- so a reader build no longer turns anything on that was off.
 
     Eight cardengine variants compile this file, and the reader is not wanted in all
     of them. Two groups opt out by default:
@@ -34,9 +39,9 @@
       `arm9_twlsdk_dldi` and `arm9_twlsdk3_dldi` have 176 bytes left in their windows
       and `arm9_dldi` has 208, against the reader's ~550.
 
-      GSDD -- hookIPC_SYNC() is compiled out under #ifndef GSDD, so these variants
-      link the reader but never install the per-frame handler. It could never tick
-      there; carrying it was only ever dead weight.
+      GSDD -- cardRead() is where the per-frame hook installs itself, and these variants
+      do not take that path. The reader could never tick there; carrying it was only ever
+      dead weight.
 
     Override on the command line (-DRA_READER_ENABLED=1) to build it anyway.
 */
@@ -475,9 +480,25 @@ typedef struct raSnapshot {
 
 	    Zero on a game that never disturbs it, which is every game measured before this one.
 	*/
-	u8  rearmTable;       /* +0xB0  irqTable[2] no longer pointed at our handler */
-	u8  rearmIe;          /* +0xB1  IRQ_VCOUNT had been cleared from REG_IE */
-	u8  rearmDispstat;    /* +0xB2  the Y-trigger interrupt had been switched off */
+	u8  rearmTable;       /* +0xB0  irqTable[0] no longer pointed at our handler */
+	u8  rearmIe;          /* +0xB1  IRQ_VBLANK had been cleared from REG_IE */
+	/*
+	    The Y-trigger interrupt had been switched off -- and this field is **retired at 0**, which is the
+	    whole point of it.
+
+	    It is what named the mechanism. Saturated at 255 on Contra 4 while `ticks` reached only 1,132
+	    across a session of many thousands of frames: the game was clearing DISP_YTRIGGER_IRQ constantly,
+	    each re-arm from cardRead() bought about one tick, and the reader therefore ran on roughly 8% of
+	    frames. The overlay has to re-assert its borrowed layer every frame because the game rewrites
+	    those registers every frame, so it was visible about one frame in twelve -- the fast intermittent
+	    flash seen on screen.
+
+	    The reader hooks VBlank now, which has no Y-trigger to lose. A field that reads 0 for the rest of
+	    time is the clearest statement available that the fragile condition is gone, and it costs one byte
+	    that no longer has anything better to do. `ticks` climbing with the frame count is the other half
+	    of the same reading.
+	*/
+	u8  rearmDispstat;    /* +0xB2 */
 	/*
 	    Whether the sub engine had **BG extended palettes** enabled the last time the notification was
 	    raised, read straight out of SUB_DISPCNT bit 30.

@@ -5111,6 +5111,61 @@ into one word still overflowed it; a single spare bit in a byte that already exi
 tight budget any more, it is the end of one — and it is the strongest argument yet for the overlay moving
 to `cardenginei_arm9_ra`, which the achievement-name notification needs anyway.
 
+### The flicker was the tick rate, and the hook moved to VBlank
+
+The deferral fix worked and the notification became visible — "RA UNLOCKED, but very subtle, like 1-2
+frames, intermittent". `overlayState` read **0x4A** on Contra 4: layer 1, block 1, extended palettes off,
+bit 5 clear so *not* inside a fade, **bit 6 set so it had been held back and released**, bit 7 clear so
+nothing was still owed. `denied`, `evicted` and `deniedNoLayer` all 0. The whole chain confirmed in one
+reading, and the same reading explains the flicker.
+
+I had a hypothesis and it was the wrong one. It was: *the game writes `SUB_DISPCNT` later in the same
+frame than our line-0 handler, so we win alternate frames.* The mechanism is **frequency, not phase**.
+
+`ticks` reached **1,132** across a session long enough to score 43,050 points — thousands of frames — while
+`rearmDispstat` saturated at **255**. Contra 4 clears `DISP_YTRIGGER_IRQ` constantly, each re-arm from
+`cardRead()` buys roughly one tick, and the reader therefore ran on about **8% of frames**. The overlay has
+to re-assert its borrowed layer every frame, because the game rewrites those registers every frame — so it
+was visible about one frame in twelve. That is precisely an intermittent 1-2 frame flash.
+
+Both hypotheses predicted a fast flicker; the tick count is what separates them, and it was already in
+every snapshot taken.
+
+**So the hook moved from VCOUNT to VBlank.** Three conditions had to hold for the old hook to fire — the
+game's `irqTable[2]` entry, `IRQ_VCOUNT` in `REG_IE`, and the Y-trigger in `REG_DISPSTAT` — and the third
+is the one a game destroys. VBlank has no third condition: a DS game keeps `IRQ_VBLANK` enabled and
+`irqTable[0]` pointed at something of its own, because it needs the interrupt itself.
+
+What that buys, beyond the flicker:
+
+- **A tick is a frame again.** `OVERLAY_SHOW_FRAMES 180` is three seconds rather than half a minute, and
+  the 90-frame fade bound is a second and a half rather than minutes. Both numbers were quietly wrong by
+  an order of magnitude while the reader was on a hook that fired 8% of the time.
+- **The reader stops forcing an interrupt on.** A build with `RA_READER_ENABLED` no longer switches
+  `IRQ_VCOUNT` on for a game that never asked for one — that only ever happened for the reader's sake, and
+  the VCOUNT hook is the colour LUT's alone again.
+- **`rearmDispstat` retires at 0**, and reading 0 forever is the clearest available statement that the
+  fragile condition is gone. `ticks` tracking the frame count is the other half of the same reading.
+
+Two implementation notes worth keeping:
+
+**Installing and re-arming are the same act**, so there is one function and no separate install. If
+`irqTable[0]` is not ours, save what is there and put ours in — which is an install the first time
+`cardRead()` runs and a repair every time after. `cardRead` is patched into the game's *code* rather than
+its interrupt table, so it survives exactly the thing that kills interrupt hooks.
+
+**Neither mirrored layout had to change.** The game's original handler is kept in a word inside
+`card_engine_header.s` next to the stub, loaded PC-relative, rather than added to the `cardengineArm9`
+header — so `sizeof(cardengineArm9)` is still 0x108 and the patch table is still at +0x120. The assembly is
+guarded by `RA_VBLANK_HOOK` from `ASFLAGS` rather than `RA_READER_ENABLED`, which the assembler never sees;
+the two are set in the same three Makefiles, and if they drift apart the link fails on `raVblankHandler`
+instead of quietly producing a cardengine with no hook.
+
+And `cardengineArm9` is now pinned the way `cardengineArm7` is — `raCe9OffsetsPinned` in `misc.c` asserts
+five field offsets against what `nm` reports for the assembly labels. This file reads `irqTable` to install
+an interrupt handler now: a field that shifted would not fail to build, it would write a wild pointer into
+a running game's interrupt table. The check was verified by inserting a field and watching the build fail.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately

@@ -653,6 +653,43 @@ code_handler_start_ipc:
 	bl	myIrqHandlerIPC
 	pop   	{r0-r12,pc}
 
+#ifdef RA_VBLANK_HOOK
+@---------------------------------------------------------------------------------
+@ The RA reader's own per-frame hook, chained onto the game's VBlank handler.
+@
+@ It used the VCOUNT hook above until hardware said why that cannot work. Contra 4 clears the
+@ Y-trigger interrupt in DISPSTAT constantly -- raSnapshot.rearmDispstat saturated at 255 --
+@ so the reader only ran on the frames a cardRead had just put it back: 1,132 ticks across a
+@ session of many thousands of frames, about 8% of them. An overlay that re-asserts its
+@ borrowed layer once per tick is then visible one frame in twelve, which is exactly the fast
+@ flicker seen on screen. VBlank is the one interrupt a DS game maintains for its own sake and
+@ will not switch off.
+@
+@ The game's original handler is kept in a word here rather than in the ce9 header, so that
+@ neither of the two mirrored layouts -- cardengineArm9 and the header block above -- has to
+@ change to add this. The load is PC-relative, so it does not care where the image sits.
+@
+@ Guarded by RA_VBLANK_HOOK from ASFLAGS rather than by RA_READER_ENABLED, which the assembler
+@ never sees. The two are set in the same three Makefiles; if they ever drift apart the link
+@ fails on raVblankHandler rather than quietly building a cardengine with no hook.
+@---------------------------------------------------------------------------------
+	.global raVblankHandler
+raVblankHandler:
+@ Hook the return address, then go back to the original function
+	stmdb	sp!, {lr}
+	adr 	lr, code_handler_start_ra_vblank
+	ldr 	pc,	raIntrVblankOrigReturn
+
+code_handler_start_ra_vblank:
+	push	{r0-r12}
+	bl	myIrqHandlerRaVblank
+	pop   	{r0-r12,pc}
+
+	.global raIntrVblankOrigReturn
+raIntrVblankOrigReturn:
+	.word	0x00000000
+#endif
+
 .pool
 
 @---------------------------------------------------------------------------------
