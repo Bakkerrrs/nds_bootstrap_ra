@@ -5019,6 +5019,46 @@ on Contra 4, where the message is known not to appear, and on a game where it is
 `overlayExtPal` differing between them is the answer; matching kills the hypothesis and sends the
 search to layer priority or the tile map.
 
+### The deferral worked, and it exposed the bug item 3 predicted
+
+The build that holds a notification until the screen has stopped fading was run on hardware, and the
+report was that the message still could not be read clearly and that **the whole of stage 2 of
+*Contra 4* glitched**.
+
+That is a worse outcome than before and it is the right kind of worse. Before the deferral every real
+notification landed inside a fade: invisible, and — crucially — harmless, because a screen on its way to
+black does not show what the overlay got wrong either. Deferring moved the draw to the middle of
+gameplay, where the game is actively using its VRAM. The fade was not only hiding the notification. It
+was hiding the corruption, which is why item 3 below could sit for so long as a bug with no observed
+effect.
+
+The false assumption was in `surveyBlocks()`:
+
+```c
+if (!(SUB_DISPCNT & (1u << (8 + i)))) {
+    continue;  /* layer off, so its VRAM is not in use */
+}
+```
+
+A layer that is off *this instant* was treated as owning nothing. But the survey runs once, at show
+time, from a VCOUNT handler at line 0 — and the game turns that layer back on later, with its character
+base still pointing at the block the overlay has just filled with glyphs. The block was never free; it
+was momentarily unreferenced by an enabled layer, which is not the same claim.
+
+There is direct evidence the game does this constantly rather than occasionally, and it was already in
+the snapshot: `rearmDispstat` **clamped at 255**, counting how often the Y-trigger had to be written
+back into the very register this survey trusts. A game that rewrites `SUB_DISPCNT` every frame is a
+game whose enable bits say nothing about what it owns.
+
+So the filter is gone: a block referenced by **any** layer counts as in use, enabled or not. Strictly
+more conservative, and the trade is the right way round — it makes `denied` more likely and corruption
+less. A notification that does not appear is a missing feature; a corrupted game is a bug.
+
+The honest consequence is that *Contra 4* may now report `denied` and show nothing at all. That is a
+correct denial, counted at `+0x0C denied` with `+0x14 deniedNoLayer` separating the two reasons, rather
+than a silent trespass. It also says plainly what the real fix is: the overlay needs VRAM it does not
+have to borrow, which is one more item on the list the rewrite in `cardenginei_arm9_ra` already owns.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
@@ -5059,12 +5099,18 @@ mean different things; a bitmap's base is in 16K units, not 2K. So the survey ca
 miss a block the game is using and mark one it is not, and picking an in-use block would
 overwrite the game's tiles until it redrew them.
 
-This has never been observed, and phase 1 produced positive evidence that it is not
-firing in practice: every one of the 5 recorded denials was a missing *layer*, not a
-missing block, so the block search was never even the deciding factor. It is a latent
-correctness bug rather than an active one — but it is the one item here that is a bug and
-not a trade-off, and it should be fixed when the overlay is rewritten rather than
-patched in place.
+This was not observed for a long time, and phase 1 produced what looked like positive
+evidence that it was not firing in practice: every one of the 5 recorded denials was a
+missing *layer*, not a missing block, so the block search was never even the deciding
+factor.
+
+**That evidence has since been invalidated, and the bug is active.** Deferring the
+notification past the fade removed the very condition that was masking it — while every
+notification landed inside a transition, the survey's mistakes had no visible
+consequence. The first build that raised notifications on ordinary frames glitched the
+whole of stage 2 of *Contra 4*. See "The deferral worked, and it exposed the bug item 3
+predicted" above; the enable-bit half of the survey is now fixed, and the mode-blindness
+described here is not.
 
 **4 — no control over the screen.** The overlay draws on the sub engine; which physical
 panel that feeds is `POWCNT1` bit 15, which belongs to the game. *Final Fantasy III*

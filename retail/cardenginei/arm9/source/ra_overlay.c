@@ -139,7 +139,7 @@ static u32  lastUnlocks;
     rcheevos fires.
 */
 static u8   pending;        /* a notification is owed */
-static u16  pendingFrames;  /* how long it has waited for the fade to end */  /* rcTriggered as of the last frame; the notification fires on a rise */
+static u16  pendingFrames;  /* how long it has waited for the fade to end */
 static int  block;        /* character base block currently borrowed */
 static int  layer;        /* background layer currently borrowed */
 static u16  savedBgCnt;
@@ -184,9 +184,25 @@ static void surveyBlocks(bool* used, int skipLayer) {
 		if (i == skipLayer) {
 			continue;  /* the layer being borrowed */
 		}
-		if (!(SUB_DISPCNT & (1u << (8 + i)))) {
-			continue;  /* layer off, so its VRAM is not in use */
-		}
+		/*
+		    A layer that is off right now was skipped here, on the reasoning that its VRAM is not in
+		    use. Hardware says that reasoning is wrong, and expensively so.
+
+		    Deferring the notification past a fade made it land in the middle of stage 2 of Contra 4 and
+		    glitch the whole screen for 180 frames. The survey had sampled the registers at a moment when
+		    the game had layers off, concluded their blocks were free, taken one, and then the game turned
+		    the layer back on -- with its character base full of our glyphs.
+
+		    And there is direct evidence the game does this constantly rather than occasionally:
+		    raSnapshot.rearmDispstat clamped at 255, which counts how often it had to put the Y-trigger
+		    back into the very register this survey trusts. A game that rewrites SUB_DISPCNT every frame
+		    is a game whose enable bits say nothing about what it owns.
+
+		    So a block referenced by *any* layer counts as in use, enabled or not. Strictly more
+		    conservative, and the trade is the right way round: this makes `denied` more likely and
+		    corruption less, and a notification that does not appear is a missing feature while a
+		    corrupted game is a bug.
+		*/
 
 		charBase = (cnt >> 2) & 0xF;
 		if (charBase < CHAR_BLOCKS) {
