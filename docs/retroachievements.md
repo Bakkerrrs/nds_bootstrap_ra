@@ -4948,6 +4948,46 @@ which is very likely nothing. That fits every number -- borrowed, never refused,
 invisible. `raSnapshot.overlayExtPal` records `SUB_DISPCNT` bit 30 at `show()` time so one run decides
 it instead of an argument.
 
+### The answer, and it is worse than invisible
+
+The controlled pair was run, and the second half of it changed the problem. On Super Mario 64 DS the
+demo notification pulses and is seen. On Contra 4 it is not seen -- **and part of the graphics at the
+bottom of the screen flicker while it is up.**
+
+So the overlay is not failing to draw. It is drawing into VRAM that Contra 4 is actively using: the
+flicker is the game's own tiles being overwritten by glyphs for 180 frames and restored afterwards.
+`surveyBlocks()` -- which reads the live BGCNT registers to decide which 16K character blocks are in
+use -- is concluding that a block is free when it is not.
+
+The counters agree that everything *else* is identical. The demo cycle is 180 frames held plus 60
+waiting, first fire at tick 60, so `shows` should be `(ticks - 60) / 240 + 1`:
+
+    Contra 4    273 ticks -> 1 show, and shows reads 1
+    Mario 64   1291 ticks -> 6 shows, and shows reads 6
+
+Both exact. The negotiation and the draw are the same code taking the same path in both games, with
+`denied`, `evicted` and `deniedNoLayer` at zero on each. What differs is only whether the block it
+chose was really free.
+
+That reclassifies this from a cosmetic gap into a defect: for three seconds, on this game, the
+notification corrupts the display of the game it is reporting on. Not showing a message is a missing
+feature; damaging the game's graphics is a bug, and it is the one worth fixing first.
+
+The extended-palette hypothesis is now secondary rather than dead -- it would still explain why the
+glyphs themselves are not legible while their *effect* is -- but it is no longer the interesting
+question. The interesting question is what `surveyBlocks()` mis-reads, and the next step is to capture
+`SUB_DISPCNT` and all four `SUB_BGCNT` values at `show()` time, which says exactly what the survey saw
+and what it should have seen.
+
+Two errors of mine on the way to this, both worth recording because both wasted a run. The probe build
+moves the snapshot -- `ra_overlay.o` grows with the demo compiled in -- so the address quoted for the
+normal build was wrong and `overlayExtPal` sat off the bottom of both photographs. And the overlay
+draws on the sub engine, which is the same screen the in-game menu occupies, so the notification cannot
+be seen while the RAM viewer is open: a visibility check has to be made with the menu closed. I asked
+for a reading that could not have produced one.
+
+### The original plan for that pair, kept for the record
+
 The decisive form is a *controlled* pair, and it costs ten seconds: run the `RA_OVERLAY_DEMO=60` probe
 on Contra 4, where the message is known not to appear, and on a game where it is known to appear.
 `overlayExtPal` differing between them is the answer; matching kills the hypothesis and sends the
