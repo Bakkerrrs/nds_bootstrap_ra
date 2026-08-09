@@ -71,7 +71,6 @@
     program ever handling a real password. Over cleartext that distinction is worth keeping,
     and it is the reason step 3's first rung needs no credentials at all.
 */
-#define RA_PATH_ANON "/dorequest.php?r=login&u=ndsbootstrap_probe&p=x"
 
 /* What the launcher's ARM7 stashed there at boot, before anything could change it. */
 #define REG_SCFG_EXT7 *(u32*)0x02FFFDF0
@@ -92,7 +91,17 @@
 /* Seconds. Generous, because the cost of being wrong is a run that reports the wrong rung. */
 #define RA_WIFI_WAIT_ARM7   3
 #define RA_WIFI_WAIT_CHIP   20
-#define RA_WIFI_WAIT_LINK   40
+/*
+    Was 40, and 40 was measured as a cost rather than chosen as a limit: a boot with the access point off
+    spent forty seconds failing to associate, and dsiwifi printed "netif is not up, old style port?" on
+    every poll for all of it -- forty-one identical lines of log before the first useful one.
+
+    A DSi that has not associated in twelve seconds is not about to. Every successful run in this project
+    associated in well under that, with the WPA2 handshake landing a second or two after the scan, so this
+    cuts the worst case by two thirds and the noise with it. `sync=0` is the real answer for a card that
+    is never going to have an access point; this is for the one whose router happens to be down.
+*/
+#define RA_WIFI_WAIT_LINK   12
 #define RA_WIFI_WAIT_DHCP   30
 #define RA_WIFI_WAIT_TAIL   8   /* after the summary: dsiwifi keeps narrating */
 /*
@@ -504,41 +513,19 @@ static void raWifiReportAttempts(const char* what, const raNetProgress* p) {
     The reply is checked for *content*, not for bytes. A captive portal, a proxy or a
     Cloudflare interstitial all succeed at the socket level and mean nothing.
 */
-static void raWifiReachApi(void) {
-	static char   response[2048];
-	raNetProgress p;
-	int           got;
+/*
+    Stages 7 to 9 -- DNS, TCP and "is this really the API" -- used to be a request of their own: a
+    deliberate `r=login` with no credentials, sent only to see `invalid_credentials` come back.
 
-	memset(&p, 0, sizeof(p));
-	got = raNetHttpGet(RA_NET_HOST, RA_PATH_ANON, response, sizeof(response), &p);
+    It was removed because r=login proves all three and runs immediately after. The throwaway cost a
+    DNS lookup, a TCP connection, a round trip and eight lines of log to establish something the next
+    request establishes as a side effect -- and every one of those rungs is now set from the login's own
+    raNetProgress, which already records resolved, connected and sent.
 
-	verdict.dnsOk = p.resolved;
-	verdict.tcpOk = p.connected;
-	if (p.resolved) {
-		raWifiLog("resolved         %s\n", RA_NET_HOST);
-		raWifiReportIp("its address", p.address);
-	}
-	if (p.connected) {
-		raWifiLog("connected        port %d\n", RA_NET_PORT);
-	}
-	raWifiReportAttempts("the probe", &p);
-	if (p.sent) {
-		raWifiLog("request sent\n");
-	}
-	if (got < 0) {
-		raWifiLog("\x1b[31mHTTP failed at step %d\x1b[37m\n", -got);
-		return;
-	}
-	raWifiLog("%s after %d\n", p.closedByPeer ? "peer closed" : "recv stopped", got);
-
-	if (strstr(response, "invalid_credentials")) {
-		verdict.apiOk = 1;
-		raWifiLog("\x1b[32mthe API answered over plain HTTP\x1b[37m\n");
-	} else if (got > 0) {
-		raWifiLog("\x1b[31mreply is not the API\x1b[37m\n");
-	}
-	raWifiLog("body: %s\n", raNetBody(response));
-}
+    Worth keeping the reasoning rather than just the deletion: the probe existed when *nothing* had ever
+    reached the API from here and the question was whether plain HTTP worked at all. That was answered on
+    hardware a long time ago (see #1a), and a test that has passed every run since is a cost, not a check.
+*/
 
 /*
     Stage 10: r=login, with the credentials from ra.cfg.
@@ -583,12 +570,33 @@ static void raWifiLogin(const raConfig* cfg) {
 
 	memset(&p, 0, sizeof(p));
 	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+
+	/*
+	    Rungs 7 to 9, from this request rather than from a throwaway one before it. DNS, TCP and "the API
+	    answered" are all side effects of any successful call, and this is the first call there is.
+	*/
+	verdict.dnsOk = p.resolved;
+	verdict.tcpOk = p.connected;
+	if (p.resolved) {
+		raWifiLog("resolved         %s\n", RA_NET_HOST);
+		raWifiReportIp("its address", p.address);
+	}
+	if (p.connected) {
+		raWifiLog("connected        port %d\n", RA_NET_PORT);
+	}
 	raWifiReportAttempts("login", &p);
 	if (got < 0) {
 		raWifiLog("\x1b[31mlogin HTTP failed at step %d\x1b[37m\n", -got);
 		return;
 	}
 	raWifiLog("%d bytes back\n", got);
+	/*
+	    Recognisably the API: a JSON object with the fields it uses. Enough for rung 9, whether or not
+	    the credentials in it were right.
+	*/
+	if (strstr(response, "\"Success\"")) {
+		verdict.apiOk = 1;
+	}
 
 	if (raNetJsonString(response, "Token", raToken, sizeof(raToken))) {
 		verdict.loggedIn = 1;
@@ -1865,10 +1873,6 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	}
 
 	raWifiReportHeap("with lwip up");
-
-	raWifiLog("\n-- stage 7-9: reach the API over plain HTTP --\n");
-	raWifiReachApi();
-	raWifiReportHeap("after HTTP");
 
 	raWifiLog("\n-- stage 10: log in --\n");
 	raWifiLogin(&config);
