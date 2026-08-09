@@ -5337,6 +5337,34 @@ sequence, which is the one moment the game tears down and rebuilds its entire sc
 question and have never been captured at the moment of a real unlock: the build that has them has only
 ever been run without one, and the run with the unlock predates them.
 
+### It was the display, and the probe read the achievement's name back
+
+Confirmed on hardware, and the confirmation arrived as a sentence rather than a hex dump. The pulse was
+visible for the whole of stage 1, **went blank for a stretch at the stage-clear transition**, and came
+back at the start of stage 2 reading **"Welcome to the jungle"** — the real name of the achievement that
+had fired during the transition.
+
+So the notification had always been drawn correctly. It was drawn into a screen the game was not
+displaying, and it spent its 180 frames there.
+
+`shows` 43 against 10,339 ticks, which is exactly 10,339 ÷ 240, with `denied`, `evicted` and
+`deniedNoLayer` all zero across forty-three borrow-and-return cycles.
+
+**And the same reading exposes a liability the fix had just created.** The transition lasts well over a
+second and a half. The pulse survived it only because another pulse arrived after the screen came back —
+a single real notification would have hit the 90-frame bound *inside* the blank, been released into it,
+and been thrown away. The fix would have looked like it worked in the probe and failed in practice.
+
+So the bound is now applied only to what it was designed for:
+
+| Condition | Treatment | Why |
+|---|---|---|
+| A fade (`MASTER_BRIGHT`) | bounded at 90 frames | A game can *sustain* one — a dark room, a pause menu, a brightness setting. "Might not be visible" needs a deadline or the notification is lost. |
+| Forced blank or display off | **waits as long as it takes** | "Definitely not visible", and no game runs with its screen switched off for long, because it needs the screen. Counting those frames toward a deadline is how the notification gets released into the blank. |
+
+`overlayState` bit 7 stays set throughout, so a notification owed indefinitely — a game that never uses
+the sub engine at all — reads as owed rather than as nothing happening.
+
 ### Two conditions the gate never checked
 
 Added on their own merits rather than on suspicion, because both are unambiguously right:
@@ -5351,9 +5379,9 @@ gone, which is the same argument the fade gate is built on applied to the two co
 a fade. Neither could ever have been detected by a counter here: the survey sees VRAM, `brightActive()`
 sees brightness, and nothing saw whether the engine was displaying at all.
 
-It may be this bug. It is not recorded as the cause, because the reading that would say so does not
-exist and this section has already spent four hypotheses — three of them because something got built
-before it was measured.
+And this time it *was* the cause, confirmed before it was written down as one. See above: the probe went
+blank exactly at the transition and came back with the achievement's own name. Five hypotheses were spent
+on this bug; the two that held were the two that were measured before anything was built on them.
 
 ## Known graphical limitations of the overlay (deferred)
 

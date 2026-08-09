@@ -105,12 +105,12 @@ static bool brightActive(void) {
       bits 16-17   the display mode. 0 is off, and no background appears in it however its own
                    registers read.
 
-    This is correct on its own terms rather than because it is suspected of anything: a notification
-    drawn into a screen that is not being displayed spends its 180 frames invisible and is gone. It is
-    the same argument the fade gate is built on, applied to the two conditions that outrank a fade.
-
-    Whether it is *this* bug is not decided here -- raSnapshot.overlayDispcnt is what will say, and no
-    reading of it exists yet for the moment a real unlock fires.
+    And this *was* the bug, confirmed on hardware rather than reasoned about. The pulse probe was visible
+    for the whole of stage 1 on Contra 4, went blank for a stretch at the stage-clear transition, and came
+    back at the start of stage 2 reading **"Welcome to the jungle"** -- the real name of the achievement
+    that had fired during the transition. `shows` 43 against 10,339 ticks, which is exactly 10,339 / 240,
+    with nothing denied or evicted. The notification had always been drawn correctly into a screen that
+    was not being displayed.
 */
 static bool screenHidden(void) {
 	const u32 d = SUB_DISPCNT;
@@ -524,7 +524,28 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 	    notification is one notification, and `lastUnlocks` has already moved past both.
 	*/
 	if (pending) {
-		if ((brightActive() || screenHidden()) && pendingFrames < OVERLAY_FADE_WAIT_TICKS) {
+		/*
+		    A hidden screen does not count against the bound, and that distinction is the whole fix.
+
+		    The bound exists for a *fade*, which is a state a game can sustain -- a dark room, a pause
+		    menu, a brightness setting -- so a notification owed during one has to be released eventually
+		    or it is lost. "Might not be visible" deserves a deadline.
+
+		    Forced blank and display-off are not that. They are "definitely not visible", and no game runs
+		    with its screen switched off for long, because it needs the screen. Counting those frames
+		    toward a 90-frame deadline is how the notification gets released *into* the blank and thrown
+		    away -- which is exactly what hardware showed: the stage-1-clear transition on Contra 4 lasts
+		    well over a second and a half, and the pulse only survived it because another pulse arrived
+		    after the screen came back. A single real notification would have expired inside it.
+
+		    So this waits as long as it takes and shows on the first frame the screen is real again.
+		    overlayState bit 7 stays set throughout, so a notification owed indefinitely -- a game that
+		    never uses the sub engine at all -- reads as owed rather than as nothing happening.
+		*/
+		if (screenHidden()) {
+			return;
+		}
+		if (brightActive() && pendingFrames < OVERLAY_FADE_WAIT_TICKS) {
 			pendingFrames++;
 			return;
 		}
