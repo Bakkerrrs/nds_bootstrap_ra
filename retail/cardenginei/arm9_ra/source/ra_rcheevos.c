@@ -325,10 +325,99 @@ static int ra_rc_validate_address(uint32_t consoleAddress) {
 	return ra_rc_translate(consoleAddress, 1) != 0;
 }
 
+/*
+    Step 3b, the producer side: earned ids waiting to cross to the ARM7.
+
+    Held here rather than handed over immediately because the handover is one-at-a-time -- the ARM7
+    clears the request within a frame, and this runs inside the game's IRQ handler where waiting for it
+    is not an option. So an unlock goes in this ring and ra_rc_offer_unlock() feeds the channel from the
+    frame loop.
+
+    Sized at 8 because a set does not fire eight achievements before the next frame; if it somehow did,
+    `unlockLost` counts what fell off rather than letting the ring wrap silently over an unsent id. An
+    unlock this fork failed to report is exactly the thing that must not be invisible.
+*/
+#define RA_UNLOCK_RING 8
+static u32 unlockRing[RA_UNLOCK_RING];
+static u8  unlockHead;      /* next slot to write */
+static u8  unlockTail;      /* next slot to offer */
+static u8  unlockQueued;    /* how many are in the ring */
+static u8  unlockLost;      /* ring was full when one fired */
+static u16 unlockSent;      /* handed to the ARM7 and acknowledged */
+static u8  unlockNoChannel; /* the published shared address was not one of the two legal ones */
+
+static void ra_rc_queue_unlock(u32 id) {
+	if (id == 0) {
+		return;
+	}
+	if (unlockQueued >= RA_UNLOCK_RING) {
+		if (unlockLost < 255) {
+			unlockLost++;
+		}
+		return;
+	}
+	unlockRing[unlockHead] = id;
+	unlockHead = (u8)((unlockHead + 1) % RA_UNLOCK_RING);
+	unlockQueued++;
+}
+
+/*
+    Offer one id to the ARM7, if it is not already busy with the last one.
+
+    The write order is the whole protocol: id first, magic second. The ARM7 polls from its VBlank
+    handler and can wake between the two stores, and a magic paired with a stale id would append the
+    wrong achievement -- which the server would accept, because it is a perfectly valid id.
+
+    Nothing waits here. If the ARM7 has not finished, the ring keeps the id and the next frame tries
+    again; there are sixty chances a second and the write is one sector.
+*/
+static void ra_rc_offer_unlock(raSnapshot* snapshot) {
+	vu32* shared;
+
+	if (unlockQueued == 0) {
+		return;
+	}
+	/*
+	    Validated, not trusted -- and the host suite is what insisted on it. This structure's own header
+	    says nothing in it may be assumed initialised: it lives in .bss that no crt0 zeroes, so every
+	    field is garbage until claim() says otherwise. A null check would pass on garbage and this
+	    function would then *write four bytes to an arbitrary address inside a running game*.
+
+	    On hardware ra_tick() publishes it before calling in, every frame, so in practice it is always
+	    set. "Correct because the caller happens to do it first" is the kind of coupling this project
+	    checks rather than assumes -- and there are exactly two legal values, so checking is a compare
+	    rather than a heuristic. Anything else is refused and counted.
+	*/
+	if (snapshot->shared != CARDENGINE_SHARED_ADDRESS_SDK1
+	 && snapshot->shared != CARDENGINE_SHARED_ADDRESS_SDK5) {
+		if (unlockNoChannel < 255) {
+			unlockNoChannel++;
+		}
+		return;
+	}
+	shared = (vu32*)snapshot->shared;
+	if (shared[RA_SHARED_UNLOCK_REQ] != 0) {
+		return;   /* the previous one has not been picked up yet */
+	}
+	shared[RA_SHARED_UNLOCK_ID]  = unlockRing[unlockTail];
+	shared[RA_SHARED_UNLOCK_REQ] = RA_SHARED_UNLOCK_MAGIC;
+
+	unlockTail = (u8)((unlockTail + 1) % RA_UNLOCK_RING);
+	unlockQueued--;
+	if (unlockSent < 0xFFFF) {
+		unlockSent++;
+	}
+}
+
 static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
 	eventCount++;
 	if (runtimeEvent->type == RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED) {
 		triggeredCount++;
+		/*
+		    Queued before anything else in this branch, because this is the only moment the id exists
+		    and everything below is reporting. An unlock that is not queued here is lost for good.
+		*/
+		ra_rc_queue_unlock(runtimeEvent->id);
 		/*
 		    The first one only, and recorded as a line number rather than an id so it can be
 		    looked up in the file by eye. With one definition loaded a counter was enough; with
@@ -848,8 +937,18 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
     to this file and the trampoline takes one argument.
 */
 static u8 ra_rc_frame_step(raSnapshot* snapshot) {
-	(void)snapshot;
 	rc_runtime_do_frame(&runtime, ra_rc_event_handler, ra_rc_peek, 0, 0);
+
+	/*
+	    After the frame, not inside the event handler. The handler runs deep inside rcheevos with the
+	    runtime mid-update, and the handover writes to memory the other CPU polls -- doing it here keeps
+	    the two apart and costs one compare on a frame with nothing to send.
+	*/
+	ra_rc_offer_unlock(snapshot);
+	snapshot->unlockSent   = unlockSent;
+	snapshot->unlockQueued = unlockQueued;
+	snapshot->unlockLost   = unlockLost;
+
 	return RA_RC_FRAME;
 }
 

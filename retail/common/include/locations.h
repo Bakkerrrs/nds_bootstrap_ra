@@ -196,6 +196,18 @@
 #define CARDENGINE_SHARED_ADDRESS_SDK1 0x027FFA0C
 #define CARDENGINE_SHARED_ADDRESS_SDK5 0x02FFFA0C
 
+/*
+    How many u32 slots that block actually has, which is not a round number and is not obvious from
+    anything near it: the next thing in memory is UNPATCHED_FUNCTION_LOCATION at 0x027FFA40, so
+    sharedAddr[13] *is* the unpatched-function table. Slots 0-8 are taken (card reads, the DMA9 and
+    PING handshakes, the in-game menu's battery and clock), which leaves exactly four.
+
+    Written down because the failure mode is silent. Adding a slot past the end would corrupt a table
+    the loader uses to restore the game's own functions, and would show up as a game misbehaving with
+    nothing pointing back here. RA_SHARED_* below claims two of the four and static-asserts the bound.
+*/
+#define CARDENGINE_SHARED_SLOTS        13
+
 #define LOADER_RETURN_LOCATION                     (u32)CARDENGINEI_ARM7_BUFFERED_LOCATION+0xF400
 #define LOADER_RETURN_SDK5_LOCATION                (u32)CARDENGINEI_ARM7_BUFFERED_LOCATION+0x8400
 #define LOADER_RETURN_DSIWARE_LOCATION             (u32)CARDENGINEI_ARM7_BUFFERED_LOCATION+0x8000

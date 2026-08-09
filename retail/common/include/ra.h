@@ -192,6 +192,40 @@ typedef struct raResult {
 #define RA_SNAPSHOT_MAGIC3 'S'
 
 /*
+    Step 3b: handing an earned achievement id from the game to the SD card.
+
+    The cardengine has no network and the ARM9 has no SD card -- on a DSi the card is the ARM7's, and
+    every file nds-bootstrap writes from inside a game goes through fileWrite() there. So an unlock
+    detected by rcheevos on the ARM9 has to cross to the ARM7, which appends it to the queue file the
+    launcher pre-created, and the *next* boot's launcher sends it. See RA_QUEUE_PATH in ra_wifi.h.
+
+    The channel is the one that already exists rather than a new one. `sharedAddr` is how the ARM9
+    cardengine has always driven the ARM7 -- card reads, the reset and exit commands, the in-game
+    menu's battery and clock -- and the ARM7 already polls it from its VBlank handler. Two things come
+    with that for free, and both would have been work: the region is coherent between the two CPUs
+    with nothing but `volatile` (every card read in every game depends on that being true), and there
+    is an established idiom of a magic in one slot and data in the next.
+
+    Slots 0-8 are taken and slot 13 is UNPATCHED_FUNCTION_LOCATION, so these are two of the only four
+    that exist. See CARDENGINE_SHARED_SLOTS -- the bound is asserted where these are used.
+
+    The protocol, deliberately as small as it can be:
+
+      ARM9  writes the id into ID, then the magic into REQ.  (that order: the ARM7 can wake between
+                                                              the two writes, and a magic with a stale
+                                                              id would award the wrong achievement)
+      ARM7  sees REQ == magic, appends the id, writes 0 to REQ.
+      ARM9  will not write another request while REQ is non-zero.
+
+    One in flight at a time, which is not a limitation worth removing: the ARM7 clears it within a
+    frame and a set does not fire two achievements in the same frame often enough to matter. The ARM9
+    side keeps the rest in its own queue and offers one per frame.
+*/
+#define RA_SHARED_UNLOCK_REQ   9
+#define RA_SHARED_UNLOCK_ID    10
+#define RA_SHARED_UNLOCK_MAGIC 0x4C554152u   /* 'RAUL' */
+
+/*
     The snapshot lives in the cardengine's own .bss. That matters for two
     reasons: the game can never touch it, and it is never initialised -- the
     bootloader copies only the loaded image, which ends exactly where .bss
@@ -415,7 +449,22 @@ typedef struct raSnapshot {
 	u32 rcFirstId;        /* +0xA0  RA id of the first achievement to unlock, 0 if none */
 	u16 rcDefsWithId;     /* +0xA4  staged lines that carried an id */
 	u16 rcDefsNoId;       /* +0xA6  ...and lines that did not, which cannot be reported */
-} raSnapshot;            /*              0xA8 bytes */
+	/*
+	    Step 3b. The address of the cardengine's shared block, published by ra_tick() because the
+	    binary in DSi WRAM cannot work it out: it is 0x027FFA0C or 0x02FFFA0C depending on the game's
+	    SDK version, and only the ARM9 cardengine knows which. Passing it beats guessing -- a wrong
+	    guess writes four bytes into a running game's memory.
+	*/
+	u32 shared;           /* +0xA8  CARDENGINE_SHARED_ADDRESS_* for this game, 0 if unknown */
+	/*
+	    ...and what crossing it has done, because the RAM viewer is the only debug channel in here.
+	    `unlockSent` is what reached the ARM7; `unlockLost` is what the ring dropped, which must never
+	    be a number nobody can see.
+	*/
+	u16 unlockSent;       /* +0xAC  ids handed to the ARM7 */
+	u8  unlockQueued;     /* +0xAE  still waiting in the ring */
+	u8  unlockLost;       /* +0xAF  fired while the ring was full */
+} raSnapshot;            /*              0xB0 bytes */
 
 /*
     How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail

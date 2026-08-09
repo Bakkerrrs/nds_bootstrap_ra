@@ -41,6 +41,12 @@
 raSnapshot raSnapshotBuffer __attribute__((aligned(16)));
 #define snapshot raSnapshotBuffer
 
+/*
+    cardengine.c's own pointer to the shared block, whose address depends on the game's SDK version.
+    Borrowed rather than recomputed, so there is one answer in this binary to "where is it".
+*/
+extern vu32* volatile sharedAddr;
+
 /* The ARM9's current scanline. The only clock here the game does not own. */
 #define RA_VCOUNT (*(vu16*)0x04000006)
 
@@ -96,6 +102,13 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 
 	claim();
 	snapshot.ticks++;
+	/*
+	    Step 3b: tell the WRAM binary where the shared block is. It cannot work that out -- the address
+	    depends on the game's SDK version and only this side knows which -- and a guess would be four
+	    bytes written into a running game. Republished every frame rather than once, because this file
+	    makes no assumption about what order anything here ran in.
+	*/
+	snapshot.shared = (u32)sharedAddr;
 	{
 		extern u32 raOverlayShows, raOverlayDenied, raOverlayEvicted;
 		extern u32 raOverlayDeniedNoLayer;

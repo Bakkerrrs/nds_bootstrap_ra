@@ -601,11 +601,30 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, rcFirstId) == 0xA0);
 	CHECK(__builtin_offsetof(raSnapshot, rcDefsWithId) == 0xA4);
 	CHECK(__builtin_offsetof(raSnapshot, rcDefsNoId) == 0xA6);
+	/* Step 3b's four, also appended. */
+	CHECK(__builtin_offsetof(raSnapshot, shared) == 0xA8);
+	CHECK(__builtin_offsetof(raSnapshot, unlockSent) == 0xAC);
+	CHECK(__builtin_offsetof(raSnapshot, unlockQueued) == 0xAE);
+	CHECK(__builtin_offsetof(raSnapshot, unlockLost) == 0xAF);
 	/*
-	    0xA8, grown from 0xA0 by step 5's three fields -- appended, so every offset above them keeps
-	    the address the hardware checklist reads it at.
+	    0xB0, grown 0xA0 -> 0xA8 by step 5 and 0xA8 -> 0xB0 by step 3b -- appended both times, so every
+	    offset above them keeps the address the hardware checklist reads it at.
 	*/
-	CHECK(sizeof(raSnapshot) == 0xA8);
+	CHECK(sizeof(raSnapshot) == 0xB0);
+
+	/*
+	    The shared block's real size, pinned because overrunning it is silent: slot 13 is
+	    UNPATCHED_FUNCTION_LOCATION, a table the loader uses to put the game's own functions back. A
+	    request slot past the end would corrupt it and present as the game misbehaving with nothing
+	    pointing here.
+	*/
+	CHECK(CARDENGINE_SHARED_ADDRESS_SDK1 + CARDENGINE_SHARED_SLOTS * 4 == UNPATCHED_FUNCTION_LOCATION);
+	CHECK(CARDENGINE_SHARED_ADDRESS_SDK5 + CARDENGINE_SHARED_SLOTS * 4 == UNPATCHED_FUNCTION_LOCATION_SDK5);
+	CHECK(RA_SHARED_UNLOCK_REQ < CARDENGINE_SHARED_SLOTS);
+	CHECK(RA_SHARED_UNLOCK_ID < CARDENGINE_SHARED_SLOTS);
+	/* And past the eight the rest of the cardengine already uses. */
+	CHECK(RA_SHARED_UNLOCK_REQ > 8 && RA_SHARED_UNLOCK_ID > 8);
+	CHECK(RA_SHARED_UNLOCK_REQ != RA_SHARED_UNLOCK_ID);
 
 	*DISPCNT = 0x1F40;
 
