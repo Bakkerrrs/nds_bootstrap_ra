@@ -31,6 +31,8 @@
 #include "nitrofs.h"
 #include "igm_text.h"
 #include "locations.h"
+/* Step 3b: RA_QUEUE_PATH and RA_QUEUE_BYTES, which are defined whether or not the WiFi switch is on. */
+#include "ra_wifi.h"
 #include "version.h"
 
 #include "nandio.h"
@@ -73,6 +75,7 @@ extern std::string wideCheatFilePath;
 extern std::string cheatFilePath;
 extern std::string ramDumpPath;
 extern std::string srParamsFilePath;
+extern std::string raUnlocksFilePath;   /* step 3b, set below */
 extern std::string screenshotPath;
 extern std::string apFixOverlaysPath;
 extern std::string musicsFilePath;
@@ -2722,6 +2725,30 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 		fseek(srParamsFile, 0x50 - 1, SEEK_SET);
 		fputc('\0', srParamsFile);
 		fclose(srParamsFile);
+	}
+
+	/*
+	    Step 3b: the unlock queue, created here for the same reason softResetParams.bin is -- the
+	    cardengine can write into clusters that already exist and cannot allocate any, so the file has
+	    to be full length before the game boots. Zero filled; every record is empty.
+
+	    Created unconditionally, not under the WiFi switch. The two halves are independent: the
+	    cardengine can record an unlock on a build with no networking at all, and the queue simply
+	    waits for a boot that has some. Gating this on RA_LAUNCHER_WIFI would silently make earned
+	    achievements unrecordable on exactly the builds most people run.
+
+	    Rewritten only when it is the wrong size. An existing queue holds ids that have not been sent
+	    and truncating it would throw them away.
+	*/
+	raUnlocksFilePath = conf->gameOnFlashcard ? RA_QUEUE_PATH_FAT : RA_QUEUE_PATH;
+	if (getFileSize(raUnlocksFilePath.c_str()) != RA_QUEUE_BYTES) {
+		FILE* queueFile = fopen(raUnlocksFilePath.c_str(), "wb");
+
+		if (queueFile) {
+			fseek(queueFile, RA_QUEUE_BYTES - 1, SEEK_SET);
+			fputc('\0', queueFile);
+			fclose(queueFile);
+		}
 	}
 
 	conf->donorFileOffset = 0;

@@ -4761,6 +4761,39 @@ session being what makes an unlock visible within the same run — and equally c
 cache that happened to expire differently. One run each is not enough to tell those apart, and it does
 not matter enough to spend runs on: the award is recorded either way, and the next boot always sees it.
 
+### 3b: the queue file is now always there, and the channel is mapped
+
+Two things landed, and the third was stopped on purpose.
+
+**The launcher creates the queue unconditionally**, in `conf_sd.cpp` beside `softResetParams.bin` and
+for the same reason: the cardengine writes into clusters that already exist and cannot allocate any, so
+the file has to be full length before the game boots. Not under `RA_LAUNCHER_WIFI` — the two halves are
+independent, a build with no networking can still *record* an unlock, and gating it would make earned
+achievements unrecordable on exactly the builds most people run. Rewritten only when the size is wrong,
+because an existing queue holds ids that have not been sent.
+
+**The producer side works and is validated.** See the previous section.
+
+**The cluster plumbing was reverted**, and mapping it is the useful output. It is not the one-field
+change the ce7 struct made it look like. `srParamsCluster`'s real path is:
+
+```
+main.cpp            stat() -> st_ino is the cluster
+nds_loader_arm9.c   loader->srParamsFileCluster           (loadCrt0, a fixed-layout struct)
+bootloaderi/main.arm7.c   extern u32 srParamsFileCluster   <- a linker-placed global, and
+bootloader/main.arm7.c    extern u32 srParamsFileCluster      there are *two* bootloaders
+hook_arm9.c         ce9->srParamsCluster = srParamsFileCluster
+cardenginei/arm7    getFileFromCluster(&srParamsFile, ...)
+```
+
+So a new cluster means a field in `loadCrt0` whose layout two bootloaders read through fixed-offset
+externs, plus the hook signatures, plus both bootloaders' call sites. That is the boot path of every
+game nds-bootstrap runs, and a mistake in it does not fail loudly — it hands the ARM7 a wrong cluster
+and writes 16 bytes into whatever file that is.
+
+Doing it half-way and leaving it building was the other option and it was worse. The tree is clean, both
+modes build, the suite passes, and the remaining work is now a known list rather than an unknown.
+
 ### What is not built, and what it needs
 
 3b — the cardengine writing to the queue — is not started. Sizing it honestly, from reading the code

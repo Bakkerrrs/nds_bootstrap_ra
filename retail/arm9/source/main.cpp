@@ -30,6 +30,8 @@ std::string wideCheatFilePath;
 std::string cheatFilePath;
 std::string ramDumpPath;
 std::string srParamsFilePath;
+/* Step 3b: the unlock queue the cardengine appends to. Set in conf_sd.cpp. */
+std::string raUnlocksFilePath;
 std::string screenshotPath;
 std::string apFixOverlaysPath;
 std::string musicsFilePath;
@@ -533,6 +535,7 @@ static int runNdsFile(configuration* conf) {
 	if (stat(srParamsFilePath.c_str(), &stSrParams) >= 0) {
 		clusterSrParams = stSrParams.st_ino;
 	}
+
 
 	if (stat(cheatFilePath.c_str(), &stCheat) >= 0) {
 		clusterCheat = stCheat.st_ino;
