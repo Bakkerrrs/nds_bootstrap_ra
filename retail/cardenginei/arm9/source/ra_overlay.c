@@ -64,10 +64,15 @@
 #define OVERLAY_SHOW_FRAMES 180
 
 /*
-    Temporary, until there is achievement logic to trigger it: raise the overlay on a
-    timer, so it can be watched appearing and disappearing.
+    Was: raise the overlay on a timer, because when this was written there was no achievement logic to
+    trigger it. There is now -- rcheevos delivers RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED and the count
+    reaches here as raSnapshot.rcTriggered -- so the timer is off and the notification means something.
+
+    Kept rather than deleted, at 0 so it compiles out: setting it non-zero is how the borrow-and-return
+    negotiation gets exercised on a game without spending an achievement to do it, and that is worth
+    one #if.
 */
-#define OVERLAY_DEMO_INTERVAL 600
+#define OVERLAY_DEMO_INTERVAL 0
 
 /*
     "RA UNLOCKED", one 1bpp 8x8 glyph per character in message order. In order rather
@@ -99,6 +104,7 @@ static const u8 glyphs[][8] = {
 static u32  stateMagic;
 static u32  framesLeft;   /* non-zero while visible */
 static u32  demoCounter;
+static u32  lastUnlocks;  /* rcTriggered as of the last frame; the notification fires on a rise */
 static int  block;        /* character base block currently borrowed */
 static int  layer;        /* background layer currently borrowed */
 static u16  savedBgCnt;
@@ -267,11 +273,16 @@ static void hide(void) {
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = savedPaletteEntry;
 }
 
-void ra_overlay_tick(void) {
+void ra_overlay_tick(u32 unlocks) {
 	if (stateMagic != STATE_MAGIC) {
 		stateMagic = STATE_MAGIC;
 		framesLeft = 0;
 		demoCounter = 0;
+		/*
+		    Synced to whatever the count already is, not to zero. Claiming with 0 would fire the
+		    notification once for a session that had already unlocked something before this ran.
+		*/
+		lastUnlocks = unlocks;
 		raOverlayShows = 0;
 		raOverlayDenied = 0;
 		raOverlayEvicted = 0;
@@ -304,6 +315,21 @@ void ra_overlay_tick(void) {
 		SUB_BGVOFS(layer) = 0;
 		SUB_DISPCNT |= (1u << (8 + layer));
 		return;
+	}
+
+	/*
+	    The real trigger, and the reason OVERLAY_DEMO_INTERVAL is now 0: an achievement unlocked.
+
+	    Strictly greater, and resynced when it drops. rcheevos' count is reset when the runtime is
+	    re-initialised, and a count that went backwards must not be read as a new unlock.
+	*/
+	if (unlocks > lastUnlocks) {
+		lastUnlocks = unlocks;
+		show();
+		return;
+	}
+	if (unlocks < lastUnlocks) {
+		lastUnlocks = unlocks;
 	}
 
 	#if OVERLAY_DEMO_INTERVAL

@@ -118,7 +118,12 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 		snapshot.deniedNoLayer = raOverlayDeniedNoLayer;
 	}
 
-	ra_overlay_tick();
+	/*
+	    Last frame's count: the WRAM binary that increments it runs below. One frame of latency on a
+	    180-frame notification, and passing this frame's would mean calling the overlay after the work
+	    it is meant to be independent of.
+	*/
+	ra_overlay_tick(snapshot.rcTriggered);
 
 	/*
 	    Hand the frame to cardenginei_arm9_ra, which evaluates the watchlist.

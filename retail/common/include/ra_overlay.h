@@ -26,7 +26,14 @@
     from the VCOUNT handler -- games rewrite DISPCNT and the BG control registers,
     so holding the layer means re-claiming it every frame.
 */
-void ra_overlay_tick(void);
+/*
+    Per frame, from ra_tick(). `unlocks` is the running count of achievements this session has
+    triggered -- raSnapshot.rcTriggered -- and the notification is raised when it *goes up*.
+
+    Passed in rather than read from the snapshot so this file stays a leaf: it borrows VRAM and hands
+    it back, and it has no business reaching into the reader's state to decide when to do that.
+*/
+void ra_overlay_tick(u32 unlocks);
 
 #endif /* RA_READER_ENABLED */
 
