@@ -883,12 +883,224 @@ static void test_patch(void) {
 	      < CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER);
 }
 
+/*
+    The unlock queue.
+
+    Two halves worth different amounts. The parser and the packer are ordinary logic and are tested
+    the ordinary way. The signature is the reason this function exists: RetroAchievements answers a
+    wrong `v=` with a generic refusal that says nothing about hashing, so a mistake there would look
+    exactly like a wrong achievement id, from a console, one boot at a time. The digests below were
+    computed by coreutils' md5sum and pasted in -- an oracle this code had no part in producing.
+*/
+static void test_queue(void) {
+	printf("\nthe queue reads what a human or the cardengine writes\n");
+	{
+		raQueue q;
+
+		/* Fixed 16-byte NUL-padded records, which is what the cardengine will write. */
+		{
+			char file[RA_QUEUE_BYTES];
+
+			memset(file, 0, sizeof(file));
+			memcpy(file + 0 * RA_QUEUE_RECORD, "93119\n", 6);
+			memcpy(file + 1 * RA_QUEUE_RECORD, "93121\n", 6);
+
+			raQueueScan(&q, file, sizeof(file));
+			CHECK(q.count == 2);
+			CHECK(q.ids[0] == 93119 && q.ids[1] == 93121);
+			/*
+			    The NUL padding must not read as anything. A parser that counted it would report
+			    hundreds of dropped values on every boot and bury a real one.
+			*/
+			CHECK(q.dropped == 0);
+		}
+
+		/* ...and the same ids typed by hand, in any of the shapes a person would type them. */
+		{
+			static const char* const shapes[] = {
+				"93119\n93121\n",
+				"93119 93121",
+				"93119\r\n93121\r\n",
+				"  93119,93121  ",
+				"# earned tonight\n93119\n93121\n",
+			};
+			size_t i;
+
+			for (i = 0; i < sizeof(shapes) / sizeof(shapes[0]); i++) {
+				raQueueScan(&q, shapes[i], (int)strlen(shapes[i]));
+				CHECK(q.count == 2 && q.ids[0] == 93119 && q.ids[1] == 93121);
+			}
+		}
+
+		/* A comment cannot smuggle an id in, which is the only reason comments are parsed at all. */
+		raQueueScan(&q, "# 93119 was earned\n93121\n", 25);
+		CHECK(q.count == 1 && q.ids[0] == 93121);
+
+		/* Duplicates collapse: awarding one twice is not how you find out the writer misbehaved. */
+		raQueueScan(&q, "93119 93119 93119", 17);
+		CHECK(q.count == 1);
+
+		/*
+		    Refused rather than truncated, the same correction ra_patch.c and ra_take_id() needed.
+		    4294967295 is the largest u32 and must survive; one more digit is a different
+		    achievement and must not be silently shortened into a real one.
+		*/
+		raQueueScan(&q, "4294967295", 10);
+		CHECK(q.count == 1 && q.ids[0] == 4294967295u);
+		raQueueScan(&q, "4294967296", 10);
+		CHECK(q.count == 0 && q.dropped == 1);
+		raQueueScan(&q, "99999999999", 11);
+		CHECK(q.count == 0 && q.dropped == 1);
+
+		/* Zero is not an id -- rcheevos refuses it -- and a file of zeros is not a file of unlocks. */
+		raQueueScan(&q, "0\n00\n", 5);
+		CHECK(q.count == 0 && q.dropped == 2);
+
+		/* More than the queue holds is reported, not silently dropped. */
+		{
+			char many[RA_QUEUE_MAX * 8 + 64];
+			int  n = 0;
+			int  i;
+
+			for (i = 0; i < RA_QUEUE_MAX + 3; i++) {
+				n += sprintf(many + n, "%d\n", 1000 + i);
+			}
+			raQueueScan(&q, many, n);
+			CHECK(q.count == RA_QUEUE_MAX);
+			CHECK(q.truncated == 3);
+		}
+	}
+
+	printf("\nand writes back only what is still owed, at the same length\n");
+	{
+		raQueue q;
+		char    out[RA_QUEUE_BYTES];
+		u32     keep[2];
+		int     written;
+
+		memset(&q, 0, sizeof(q));
+
+		/* The clearing case, which is the common one: everything went, nothing is owed. */
+		memset(out, 'x', sizeof(out));
+		written = raQueuePack(&q, NULL, 0, out, sizeof(out));
+		CHECK(written == 0);
+		{
+			size_t i;
+			int    clean = 1;
+
+			for (i = 0; i < sizeof(out); i++) {
+				if (out[i]) {
+					clean = 0;
+				}
+			}
+			CHECK(clean);
+		}
+
+		/* Two owed: they land at record boundaries the cardengine can compute without reading. */
+		keep[0] = 93119;
+		keep[1] = 4294967295u;
+		written = raQueuePack(&q, keep, 2, out, sizeof(out));
+		CHECK(written == 2);
+		CHECK(memcmp(out + 0 * RA_QUEUE_RECORD, "93119\n", 6) == 0);
+		CHECK(memcmp(out + 1 * RA_QUEUE_RECORD, "4294967295\n", 11) == 0);
+		CHECK(out[2 * RA_QUEUE_RECORD] == 0);
+
+		/* And what it wrote is what the parser reads back -- the round trip, not two guesses. */
+		raQueueScan(&q, out, sizeof(out));
+		CHECK(q.count == 2 && q.ids[0] == 93119 && q.ids[1] == 4294967295u);
+
+		/*
+		    Refused rather than half-written. A partial queue is indistinguishable from a whole one
+		    on the next boot, so a buffer that is not a whole number of records is an error.
+		*/
+		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD - 1) == -1);
+		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD * 2 + 1) == -1);
+		/* More to keep than the file can hold is also an error rather than a truncation. */
+		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD) == -1);
+
+		/* A record has to hold the longest u32 plus its newline, or ids get mis-parsed. */
+		CHECK(RA_QUEUE_RECORD >= 11);
+	}
+
+	printf("\nand signs r=awardachievement the way rcheevos does\n");
+	{
+		char v[33];
+
+		/*
+		    md5 of the id, the username and the hardcore flag as decimal text with no separators.
+		    Oracle: printf '93119Bakke0' | md5sum
+		*/
+		raQueueSign(93119, "Bakke", 0, v);
+		CHECK(strcmp(v, "d9ac96231a45f0f275747a84a4c9271d") == 0);
+
+		/* Oracle: printf '1Cheevos1' | md5sum -- and it proves the flag is '1' and not 1. */
+		raQueueSign(1, "Cheevos", 1, v);
+		CHECK(strcmp(v, "4787f01ee76713835a4f3bd5de506ec1") == 0);
+
+		/* Hardcore has to change it, or the flag is not in the hash at all. */
+		{
+			char soft[33];
+			char hard[33];
+
+			raQueueSign(93119, "Bakke", 0, soft);
+			raQueueSign(93119, "Bakke", 1, hard);
+			CHECK(strcmp(soft, hard) != 0);
+		}
+
+		/* Always 32 lowercase hex digits, whatever the digest happens to be. */
+		{
+			int  i;
+			int  ok = 1;
+
+			raQueueSign(4294967295u, "a", 0, v);
+			CHECK(strlen(v) == 32);
+			for (i = 0; i < 32; i++) {
+				if (!((v[i] >= '0' && v[i] <= '9') || (v[i] >= 'a' && v[i] <= 'f'))) {
+					ok = 0;
+				}
+			}
+			CHECK(ok);
+		}
+
+		/*
+		    The username goes in raw, not percent-encoded -- the server hashes what it decoded from
+		    u=. This is the case that would break only for accounts with a space in the name, which
+		    is exactly the kind of bug that ships, so the distinction is pinned rather than trusted.
+		*/
+		{
+			char raw[33];
+			char encoded[33];
+
+			raQueueSign(93119, "two words", 0, raw);
+			raQueueSign(93119, "two%20words", 0, encoded);
+			CHECK(strcmp(raw, encoded) != 0);
+		}
+	}
+
+	printf("\nand Success is read as a literal, not as a word in the reply\n");
+	{
+		CHECK(raNetJsonTrue("{\"Success\":true,\"Score\":1}", "Success"));
+		CHECK(raNetJsonTrue("{\"Success\": true}", "Success"));
+		CHECK(!raNetJsonTrue("{\"Success\":false,\"Error\":\"nope\"}", "Success"));
+		/*
+		    The failure this reader exists to avoid. `false` here, and the word `true` sitting in a
+		    title -- a search for "true" anywhere in the body would call this an awarded unlock.
+		*/
+		CHECK(!raNetJsonTrue("{\"Success\":false,\"Error\":\"is it true? no\"}", "Success"));
+		/* A missing key is false, which is the safe direction: refused-and-logged, not awarded. */
+		CHECK(!raNetJsonTrue("{\"Error\":\"x\"}", "Success"));
+		/* And a string that merely starts with the letters is not the literal. */
+		CHECK(!raNetJsonTrue("{\"Success\":\"true\"}", "Success"));
+	}
+}
+
 int main(void) {
 	test_rom_hash();
 	test_url_encode();
 	test_config();
 	test_stream();
 	test_patch();
+	test_queue();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",
 	       failures, failures == 1 ? "" : "s");

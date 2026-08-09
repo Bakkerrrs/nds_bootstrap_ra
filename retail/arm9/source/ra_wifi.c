@@ -132,6 +132,12 @@ static char          romHash[33];
 */
 static char          raToken[64];
 /*
+    The username the server itself used in the login reply. Not a secret -- it is on the account's
+    public page -- so unlike raToken it is logged, and it is a separate static because the signature
+    r=awardachievement wants must be computed over the same spelling that goes in u=.
+*/
+static char          raUser[sizeof(((raConfig*)0)->username)];
+/*
     Achievements the account already holds. 128 because RA_DEFS_MAX_LINES is 128 and a skip list
     longer than the set it filters would be pointless; a bigger set truncates and says so.
 */
@@ -534,6 +540,28 @@ static void raWifiLogin(const raConfig* cfg) {
 	if (raNetJsonString(response, "Token", raToken, sizeof(raToken))) {
 		verdict.loggedIn = 1;
 		raWifiLog("\x1b[32mlogged in, token %s\x1b[37m\n", raConfigRedact(raToken));
+		/*
+		    The account's own spelling of its name, which is not always what ra.cfg says -- RA
+		    matches the login case-insensitively and answers with the canonical form. It matters
+		    here and nowhere else: r=awardachievement's signature is an md5 over the username, so
+		    the launcher has to hash whatever it also sends in u=. Using the canonical one for both
+		    is what rcheevos does. If the reply has no User field, cfg's spelling stands, which is
+		    the behaviour we had before asking.
+		*/
+		/*
+		    Only on a clean read. raNetJsonString() leaves a *partial* copy behind when the value
+		    does not fit and returns false, so testing the buffer instead of the return value would
+		    adopt a truncated username -- and a truncated username signs every award wrong while
+		    looking entirely reasonable in the log. Same buffer size as ra.cfg's field, so the
+		    encoded form always fits the caller's buffer too.
+		*/
+		if (raNetJsonString(response, "User", raUser, sizeof(raUser))) {
+			if (strcmp(raUser, cfg->username) != 0) {
+				raWifiLog("the account is   %s\n", raUser);
+			}
+		} else {
+			sniprintf(raUser, sizeof(raUser), "%s", cfg->username);
+		}
 		return;
 	}
 
@@ -623,7 +651,207 @@ static void raWifiIdentify(void) {
 }
 
 /*
-    Stage 12: r=unlocks -- which of these has the account already earned.
+    Stage 12: r=awardachievement -- report what the last play session earned.
+
+    This closes the loop, and it is the first rung that sends something rather than asking something.
+    The cardengine cannot reach the network: it runs inside the game with the radio already torn down,
+    so an unlock is written to sd:/ra_unlocks.txt and sent here, one boot late. See RA_QUEUE_PATH.
+
+    Three things about the order and the rules, because each one is a decision rather than an
+    accident.
+
+    **It runs before r=unlocks.** If it ran after the fetch, the achievement just awarded would still
+    be in the staging block, would trigger again next session, and would be queued again -- a loop
+    that never drains. Sending first means the very next rung sees it in the account's unlocks and the
+    scanner leaves it out.
+
+    **An answer clears the record; silence keeps it.** The rule is about who has seen the id, not about
+    whether they liked it. A server that answered has the unlock (RA returns Success for an
+    already-unlocked achievement, and an error for one it will always refuse), so retrying forever
+    would only spam it. A request that never got an answer proved nothing, so that id is still owed and
+    survives into the next boot. Every refusal is logged with the server's own body -- the whole point
+    of a queue is that nothing disappears quietly.
+
+    **The file is rewritten in place, same length.** Truncating it could hand its clusters back, and
+    the cardengine half of this can only write into clusters that already exist.
+*/
+static void raWifiSubmitOne(const raConfig* cfg, u32 id, raQueue* q) {
+	static char   response[1024];
+	char          user[3 * sizeof(raUser)];
+	char          path[384];
+	char          signature[33];
+	raNetProgress p;
+	int           got;
+
+	/*
+	    Signed with the raw username, encoded with the escaped one. Both come from the same string,
+	    and the reason they must is in raQueueSign().
+	*/
+	raQueueSign(id, raUser, cfg->hardcore ? 1 : 0, signature);
+
+	if (!raNetUrlEncode(raUser, user, sizeof(user))) {
+		raWifiLog("\x1b[31musername too long to encode\x1b[37m\n");
+		q->kept++;
+		return;
+	}
+	if (sniprintf(path, sizeof(path),
+	              "/dorequest.php?r=awardachievement&u=%s&t=%s&a=%lu&h=%d&v=%s",
+	              user, raToken, (unsigned long)id, cfg->hardcore ? 1 : 0, signature)
+	    >= (int)sizeof(path)) {
+		raWifiLog("\x1b[31maward request too long\x1b[37m\n");
+		q->kept++;
+		return;
+	}
+
+	memset(&p, 0, sizeof(p));
+	got = raNetHttpGet(RA_NET_HOST, path, response, sizeof(response), &p);
+	raWifiReportAttempts("award", &p);
+	if (got < 0) {
+		/*
+		    Nobody saw it. Kept, and said out loud rather than folded into a total, because "the
+		    network dropped one" and "the server refused one" are different problems.
+		*/
+		raWifiLog("\x1b[33m  %lu  not sent (step %d), still owed\x1b[37m\n",
+		          (unsigned long)id, -got);
+		q->kept++;
+		return;
+	}
+
+	q->sent++;
+	if (raNetJsonTrue(response, "Success")) {
+		q->accepted++;
+		raWifiLog("\x1b[32m  %lu  awarded\x1b[37m\n", (unsigned long)id);
+		return;
+	}
+
+	/*
+	    Answered and not accepted. Cleared anyway -- see the rule above -- and the server's own words
+	    go in the log, because this is the one place where its reply is the only thing that can say
+	    whether the id was wrong, the signature was wrong, or it was already held.
+	*/
+	q->refused++;
+	{
+		char error[160];
+
+		if (raNetJsonString(response, "Error", error, sizeof(error))) {
+			raWifiLog("\x1b[33m  %lu  refused: %s\x1b[37m\n", (unsigned long)id, error);
+		} else {
+			raWifiLog("\x1b[33m  %lu  refused\x1b[37m\n", (unsigned long)id);
+			raWifiLog("  body: %s\n", raNetBody(response));
+		}
+	}
+}
+
+static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
+	const char* const path = sdFound ? RA_QUEUE_PATH : RA_QUEUE_PATH_FAT;
+	static char       file[RA_QUEUE_BYTES];
+	static raQueue    q;
+	u32               keep[RA_QUEUE_MAX];
+	int               keepCount = 0;
+	int               i;
+	FILE*             f;
+	size_t            got;
+
+	memset(&q, 0, sizeof(q));
+
+	f = fopen(path, "rb");
+	if (!f) {
+		/*
+		    No queue file is the normal state of a fresh install, and it is also what the cardengine
+		    needs created for it: it can write into clusters that exist and cannot allocate any. So
+		    the file is made here, full length, zero filled -- and this boot has nothing to send.
+		*/
+		f = fopen(path, "wb");
+		if (!f) {
+			raWifiLog("\x1b[33mno %s and it could not be created\x1b[37m\n", path);
+			return;
+		}
+		memset(file, 0, sizeof(file));
+		got = fwrite(file, 1, sizeof(file), f);
+		fclose(f);
+		if (got != sizeof(file)) {
+			raWifiLog("\x1b[33m%s is short -- the card refused a write\x1b[37m\n", path);
+			return;
+		}
+		verdict.submitDone = 1;
+		raWifiLog("queue            created, %d bytes, nothing owed\n", (int)sizeof(file));
+		return;
+	}
+
+	got = fread(file, 1, sizeof(file), f);
+	fclose(f);
+
+	raQueueScan(&q, file, (int)got);
+	if (q.count == 0) {
+		/*
+		    Read, and empty. A successful pass over the queue, which is why it counts as reaching the
+		    rung: most boots earn nothing and a ladder that stopped at 11 on those would be reporting
+		    a failure that did not happen.
+		*/
+		verdict.submitDone = 1;
+		raWifiLog("queue            empty (%d bytes read)\n", (int)got);
+		if (q.dropped) {
+			raWifiLog("\x1b[33m%d unusable value(s) in the file\x1b[37m\n", q.dropped);
+		}
+		return;
+	}
+
+	raWifiLog("queue            %d to send\n", q.count);
+	if (q.dropped) {
+		raWifiLog("\x1b[33m%d unusable value(s) ignored\x1b[37m\n", q.dropped);
+	}
+	if (q.truncated) {
+		raWifiLog("\x1b[33m%d beyond the %d the queue holds\x1b[37m\n", q.truncated, RA_QUEUE_MAX);
+	}
+
+	if (!raToken[0]) {
+		/*
+		    Nothing was sent, so nothing is cleared. The ids stay in the file and the next boot with a
+		    working login sends them -- which is the behaviour a queue is for.
+		*/
+		raWifiLog("\x1b[33mno token; %d unlock(s) stay queued\x1b[37m\n", q.count);
+		verdict.submitKept = (u16)q.count;
+		return;
+	}
+
+	for (i = 0; i < q.count; i++) {
+		const int before = q.kept;
+
+		raWifiSubmitOne(cfg, q.ids[i], &q);
+		if (q.kept > before) {
+			keep[keepCount++] = q.ids[i];
+		}
+	}
+
+	verdict.submitDone     = 1;
+	verdict.submitAccepted = (u16)q.accepted;
+	verdict.submitRefused  = (u16)q.refused;
+	verdict.submitKept     = (u16)q.kept;
+
+	raWifiLog("awarded %d, refused %d, still owed %d\n", q.accepted, q.refused, q.kept);
+
+	/*
+	    Rewrite whatever is still owed, over the same length. Done even when keepCount is 0 -- that is
+	    the clearing case and it is the common one.
+	*/
+	if (raQueuePack(&q, keep, keepCount, file, sizeof(file)) < 0) {
+		raWifiLog("\x1b[31mthe queue could not be packed; %s left alone\x1b[37m\n", path);
+		return;
+	}
+	f = fopen(path, "rb+");
+	if (!f) {
+		raWifiLog("\x1b[33mcould not rewrite %s; ids may be sent twice\x1b[37m\n", path);
+		return;
+	}
+	got = fwrite(file, 1, sizeof(file), f);
+	fclose(f);
+	if (got != sizeof(file)) {
+		raWifiLog("\x1b[33m%s is short -- ids may be sent twice\x1b[37m\n", path);
+	}
+}
+
+/*
+    Stage 13: r=unlocks -- which of these has the account already earned.
 
     Runs before the fetch, because that is the only order in which it helps: the block is 88% full
     with a set of this size, and every definition already earned is one that does not need to be in
@@ -1230,11 +1458,20 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	    not boot a game -- see RA_LAUNCHER_WIFI -- so what it proves is that the definitions
 	    arrive and fit, which is the question. Running them is step 4.
 	*/
-	raWifiLog("\n-- stage 12: what has this account already earned --\n");
+	/*
+	    Before r=unlocks on purpose, and the reason is the loop rather than tidiness: an achievement
+	    reported here is one the next rung sees the account holding, so the scanner leaves it out of
+	    the block and it does not trigger again next session. See RA_WIFI_STAGE_SUBMIT.
+	*/
+	raWifiLog("\n-- stage 12: report what the last session earned --\n");
+	raWifiSubmit(&config, sdFound);
+	raWifiReportHeap("after award");
+
+	raWifiLog("\n-- stage 13: what has this account already earned --\n");
 	raWifiUnlocks(&config);
 	raWifiReportHeap("after unlocks");
 
-	raWifiLog("\n-- stage 13: fetch the set --\n");
+	raWifiLog("\n-- stage 14: fetch the set --\n");
 	raWifiFetchPatch(&config);
 	raWifiReportHeap("after patch");
 
@@ -1288,6 +1525,13 @@ done:
 	} else {
 		raWifiLog("GameID           %s\n", verdict.gameId == 0 ? "unknown to the server" : "not asked");
 	}
+	/*
+	    Reported unconditionally, including as three zeros. `submitted` at 0/0/0 says the queue was
+	    read and was empty, which is the normal boot; the line missing would leave no way to tell that
+	    from a rung that never ran.
+	*/
+	raWifiLog("submitted        %u ok, %u refused, %u owed\n",
+	          verdict.submitAccepted, verdict.submitRefused, verdict.submitKept);
 	if (verdict.unlocksKnown) {
 		raWifiLog("already earned   %u\n", verdict.unlockCount);
 	} else {
@@ -1311,6 +1555,8 @@ done:
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);
 	if (stage >= RA_WIFI_STAGE_PATCHED) {
 		raWifiLog("the set is staged for the cardengine.\n");
+	} else if (stage >= RA_WIFI_STAGE_SUBMIT) {
+		raWifiLog("the queue is reported; the set is what is missing.\n");
 	} else if (stage >= RA_WIFI_STAGE_IDENTIFIED) {
 		raWifiLog("logged in, and the server knows the ROM.\n");
 	} else if (stage >= RA_WIFI_STAGE_LOGGED_IN) {
@@ -1334,6 +1580,9 @@ done:
 	    The definitions go out here, deliberately after the summary is already on the card. See
 	    raWifiDumpDefinitions(): this is the largest SD write of the run and the link is still up.
 	*/
+	if (verdict.submitKept) {
+		raWifiLog("still owed       %u, next boot\n", verdict.submitKept);
+	}
 	if (verdict.unlocksKnown) {
 		raWifiLog("already earned   %u\n", verdict.unlockCount);
 	} else {

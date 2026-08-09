@@ -597,6 +597,39 @@ bool raNetJsonNumber(const char* json, const char* key, u32* out) {
 }
 
 /*
+    Pull one *boolean* field out of a JSON object.
+
+    A third reader rather than a case in the other two, because the failure it has to avoid is
+    specific: `r=awardachievement` answers `{"Success":true,...}` and `{"Success":false,"Error":...}`,
+    and those two replies differ by five characters in a body that is otherwise identical. Reaching
+    for strstr(body, "true") anywhere in the reply would find the word inside an achievement title
+    just as happily.
+
+    So it matches `"key":` and then requires the value to be exactly the literal `true`. Anything
+    else -- `false`, a number, a string, a missing key -- is false, and false is the safe direction:
+    it means an id stays reported as refused with the body logged, rather than an unlock being
+    counted as awarded because the word appeared somewhere.
+*/
+bool raNetJsonTrue(const char* json, const char* key) {
+	char        needle[40];
+	const char* at;
+
+	if (sniprintf(needle, sizeof(needle), "\"%s\":", key) >= (int)sizeof(needle)) {
+		return false;
+	}
+	at = strstr(json, needle);
+	if (!at) {
+		return false;
+	}
+	at += strlen(needle);
+
+	while (*at == ' ' || *at == '\t') {
+		at++;
+	}
+	return strncmp(at, "true", 4) == 0;
+}
+
+/*
     A JSON array of bare integers, into a caller-supplied array.
 
     `r=unlocks` answers `{"Success":true,"UserUnlocks":[93119,93120],"GameID":14856}`, and this is the

@@ -4123,13 +4123,17 @@ space rather than correctness.
 
 | | |
 | --- | --- |
-| `already earned    N` in stage 12 | how many the account holds, from the server |
-| `  earned id      X` in stage 12 | the ids themselves, up to eight, labelled `(server notice)` past `RA_ODD_ID_FROM` |
-| `already earned   M of N matched this set` in stage 13 | how many of those were in this set, printed even when M is 0 |
+| `already earned    N` | how many the account holds, from the server |
+| `  earned id      X` | the ids themselves, up to eight, labelled `(server notice)` past `RA_ODD_ID_FROM` |
+| `already earned   M of N matched this set` | how many of those were in this set, printed even when M is 0 |
 | `N named id(s) this set does not contain` | yellow, and only for a remainder the notices do not explain |
 | `definitions      M kept` | should be 55 minus that |
 | `block ... used` | should fall by the same definitions' worth |
 | `reached stage 13 of 13` | the ladder grew a rung |
+
+The rung numbers in this section are the ones this step shipped with. Step 6b later inserted
+`r=awardachievement` at 12 and pushed these to 13 and 14 — the lines themselves are unchanged, and the
+logs quoted above still say 12 and 13 because that is what they said.
 
 A fresh account on this game reads `already earned 0` and changes nothing, which is the useful
 control: the stage is proven by an account that *has* unlocks, so the number to compare against is
@@ -4323,6 +4327,190 @@ side effect.
 The second reading is smaller and worth writing down: **the retry has now not fired for two full runs.**
 Six sockets, all first-try. The lwip race has been observed exactly once and the mitigation for it has
 never been observed working. That is the correct thing to say about it.
+
+## Step 6b: closing the loop with `r=awardachievement`
+
+An achievement earned while playing cannot be reported when it happens. The cardengine runs inside
+the game, on the game's IRQ stack, with the radio torn down before the game ever started — there is no
+socket to write to and no CPU free to bring one up. So the unlock is written to a file and the **next**
+boot's launcher sends it. An unlock is late, not lost.
+
+That splits the step in two, and the split is what makes it testable:
+
+- **3a, the sending half.** Read a queue file, sign each id, submit it, report, clear. Touches the
+  network and nothing else. Provable *today* by typing an id into a file with a text editor.
+- **3b, the writing half.** The cardengine appends to that file when rcheevos fires. Needs a
+  cross-CPU handoff that does not exist yet — see below.
+
+3a is what is built. Doing it first is not laziness about 3b: the signature and the API's answers are
+the unknowns, and finding out that the protocol is wrong should not require touching the ARM7
+cardengine that every non-RA path in nds-bootstrap also uses.
+
+### The rung goes *before* `r=unlocks`, and that is the whole design
+
+The submit is **stage 12**, which pushed unlocks to 13 and the fetch to 14. The order is not
+housekeeping.
+
+Suppose the submit ran last. We award 93119, then fetch the set — which still contains 93119, because
+the account's unlocks were read *before* the award landed. The definition stages, the game triggers it
+again next session, it gets queued again, and it is awarded again on the boot after that. Forever.
+
+Sending first means the server already knows about it when the next rung asks what the account holds,
+so the scanner leaves it out of the block. The loop drains instead of spinning. Three consecutive rungs,
+each genuinely depending on the one before it:
+
+```
+11  r=gameid            what game is this
+12  r=awardachievement  here is what last session earned
+13  r=unlocks           so what does the account hold now
+14  r=patch             fetch, minus those
+```
+
+`tools/ra_reader_test.c` walks all three in order and pins them consecutive, because renumbering three
+constants by hand is exactly the edit that leaves a gap — and a gap makes `reached stage N of 14` mean
+nothing.
+
+### The signature, which is the only part that is expensive to get wrong
+
+`v=` is what makes the server believe an unlock came from an account rather than from anyone who knows
+an id. RetroAchievements answers a wrong one with a generic refusal that says nothing about hashing —
+so a mistake there is indistinguishable, from a console, from a wrong achievement id.
+
+The formula was **read, not remembered**, out of the vendored copy at
+`retail/cardenginei/arm9_ra/rcheevos/src/rapi/rc_api_runtime.c`:
+
+```c
+md5_init(&md5);
+snprintf(buffer, sizeof(buffer), "%u", api_params->achievement_id);
+md5_append(&md5, buffer, strlen(buffer));
+md5_append(&md5, api_params->username, strlen(api_params->username));
+snprintf(buffer, sizeof(buffer), "%d", api_params->hardcore ? 1 : 0);
+md5_append(&md5, buffer, strlen(buffer));
+```
+
+So `v = md5(id ‖ username ‖ hardcore)`, decimal text, no separators. The two extra appends further down
+that function only exist when a delegated unlock sends `o=` (seconds since the unlock), which this
+client does not.
+
+And it is pinned against an oracle this code had no part in producing:
+
+```
+printf '93119Bakke0' | md5sum   ->  d9ac96231a45f0f275747a84a4c9271d
+printf '1Cheevos1'   | md5sum   ->  4787f01ee76713835a4f3bd5de506ec1
+```
+
+Both are `CHECK`s in `tools/ra_launcher_test.c`. The suite also pins that hardcore changes the digest —
+otherwise the flag could be absent from the hash and nothing would notice — and that the digest is
+always 32 lowercase hex.
+
+#### The raw username, not the encoded one
+
+`u=` in the URL is percent-encoded; the hash is over the raw name, because the server hashes what it
+decoded. Getting that backwards breaks exactly the accounts with a space in the name and no others,
+which is the kind of bug that ships. So the test signs `"two words"` and `"two%20words"` and asserts
+they differ.
+
+The name itself comes from the login reply's `User` field rather than from `ra.cfg`, because RA matches
+logins case-insensitively and answers with the canonical spelling — and the hash has to be over the same
+string that goes in `u=`. Two details there, both of which would have been quiet bugs:
+
+- it is adopted **only when `raNetJsonString()` returns true**. That function leaves a partial copy
+  behind when the value does not fit, so testing the buffer instead of the return value would adopt a
+  *truncated* username — which signs every award wrong while looking entirely reasonable in the log;
+- `raUser` is declared `sizeof(((raConfig*)0)->username)`, so the percent-encoded form always fits the
+  caller's `3 * sizeof` buffer. A 64-byte name and a 99-byte encode buffer was the version before this.
+
+### The file format, and the two constraints that pick it
+
+`sd:/ra_unlocks.txt`, fixed 1,024 bytes, 64 records of 16.
+
+**Fixed-size records, because of 3b.** The cardengine can only write into clusters that already exist
+— that is how every file nds-bootstrap writes from inside a game works, `fileWrite()` against an
+`aFile` the launcher pre-opened. So the launcher creates the file at full length and it never changes
+length; record N is at offset `N * 16`, an offset the cardengine can compute without reading anything
+first. Clearing is done **in place, zeros over the same length**, for the same reason: truncating could
+hand the clusters back.
+
+**ASCII decimal, because of 3a.** A human has to be able to type an id into it. That is what lets the
+sending half be tested before the writing half exists, and it is how the next hardware run works.
+
+Both are satisfied by the most forgiving parser in this project: every non-digit is a separator, **NUL
+padding included**, so the cardengine's 16-byte records and a line typed in a text editor parse
+identically. `#` to end of line is a comment, so a note left in the file cannot become a spurious
+unlock — the test pins that `# 93119 was earned` awards nothing.
+
+What it refuses rather than mangles is the same correction `ra_patch.c` and `ra_take_id()` both needed:
+a run of digits that overflows u32 is **dropped and counted**, never truncated, because a shortened id
+is a *different achievement*. `4294967295` survives; `4294967296` and `99999999999` are dropped. Zero
+is dropped too — rcheevos refuses id 0 outright, and it is what a field of NUL padding would read as if
+padding were ever mistaken for digits.
+
+### An answer clears the record; silence keeps it
+
+The rule is about who has seen the id, not about whether they liked it.
+
+| what happened | the record is | why |
+| --- | --- | --- |
+| `Success:true` | cleared | it landed |
+| the server answered and refused | cleared | it has seen the id; RA returns Success even for an already-held achievement, so a refusal is one it will keep refusing. Retrying forever would only spam it |
+| the request never got an answer | **kept** | nothing was proved. It is still owed, and the next boot sends it |
+| no token this boot | **kept**, none sent | a login that failed is not a reason to lose an unlock |
+
+Every refusal is logged with the server's own `Error` string, and the body verbatim when there isn't
+one. The whole point of a queue is that nothing disappears quietly.
+
+`Success` is read by a third JSON reader, `raNetJsonTrue()`, rather than by a case in the other two.
+The reply is `{"Success":true,...}` or `{"Success":false,"Error":...}` — five characters apart in an
+otherwise identical body — so it matches `"Success":` and then requires the literal `true`. A
+`strstr(body, "true")` would find the word inside an achievement title just as happily. A missing key
+is false, which is the safe direction: refused-and-logged beats counted-as-awarded.
+
+### What to read on the next run
+
+`stage 12` is new and the fetch has moved to 14. The first boot with this build has an empty queue, so
+what it proves is the plumbing:
+
+| | |
+| --- | --- |
+| `queue            created, 1024 bytes, nothing owed` | first boot ever — the file did not exist and now does |
+| `queue            empty (1024 bytes read)` | every boot after that, with nothing earned |
+| `submitted        0 ok, 0 refused, 0 owed` | in the summary, printed even as three zeros |
+| `reached stage 14 of 14` | the ladder grew a rung |
+| `heap after award` | 2.3 KB more `.bss` than before; this line is where that shows |
+
+Then the real test, and it needs no code: **put a real id in the file by hand.** Write `93119` into
+`sd:/ra_unlocks.txt` and boot. That single run answers two questions at once —
+
+- whether the signature and the request are right at all, which nothing local can establish;
+- and **whether `r=unlocks` and `r=patch` share a numbering**, which the last run explicitly could not
+  settle. If `93119` is accepted, the boot after it should read `already earned 2` with `earned id
+  93119` next to the notice, and `definitions 54 kept` instead of 55 — the awarded achievement filtered
+  out of the block by the rung below. That is the loop closing, observed rather than argued.
+
+If instead it is refused, the server's `Error` string is in the log and says which of the two it was.
+
+### What is not built, and what it needs
+
+3b — the cardengine writing to the queue — is not started. Sizing it honestly, from reading the code
+rather than guessing:
+
+- `retail/cardenginei/arm9_ra/source/` contains **no** FIFO or `sharedAddr` use at all. It cannot talk
+  to the ARM7 today.
+- `fileWrite()` and the `aFile`/cluster machinery live in the **ARM7** cardengine
+  (`retail/cardenginei/arm7/source/cardengine.c`), which gets clusters from the launcher through the
+  ce7 struct — `srParamsCluster`, `ramDumpCluster` — and calls `getFileFromCluster()`.
+- The channel between the two exists and is already used by the non-RA ARM9 engine: `sharedAddr[0..2]`
+  for arguments, `sharedAddr[3]` as the command word.
+
+So 3b is: a new cluster in the ce7 struct, a new command on `sharedAddr[3]`, and an `aFile` in the ARM7
+engine. That is a small amount of code in a file that every game nds-bootstrap boots depends on, which
+is why it is worth doing only once 3a has been shown to work end to end.
+
+One known inaccuracy to write down now rather than discover later: unlocks are submitted **without
+`o=`**, so RetroAchievements timestamps them at the moment they are sent, not the moment they were
+earned. For a queue drained on the next boot that is usually minutes to days out. The fix is the `o=`
+parameter plus the DSi's RTC read at both ends, and it changes the signature to the four-append form
+in the code quoted above.
 
 ## Known graphical limitations of the overlay (deferred)
 
@@ -4739,5 +4927,11 @@ question of which one to believe.
       `rc_client` remains ruled out, see open question #4.
 - [ ] Phase 2 rest: a real achievement set, which needs the client and therefore the
       network transport — open question #1 is now the critical path.
-- [ ] Phase 3: real network, softcore unlocks
+- [ ] Phase 3: real network, softcore unlocks. The read half is **confirmed on hardware**:
+      login, `r=gameid`, `r=unlocks` and `r=patch` all answer over plain HTTP from the
+      launcher, the radio comes back down, and the game boots with the server's own 55
+      definitions staged. The write half is half-built — `r=awardachievement` is
+      implemented, signed against rcheevos' own formula and pinned to a coreutils oracle,
+      but it has never been exercised against the server, and the cardengine cannot yet
+      write to the queue it drains. See step 6b.
 - [ ] Phase 4: rich presence, achievement list, login status

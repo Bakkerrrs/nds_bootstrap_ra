@@ -179,6 +179,15 @@ int raWifiVerdictStage(const raWifiVerdict* v) {
 	if (v->unlocksKnown) {
 		return RA_WIFI_STAGE_UNLOCKS;
 	}
+	/*
+	    Reporting the queue is its own rung, and "there was nothing to report" reaches it: the rung
+	    measures whether the pass over the queue completed, not whether the player earned anything.
+	    Most boots earn nothing, and a ladder that read 11 on those would be describing a failure that
+	    did not happen. See raWifiVerdict.submitDone.
+	*/
+	if (v->submitDone) {
+		return RA_WIFI_STAGE_SUBMIT;
+	}
 	if (v->identified) {
 		return RA_WIFI_STAGE_IDENTIFIED;
 	}

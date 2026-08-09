@@ -91,6 +91,55 @@
 #define RA_DEFS_DUMP_PATH_FAT  "fat:/ra_definitions.txt"
 
 /*
+    The unlock queue: what the last play session earned, waiting to be sent.
+
+    There is no way for the cardengine to reach the network. It runs inside the game, on the game's
+    IRQ stack, with the radio torn down before the game ever started -- so an achievement earned
+    while playing cannot be reported when it happens. It gets written here, and the *next* boot's
+    launcher sends it. That is the whole shape of the loop, and it means an unlock is reported late
+    rather than never.
+
+    Two constraints decide the format, and they pull in opposite directions.
+
+    The cardengine can only write into clusters that are already allocated -- that is how every other
+    file nds-bootstrap writes from inside a game works (see fileWrite() and the srParams file). So
+    the file is created by the launcher at a fixed size and never changes length: records are a fixed
+    RA_QUEUE_RECORD bytes and record N lives at offset N*RA_QUEUE_RECORD, which is an offset the
+    cardengine can compute without reading anything.
+
+    And it has to be writable by hand, because that is what makes the sending half testable before
+    the writing half exists: type an id into the file with any text editor, boot, and watch the
+    server's answer. So the records are ASCII decimal and the parser treats every non-digit -- NUL
+    padding included -- as a separator.
+
+    Clearing is done in place, zeros over the same length, for the first reason: truncating the file
+    could hand its clusters back and break the allocation the cardengine depends on.
+*/
+#define RA_QUEUE_PATH          "sd:/ra_unlocks.txt"
+#define RA_QUEUE_PATH_FAT      "fat:/ra_unlocks.txt"
+#define RA_QUEUE_RECORD        16                              /* one id, ASCII, NUL-padded */
+#define RA_QUEUE_MAX           64                              /* a session earning more is not a thing */
+#define RA_QUEUE_BYTES         (RA_QUEUE_RECORD * RA_QUEUE_MAX)
+
+/*
+    What one pass over the queue did, so the log can say it rather than imply it.
+
+    `kept` is the number that has to survive into the next boot, and it is the field that makes this
+    a queue rather than a fire-and-forget: an id whose request never reached the server is still
+    owed. See raWifiSubmit() for the rule that decides between kept and cleared.
+*/
+typedef struct raQueue {
+	u32  ids[RA_QUEUE_MAX];  /* what the file held, deduped, in file order */
+	int  count;              /* how many of those */
+	int  dropped;            /* unparseable or out of range, so the file said something we ignored */
+	int  truncated;          /* the file held more than RA_QUEUE_MAX */
+	int  sent;               /* the server answered, whatever it answered */
+	int  accepted;           /* ...and said Success */
+	int  refused;            /* ...and said otherwise; the body is logged */
+	int  kept;               /* never got an answer, so still owed */
+} raQueue;
+
+/*
     The ladder, and it only moves forward. Five rungs against the probe's six: rungs 1-3
     are the chip coming up, 4-5 are the link becoming usable, and the probe's stages 3-6
     (DNS, TCP, HTTP) are step three of the plan rather than this one.
@@ -111,12 +160,24 @@
 #define RA_WIFI_STAGE_LOGGED_IN   10 /* r=login returned a token for the configured user */
 #define RA_WIFI_STAGE_IDENTIFIED  11 /* r=gameid turned the ROM's hash into a GameID */
 /*
+    r=awardachievement for whatever the last play session earned, and it comes *first* of the three
+    game-specific rungs for a reason that is not politeness.
+
+    The cardengine cannot reach the network, so an unlock earned while playing is written to a queue
+    file and sent on the next boot. If that send happened after the fetch, the achievement just
+    awarded would still be in the block, would trigger again next session, and would be queued again
+    -- forever. Sending before r=unlocks means the server already knows about it when we ask what the
+    account holds, so the very next rung filters it out of the block. The ordering is what makes the
+    loop close instead of spin.
+*/
+#define RA_WIFI_STAGE_SUBMIT      12
+/*
     r=unlocks, and it sits *before* the patch because that is the only order in which it is useful:
     knowing which achievements the account already has is what lets the scanner leave them out of a
     block that is 88% full.
 */
-#define RA_WIFI_STAGE_UNLOCKS     12
-#define RA_WIFI_STAGE_PATCHED     13 /* r=patch put real definitions in the staging block */
+#define RA_WIFI_STAGE_UNLOCKS     13
+#define RA_WIFI_STAGE_PATCHED     14 /* r=patch put real definitions in the staging block */
 #define RA_WIFI_STAGE_MAX         RA_WIFI_STAGE_PATCHED
 
 /*
@@ -152,6 +213,15 @@ typedef struct raWifiVerdict {
 	u8   apiOk;
 	u8   loggedIn;         /* r=login returned a token */
 	u8   identified;       /* r=gameid returned a non-zero GameID */
+	/*
+	    The submit rung completed -- which includes having nothing to submit. An empty queue is a
+	    successful pass over it, and letting it read as a failure would cap the ladder at 11 on every
+	    boot that did not earn anything, which is most of them.
+	*/
+	u8   submitDone;
+	u16  submitAccepted;   /* ids the server took */
+	u16  submitRefused;    /* ids it answered about and did not take */
+	u16  submitKept;       /* ids still owed, carried to the next boot */
 	u8   unlocksKnown;     /* r=unlocks answered, so the skip list is trustworthy */
 	u16  unlockCount;      /* how many the account already has */
 	u8   patched;          /* r=patch produced at least one definition */
@@ -477,6 +547,7 @@ int         raNetHttpGet(const char* host, const char* path, char* out, int outS
 const char* raNetBody(const char* response);
 bool        raNetJsonString(const char* json, const char* key, char* out, size_t outSize);
 bool        raNetJsonNumber(const char* json, const char* key, u32* out);
+bool        raNetJsonTrue(const char* json, const char* key);
 /*
     Step 6's prerequisite: `"UserUnlocks":[93119,93120,...]` into an array of ids. Returns how many
     were read, or -1 if the key is absent -- and the difference matters, because an empty list is a
@@ -499,6 +570,29 @@ int  raNetHttpGetStream(const char* host, const char* path, raNetSink sink, void
 void raPatchReset(raPatch* p, char* block, u32 blockMax);
 void raPatchFeed(void* p, const char* data, int length);
 void raPatchFinish(raPatch* p);
+
+/*
+    Step 3a. The unlock queue, and every part of it that does not touch the network or the SD card.
+
+    Split out for the same reason ra_patch.c was: this is the logic that is expensive to debug on a
+    console and cheap to pin on a PC. In particular raQueueSign() -- a wrong signature is rejected by
+    the server with a message that does not say "your hash is wrong", so it is pinned against digests
+    computed by coreutils rather than by this code.
+*/
+void raQueueScan(raQueue* q, const char* text, int length);
+int  raQueuePack(const raQueue* q, const u32* keep, int keepCount, char* out, int outSize);
+/*
+    v=, the parameter that makes the server believe the unlock came from an account rather than from
+    anyone who knows an id. md5 of the id, the username and the hardcore flag, concatenated as
+    decimal text with no separators -- the formula is rcheevos'
+    rc_api_init_award_achievement_request_hosted(), read out of the vendored copy rather than
+    remembered. `out` needs 33 bytes.
+
+    The username must be the *raw* one, not the URL-encoded form that goes in u=: the server hashes
+    what it decoded. Getting that backwards is a signature failure on any account with a space in it
+    and on no other, which is exactly the kind of bug that ships.
+*/
+void raQueueSign(u32 id, const char* username, int hardcore, char* out);
 
 /* The ARM7 half: hand this CPU to dsiwifi. One call, and where it goes matters. */
 void raWifiInstall(void);

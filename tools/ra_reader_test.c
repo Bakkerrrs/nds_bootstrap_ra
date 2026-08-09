@@ -385,14 +385,41 @@ static void test_wifi_verdict(void) {
 	    stopped at 12 of 13.
 	*/
 	/*
-	    r=unlocks, which sits between the two: further than knowing the game, less far than having
-	    the set. Checked in order so a rung inserted without thinking about the order fails here.
+	    Then the three game-specific rungs, set one at a time and checked in order, so a rung
+	    inserted without thinking about where it belongs fails here rather than on a console.
+
+	    The order is the loop: report what the last session earned, *then* ask what the account
+	    holds, *then* fetch. Reversing the first two would leave a just-awarded achievement in the
+	    block to trigger and re-queue forever -- see RA_WIFI_STAGE_SUBMIT.
 	*/
+	v.submitDone = 1;
+	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_SUBMIT);
 	v.unlocksKnown = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_UNLOCKS);
 	v.patched = 1;
 	CHECK(raWifiVerdictStage(&v) == RA_WIFI_STAGE_PATCHED);
 	CHECK(RA_WIFI_STAGE_PATCHED == RA_WIFI_STAGE_MAX);
+	/*
+	    And the rungs are consecutive. Renumbering three constants by hand is exactly the edit that
+	    leaves a gap, and a gap makes "reached stage N of 14" mean nothing.
+	*/
+	CHECK(RA_WIFI_STAGE_SUBMIT == RA_WIFI_STAGE_IDENTIFIED + 1);
+	CHECK(RA_WIFI_STAGE_UNLOCKS == RA_WIFI_STAGE_SUBMIT + 1);
+	CHECK(RA_WIFI_STAGE_PATCHED == RA_WIFI_STAGE_UNLOCKS + 1);
+	/*
+	    A queue pass that found nothing still reaches the rung. Most boots earn nothing, and if the
+	    empty case did not count, the ladder would report a failure at 11 on almost every run.
+	*/
+	{
+		raWifiVerdict empty;
+
+		raWifiVerdictReset(&empty);
+		empty.loggedIn   = 1;
+		empty.identified = 1;
+		empty.submitDone = 1;
+		CHECK(empty.submitAccepted == 0 && empty.submitKept == 0);
+		CHECK(raWifiVerdictStage(&empty) == RA_WIFI_STAGE_SUBMIT);
+	}
 
 	/*
 	    The step-3 run, which reached stage 9. Its narration carries the same five rungs and
@@ -456,7 +483,7 @@ static void test_wifi_verdict(void) {
 
 int main(void) {
 	u32 offsets[RA_CHAIN_MAX];
-	int i, slot;
+	int i;
 
 	/*
 	    Map the I/O page: the diagnostic watch reads the sub engine's DISPCNT, so that
