@@ -657,26 +657,22 @@ static void test_patch(void) {
 		CHECK(strcmp(block, "0xH1=1\n77:0xH2=2\n") == 0);
 
 		/*
-		    Nine digits, from the real set, and ten, which a u32 holds. The clamp this replaced
-		    stopped at 100,000,000 and would have turned a ten-digit id into a nine-digit one.
+		    Eight digits, just under the notice threshold, so it is a real id and stages as one. The
+		    parser's own boundaries -- nine digits, the u32 maximum, and past it -- are exercised
+		    against ra_take_id() in tools/ra_reader_test.c, where no threshold intervenes.
 		*/
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch, "{\"ID\":99999999,\"MemAddr\":\"0xH1=1\",\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.withId == 1 && patch.oddIds == 0);
+		CHECK(strcmp(block, "99999999:0xH1=1\n") == 0);
+
+		/* And one digit more is a server notice: dropped, counted, not staged. */
 		raPatchReset(&patch, block, sizeof(block) - 1);
 		patchFeedAll(&patch, "{\"ID\":101000001,\"MemAddr\":\"1=1.300.\",\"Flags\":3}");
 		raPatchFinish(&patch);
-		CHECK(patch.kept == 1 && patch.withId == 1);
-		CHECK(strcmp(block, "101000001:1=1.300.\n") == 0);
-
-		raPatchReset(&patch, block, sizeof(block) - 1);
-		patchFeedAll(&patch, "{\"ID\":4294967295,\"MemAddr\":\"0xH1=1\",\"Flags\":3}");
-		raPatchFinish(&patch);
-		CHECK(strcmp(block, "4294967295:0xH1=1\n") == 0);
-
-		/* And past a u32 it is refused rather than shortened, so the line stages without an id. */
-		raPatchReset(&patch, block, sizeof(block) - 1);
-		patchFeedAll(&patch, "{\"ID\":99999999999,\"MemAddr\":\"0xH1=1\",\"Flags\":3}");
-		raPatchFinish(&patch);
-		CHECK(patch.kept == 1 && patch.withId == 0 && patch.withoutId == 1);
-		CHECK(strcmp(block, "0xH1=1\n") == 0);
+		CHECK(patch.kept == 0 && patch.oddIds == 1);
+		CHECK(block[0] == 0);
 
 		/*
 		    An id nobody can explain is *counted and captured*, not filtered. The set for GameID
@@ -692,7 +688,15 @@ static void test_patch(void) {
 			"{\"ID\":101000001,\"MemAddr\":\"1=1.300.\",\"Title\":\"Odd One\","
 			"\"Points\":0,\"Flags\":3}");
 		raPatchFinish(&patch);
-		CHECK(patch.kept == 2);
+		/*
+		    One kept, not two: the odd one is a server notice and is dropped. What it *is* was
+		    established from hardware -- the capture read `"Title":"Warning: Unknown Emulator"` with
+		    zero Points and an empty Author -- so this is a filter against evidence rather than
+		    against a threshold.
+		*/
+		CHECK(patch.kept == 1);
+		CHECK(patch.withId == 1);
+		CHECK(strcmp(block, "93121:0xH1=1\n") == 0);
 		CHECK(patch.oddIds == 1 && patch.oddId == 101000001);
 		/* The capture starts at the byte after the id's digits, so the fields follow it verbatim. */
 		CHECK(strstr(patch.oddContext, "Odd One") != NULL);

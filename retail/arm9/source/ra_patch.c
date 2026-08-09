@@ -177,11 +177,36 @@ static void raPatchCommit(raPatch* p) {
 		    here rather than measured separately so `wanted` stays the one number that answers
 		    "would a complete set have fit".
 		*/
+		/*
+		    Not an achievement, and now that is known rather than suspected.
+
+		    The capture this scanner takes around such an id came back reading
+		    `"Title":"Warning: Unknown Emulator","Description":"Hardcore unlocks cannot be earned
+		    using this emulator.","MemAddr":"1=1.300.","Points":0,"Author":""`. **The server injects
+		    it** -- it is a message to the player wearing an achievement's clothes, delivered as
+		    always-true-after-300-frames so that a normal RA client pops it up. Which also retires the
+		    theory that a flat scan was reading across this game's subsets: the entry is in
+		    `Achievements` with `Flags` 3 because RetroAchievements put it there.
+
+		    So it is dropped rather than staged. It is not something a player earned, its Points are
+		    zero, its Author is empty, and staging it spent 19 bytes of an 88%-full block on an
+		    entry that step 6 would then try to award on every boot. Counted and its context logged,
+		    so the server's message reaches the log even though the definition does not reach the
+		    game.
+		*/
 		if (p->pendingId >= RA_ODD_ID_FROM) {
 			p->oddIds++;
 			if (p->oddId == 0) {
 				p->oddId = p->pendingId;
 			}
+			p->pendingOpen   = 0;
+			p->pendingBad    = 0;
+			p->pendingSeen   = 0;
+			p->pendingLength = 0;
+			p->flagsSeen     = 0;
+			p->flags         = 0;
+			p->pendingId     = 0;
+			return;
 		}
 		if (p->pendingId) {
 			p->withId++;

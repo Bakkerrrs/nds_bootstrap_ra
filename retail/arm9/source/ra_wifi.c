@@ -733,8 +733,15 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	    rather than to infer a filter from a threshold. See RA_ODD_ID_FROM.
 	*/
 	if (patch.oddIds) {
-		raWifiLog("\x1b[33m%u id(s) at or above %u, first %lu\x1b[37m\n",
-		          patch.oddIds, (unsigned)RA_ODD_ID_FROM, (unsigned long)patch.oddId);
+		/*
+		    The server's own message to the player, passed through rather than swallowed. The first
+		    one read "Warning: Unknown Emulator -- Hardcore unlocks cannot be earned using this
+		    emulator", which is RetroAchievements telling us it does not recognise the User-Agent
+		    this client sends. Worth seeing on every run, because it is the server's answer to a
+		    question this project has not asked it yet.
+		*/
+		raWifiLog("\x1b[33m%u server notice(s) dropped, first id %lu\x1b[37m\n",
+		          patch.oddIds, (unsigned long)patch.oddId);
 		raWifiLog("context: %s\n", patch.oddContext);
 	}
 	if (patch.dropped || patch.tooLong || patch.cutShort || patch.empty

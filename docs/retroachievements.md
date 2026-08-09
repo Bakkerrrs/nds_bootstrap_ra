@@ -137,11 +137,13 @@ apart, because they have different fixes.
 `56 with, 0 without`, all distinct — and `rcFirstId` read **101000001**, matching line 1 of the dump
 to the digit across eight hops.
 
-**The next thing is not code, it is one lookup.** `101000001` is nine digits where every other id in
-the set is between 92,869 and 579,308, its definition is `1=1.300.`, and it unlocks five seconds into
-every session. Step 6 would report that to the server on every boot, so
-`retroachievements.org/achievement/101000001` needs checking before anything reports. See
-*Confirmed on hardware: the ids arrived* below.
+**And `101000001` turned out to be the server talking to us.** Captured verbatim from the reply:
+`"Title":"Warning: Unknown Emulator","Description":"Hardcore unlocks cannot be earned using this
+emulator."` — RetroAchievements injects it as a fake always-true achievement because it does not
+recognise this client's User-Agent. It is dropped now, on evidence rather than on a threshold. The
+standing item it leaves is not code: **getting the client recognised by RetroAchievements** is a
+conversation with them, and until it happens hardcore is off by the server's decision as well as
+ours. See *It was the server talking to us* below.
 
 **Both halves of the offline path are done, and 4a — fetch at boot, then boot — is confirmed on
 hardware.** What remains is **4b**: `r=awardachievement` at the moment an achievement fires, which is
@@ -3996,6 +3998,53 @@ which object a `MemAddr` belonged to**, and this game has subsets. A flat scan o
 containing more than one set reads across all of them. If the captured context shows this id sitting
 in a second set rather than in `Achievements`, the fix is a structural one — track which array the
 scanner is inside — and not a threshold.
+
+#### It was the server talking to us: `Warning: Unknown Emulator`
+
+The capture came back with this, verbatim out of the reply:
+
+```
+"Title":"Warning: Unknown Emulator",
+"Description":"Hardcore unlocks cannot be earned using this emulator.",
+"MemAddr":"1=1.300.","Points":0,"Author":"","Modified":1786239426
+```
+
+Log at `docs/logs/ra_wifi_launcher_notice-3ds.log`.
+
+**RetroAchievements injected it.** It is a message to the player wearing an achievement's clothes:
+always-true after three hundred frames, so that a normal RA client pops it up about five seconds into
+a session. Zero points, no author. The nine-digit id is the range the server uses for these.
+
+Three things follow, and the first is that a guess was wrong.
+
+**The subset theory is retired.** The suspicion was that a flat scan was reading across this game's
+subsets — its page redirects to `game/9983?set=6112`, which made that plausible. It is not what
+happened: the entry sits in `Achievements` with `Flags` 3 because the server put it there. The
+scanner's "does not know which object a key belonged to" limitation is still real and still written
+down; it is simply not the explanation here.
+
+**It is dropped now, and the filter is against evidence rather than a threshold.** That was the whole
+reason for capturing instead of filtering: the rule "ids at or above 100,000,000 are not
+achievements" is the same line of code either way, but now it is justified by what the object *is* —
+zero points, empty author, a Description addressed to a human — rather than by one id looking odd.
+Staging it spent 19 bytes of an 88%-full block on an entry step 6 would have tried to award on every
+boot. It is counted, and its context is still printed, so the server's message reaches the log even
+though the definition no longer reaches the game.
+
+**And the third is the interesting one: the server is gating hardcore on a User-Agent this project
+never registered.** `ra_net.c` sends `User-Agent: nds-bootstrap-ra/0.1`, RetroAchievements does not
+recognise it, and the consequence is exactly what the notice says. That is not a bug to fix in code —
+it is a conversation with RetroAchievements about a client identifying itself, and it belongs on the
+project's list rather than in a commit. It does retroactively justify `hardcore=0` in `ra.cfg`: this
+fork chose softcore, and the server has independently decided the same thing.
+
+Two smaller observations from the same run. The reply came back **82,811 bytes** where the previous
+fetch was 87,747 — 4,936 fewer, so `r=patch` is not byte-stable between calls and nothing should
+assume it is. And `safe` fell to **57,344**, from 61,440, which is the 240-byte capture buffer and the
+statics around it; the fetch still allocates nothing.
+
+**Prediction for the next run:** `definitions 55 kept`, matching what retroachievements.org lists
+for the set exactly, with `1 server notice(s) dropped` beside it and the block at 28,924 bytes.
 
 #### The bug the data walked into
 
