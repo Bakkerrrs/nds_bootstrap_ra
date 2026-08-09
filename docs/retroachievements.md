@@ -81,6 +81,11 @@ Confirmed on hardware, in order of when each was settled:
     `rc_runtime_activate_achievement()` in **128,352 of the arena's 158,132 bytes** — 29,780 to
     spare. Both numbers were open questions until this ran.
 
+14. **Fetched at boot, then played.** The console logs in, fetches the published set for GameID
+    14856, tears the radio down — confirmed by dsiwifi's own `AR6014 deinitted`, not just by our
+    acknowledgement — boots Super Mario 64 DS and plays. **About 15 seconds** from power-on to the
+    game. The fetched set diffs clean against the earlier one and the snapshot is identical field
+    for field, `rcEvents` aside. Log at `docs/logs/ra_wifi_launcher_boot-3ds.log`.
 13. **The server's own set running inside the game.** Super Mario 64 DS boots and plays with all
     **56 of 56** published definitions active, `rcBadLine 0`, `rcPeeksRejected 0`, and the set's
     first definition unlocking first as predicted. It took three crashed runs to get there:
@@ -127,6 +132,13 @@ paying for them:
 
 The immediate next step is **step 4**, and it splits into two failures that are worth keeping
 apart, because they have different fixes.
+
+**Both halves of the offline path are done, and 4a — fetch at boot, then boot — is confirmed on
+hardware.** What remains is **4b**: `r=awardachievement` at the moment an achievement fires, which is
+network *inside* the game. Two facts from the 4a run bear on it and point opposite ways — the radio is
+still powered and associated when the game starts, and the launcher needed all of dsiwifi resident to
+get there against the 18 KB of IWRAM context B leaves free. The nearer refinement is smaller: making
+the 15-second ladder skippable from `ra.cfg`.
 
 **The first half is done.** `docs/logs/ra_definitions-14856.txt` copied to
 `sd:/_nds/nds-bootstrap/ra_achievements.txt` boots and plays with all 56 definitions active, at 67
@@ -3698,6 +3710,87 @@ not one to take inside an interrupt on a CPU that is about to be overwritten.
 **If the ARM7 never acknowledges, mode 2 halts exactly as mode 1 does.** A halt is a bad outcome and
 it is the *better* bad outcome: the alternative is a crash somewhere inside the game, minutes later,
 with nothing on the card explaining it.
+
+### Confirmed on hardware: fetched at boot, then played
+
+```
+reached stage 12 of 12
+the set is staged for the cardengine.
+definitions to   sd:/ra_definitions.txt
+
+-- giving the radio back --
+AR6014 deinitted
+ARM7            deinitted
+ARM9            timer and FIFO handler stopped
+
+radio down -- booting the game.
+```
+
+Log at `docs/logs/ra_wifi_launcher_boot-3ds.log`. **The console logged in, fetched the published set
+for GameID 14856, tore the radio down, booted Super Mario 64 DS, and played.** About **15 seconds**
+from power-on to the game, and the game felt normal.
+
+`AR6014 deinitted` is worth pointing at: that line is **dsiwifi's own** `wifi_printlnf()`, from inside
+`wifi_card_deinit()`. So the teardown is confirmed by the driver rather than by our acknowledgement —
+the ARM7 really executed it, and the message made it back over the FIFO before the ARM9 removed the
+handler. The three lines together also confirm the ordering the design depends on: the driver spoke,
+then our ARM7 confirmed, then the ARM9's own two were stopped.
+
+There is no `restored ra_achievements.txt` line, which is how the log says the set came off the
+network rather than off the card.
+
+#### The set is byte-identical, and so is the behaviour
+
+`sd:/ra_definitions.txt` from this run **diffs clean** against
+`docs/logs/ra_definitions-14856.txt`, the file the earlier fetch produced. And the snapshot is
+identical field for field to the offline run:
+
+| Field | From the file | From the network |
+| --- | --- | --- |
+| `rcStackUsed` | 1,624 | 1,624 |
+| `rcInitLines` / `rcInitTotal` | 210 / 1,765 | 210 / 1,765 |
+| `rcLinesMax` | 67 | 67 |
+| `rcActivated` / `rcDefLength` | 56 / 28,584 | 56 / 28,584 |
+| `rcFirstTriggered` | 1 | 1 |
+| `rcPeeksRejected` | 0 | 0 |
+| `rcEvents` | 88 | **132** |
+
+Every number holds except `rcEvents`, and that one moved because the play session was longer — it
+counts primes and unprimes, not unlocks. `rcTriggered` is 1 in both.
+
+Identical is the right result and it is worth saying why it is not a tautology. The bytes are the
+same bytes, so equal behaviour is expected — what the comparison actually establishes is that
+**nothing about arriving over the network changed how the set behaves**: not the streaming scanner's
+output, not the radio being left powered and associated, not the teardown happening between the
+fetch and the game. A difference in any of those would have shown up here.
+
+#### One thing the snapshot cannot tell you
+
+`rcFromFile` reads 1 in both columns, because it means *"the staged block was used"* rather than
+*"the definitions came from a file"* — a distinction that did not exist when it was named. And
+`rcDefLength` cannot separate them either, since a successful fetch produces exactly the bytes the
+file holds.
+
+So provenance is a question only the log answers today. A byte for it is available — `reserved2` at
+`+0x69` — but the launcher would have to get it *into* the block for the cardengine to see, and the
+only channels are a second magic value or a spare bit in the length word. Both mean touching the
+bootloader's magic check, which is proven code, for a diagnostic convenience the log already
+provides. Left undone deliberately, and written down so the next person does not rediscover the
+ambiguity from scratch.
+
+#### What 4a costs, and what is left
+
+15 seconds on every boot, and it is not optional in this build: the ladder runs before the game
+regardless. That is the obvious next refinement — `ra.cfg` already exists as the place to say
+"don't", and the failure paths already fall through to booting. Nothing about it is hard; it simply
+has not been done.
+
+**4b is untouched.** Unlocking an achievement on the server needs `r=awardachievement` at the moment
+it fires, which is network *inside* the game, where the ARM7 belongs to the game. Two things this run
+established bear on it, and they point in opposite directions: the radio is still powered and still
+associated when the game starts, which is the encouraging half; and the launcher's ARM7 needed all of
+dsiwifi resident to get there, against the **18 KB of IWRAM** the cardengine's own ARM7 hooks leave
+free in context B.
 
 ### The regression 4a introduced, and the fix
 
