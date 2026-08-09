@@ -1827,6 +1827,24 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 
 done:
 	/*
+	    The set for this ROM, if the ladder did not produce one.
+
+	    Hardware found the gap this closes: with the access point off the ladder stopped at stage 3, so
+	    raWifiFetchPatch() -- where the cache was wired in -- was never reached at all, and the summary
+	    read `definitions none`. Every early exit has the same shape, whether it is no link, no config,
+	    a refused login or a hash the server does not know, and this is the one place all of them pass
+	    through.
+
+	    Safe under an absent cache: raWifiCacheLoad() leaves the block untouched and returns false, so
+	    whatever loadRaDefinitions() staged before the ladder ran still stands. The cache is preferred
+	    over that file because it is this ROM's own set rather than one hand-managed file that cannot
+	    know which game is running.
+	*/
+	if (!verdict.patched && raWifiCacheLoad(sdFound)) {
+		verdict.defsBytes = *(u32*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + 4);
+	}
+
+	/*
 	    Give the tail a chance before the summary rather than after it. dsiwifi narrates
 	    asynchronously and keeps talking once the last rung is decided -- the probe's first
 	    hardware run printed the line naming the access point and its security mode *after*
@@ -1898,6 +1916,14 @@ done:
 	if (verdict.patched) {
 		raWifiLog("definitions      %u in %lu bytes\n",
 		          verdict.defsKept, (unsigned long)verdict.defsBytes);
+	} else if (verdict.defsBytes) {
+		/*
+		    From the cache rather than from the server, and said differently on purpose: the set is
+		    real and the game will evaluate it, but it is as old as the last successful fetch and the
+		    already-earned filtering in it is that old too. "none" would be a lie and "N in M bytes"
+		    would hide which of the two happened.
+		*/
+		raWifiLog("definitions      %lu bytes, cached\n", (unsigned long)verdict.defsBytes);
 	} else {
 		raWifiLog("definitions      none\n");
 	}
