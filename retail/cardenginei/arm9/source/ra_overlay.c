@@ -27,6 +27,13 @@
 #if RA_READER_ENABLED
 
 #define SUB_DISPCNT  (*(vu32*)0x04001000)
+/*
+    The sub engine's master brightness. Read at show() time for one reason: a real unlock fires when a
+    stage ends, which is exactly when a game fades the screen -- and a fade applies to our glyphs too.
+    That would explain a notification that reports drawn, is never denied or evicted, and is not seen,
+    while the demo timer's identical call *is* seen because it fires on an ordinary frame.
+*/
+#define SUB_MASTER_BRIGHT (*(vu16*)0x0400106C)
 #define SUB_BG0CNT   (*(vu16*)0x04001008)
 #define SUB_BGCNT(i) (*(vu16*)(0x04001008 + (i) * 2))
 /* Scroll is per layer, four bytes apart -- not always BG0's. */
@@ -214,7 +221,9 @@ static void draw(int b) {
 	*/
 	raOverlayState = (u8)(((SUB_DISPCNT & (1u << 30)) ? 1 : 0)
 	                      | ((layer & 3) << 1)
-	                      | ((block & 3) << 3));
+	                      | ((block & 3) << 3)
+	                      /* bit 5: the screen was being faded when this was raised */
+	                      | ((SUB_MASTER_BRIGHT & 0x1F) ? 0x20 : 0));
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 

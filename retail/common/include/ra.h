@@ -499,6 +499,12 @@ typedef struct raSnapshot {
 	        bit 0     SUB_DISPCNT bit 30 -- BG extended palettes were on
 	        bits 1-2  the background layer borrowed
 	        bits 3-4  the 16K character block borrowed
+	        bit 5     the sub engine's master brightness was non-zero -- the screen was mid-fade
+
+	    Bit 5 is there because a real unlock fires when a stage ends, which is precisely when a game fades
+	    the screen, and a fade dims our glyphs along with everything else. It would explain a notification
+	    that reports drawn, is never denied or evicted, and is still not seen -- while the demo timer's
+	    identical call is seen, because it fires on an ordinary frame.
 
 	    Registers and choice belong together and that is why the choice is what is stored: the registers
 	    themselves are hardware, readable live from the RAM viewer at 0x04001000 and 0x04001008, and the
