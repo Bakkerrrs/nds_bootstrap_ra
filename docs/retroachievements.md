@@ -82,10 +82,12 @@ Confirmed on hardware, in order of when each was settled:
     spare. Both numbers were open questions until this ran.
 
 13. **The server's own set running inside the game.** Super Mario 64 DS boots and plays with all
-    56 published definitions active. It took three crashed runs to get there: everything in this
-    project runs on the game's VCOUNT interrupt stack, and `rc_runtime_activate_achievement()`
-    needs **2,383 bytes** where `rc_runtime_do_frame()` needs 767. rcheevos has its own 8 KB stack
-    now. The cost figures — `rcStackUsed`, `rcInitTotal`, `rcLinesMax` — are still unread.
+    **56 of 56** published definitions active, `rcBadLine 0`, `rcPeeksRejected 0`, and the set's
+    first definition unlocking first as predicted. It took three crashed runs to get there:
+    everything in this project runs on the game's VCOUNT interrupt stack, and the parse needs far
+    more of it than the evaluation, so rcheevos has its own 8 KB stack now. Measured on the
+    console: **67 scanlines of 263 per frame**, 1,765 to load the set, 1,624 bytes of stack,
+    110,472 of the arena's 149,288.
 
 **Step 3 is finished.** The launcher logs in, identifies the ROM, fetches the published set and
 stages it where the game will find it, allocating nothing. What has never been tried is *running*
@@ -125,8 +127,10 @@ paying for them:
 The immediate next step is **step 4**, and it splits into two failures that are worth keeping
 apart, because they have different fixes.
 
-**First, and it needs no network at all:** copy `docs/logs/ra_definitions-14856.txt` to
-`sd:/_nds/nds-bootstrap/ra_achievements.txt` and boot Super Mario 64 DS with a **normal** build.
+**The first half is done.** `docs/logs/ra_definitions-14856.txt` copied to
+`sd:/_nds/nds-bootstrap/ra_achievements.txt` boots and plays with all 56 definitions active, at 67
+scanlines of 263 per frame. What remains is the second half: the network beside a running game, and
+then a build that both fetches and boots. The record of how the first half was reached:
 It took **three crashed runs to find the cause, and it is not any of the things that were
 suspected**: everything in this project runs inside the game's VCOUNT interrupt handler, on the
 game's IRQ stack, and `rc_runtime_activate_achievement()` needs **2,383 bytes** where
@@ -1486,6 +1490,11 @@ than the block:
 | `rc_runtime_init()` | 1,480 |
 | peak, 71 blocks + their 8-byte headers | **128,352** |
 | **margin** | **29,780 bytes — 81.2% used** |
+
+**The console later read 110,472 of 149,288** — this estimate is **14% high**, and the reason is the
+measuring tool rather than the code: the counting wrappers use `malloc_usable_size()` and glibc
+rounds every block up. Over-estimating is the safe direction for a question about whether something
+fits, and it is worth leaving the figure here beside the real one rather than quietly replacing it.
 
 **And a correction worth recording, because it pointed the wrong way.** The first attempt at this
 measurement used `rc_trigger_size()` and reported **101.7% — that the set did not fit.** It is
@@ -3547,6 +3556,79 @@ of them:
 | `rcLinesMax` | `0x027FEDD5`, 1 byte, out of 263 |
 | `rcFirstTriggered` | `0x027FEDED`, 1 byte — **predicted 1**, about five seconds in |
 | `rcPeeksRejected` | `0x027FEDD0`, 4 bytes — the field most likely to be non-zero |
+
+##### It runs, and here is every number
+
+Super Mario 64 DS boots and plays with all 56 published definitions active, and the snapshot at
+`0x027FED50` was read out of the in-game RAM viewer. The whole rcheevos half, decoded:
+
+| Field | Read | |
+| --- | --- | --- |
+| `rcFromFile` | **1** | the staged file was used, not the built-in self-test |
+| `rcDefLength` | **28,584** | 28,585 minus the trailing newline the reader trims |
+| `rcActivated` | **56** | every definition |
+| `rcActivate` / `rcBadLine` | **0 / 0** | none refused |
+| `rcStage` | **7** | `RA_RC_FRAME` |
+| `rcTriggerState` | **5** | `RC_TRIGGER_STATE_TRIGGERED` |
+| **`rcFirstTriggered`** | **1** | **the prediction. Line 1 is `1=1.300.` and it unlocked first** |
+| `rcTriggered` | **1** | |
+| `rcEvents` | 88 | 87 of them not unlocks — primes, unprimes, activations |
+| **`rcPeeksRejected`** | **0** | **every address in a real server set translates** |
+| `rcPeeks` | 69 | distinct addresses read per frame |
+| **`rcStackUsed`** | **1,624** | of the 8,192 given |
+| **`rcInitTotal`** | **1,765** scanlines | 6.7 frames to parse the set |
+| **`rcInitLines`** | **210** of 263 | the slowest single definition |
+| **`rcLinesMax`** | **67** of 263 | steady-state, 1,946 conditions |
+| `heapSize` / `heapUsed` | **149,288 / 110,472** | 74%, 38,816 free |
+| `heapBreak` / `heapTop` | `0x037538D8` / `0x03778000` | the top is exactly the definitions block |
+
+The snapshot is internally consistent — `heapTop - heapBreak` equals `heapSize` to the byte — which
+is worth checking before trusting any of the rest of it.
+
+##### What the readings say, including where the host was wrong
+
+**`rcFirstTriggered = 1`.** The set's first definition is `1=1.300.` — always true, three hundred
+hits — and it is what unlocked, about five seconds in, exactly as predicted before the run. Any
+other line here would have meant a definition reading memory it should not.
+
+**`rcPeeksRejected = 0`.** This was the field most likely to be non-zero: hundreds of addresses
+written by other people, up to `0x00189074`, none of them chosen by this project. Every one
+translates and every one is readable. `rc_runtime_validate_addresses()` disabled nothing.
+
+**`rcStackUsed = 1,624`, against the host's 2,383.** The host over-estimated by 47%, which is the
+branch named in advance: ARM frames are tighter than x86-64's. So 8 KB is 5× the requirement. It is
+also still more than twice what `rc_runtime_do_frame()` needs, which is why the parse was the thing
+that overflowed the game's IRQ stack and the evaluation never did.
+
+**`heapUsed = 110,472`, against the host's 128,352.** The host was **14% high**, and the reason is
+in the measuring tool rather than in the code: `tools/ra_fit_test.c` counts
+`malloc_usable_size()`, and glibc rounds every block up. The direction is the safe one for a
+question about whether something fits, and the real figure is now the console's.
+
+**`rcLinesMax = 67 of 263` — the set costs a quarter of a frame, every frame.** Three definitions
+cost 1 scanline; 1,946 conditions cost 67. That is the answer to the question step 4 opened, and it
+fits with room to spare.
+
+**`rcInitTotal = 1,765 scanlines = 6.7 frames.** So the build that parsed all 56 in a single
+interrupt held the game's VCOUNT handler for nearly seven frames. Spreading it was not a
+precaution; it was necessary.
+
+##### The new tightest constraint: one definition is 80% of a frame
+
+`rcInitLines = 210 of 263`. A single `rc_runtime_activate_achievement()` on the 6,264-byte
+definition costs **four fifths of a frame inside the game's interrupt handler**, and that is now the
+number that bounds this design rather than the arena or the frame budget.
+
+It is under a frame, which is why one-definition-per-tick works. What happens past a frame is worth
+being precise about instead of alarming: the handler would simply not return before the next VCOUNT
+was due, so the game would lose a frame rather than crash — `rcInitLines` would saturate at 255 and
+say so. A game whose largest definition is twice this one would drop a frame or two while loading
+and then run normally.
+
+So the honest statement is that this scales gracelessly rather than dangerously, and the fix if it
+ever matters is to parse in smaller pieces than one definition — which rcheevos does not offer, so
+it would mean holding a partially parsed trigger across ticks. That is real work and there is no
+reason to do it for a cost nobody has yet felt.
 
 ### What is deliberately not being changed yet
 
