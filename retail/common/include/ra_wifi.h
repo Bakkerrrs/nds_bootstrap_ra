@@ -328,6 +328,13 @@ typedef struct raConfig {
 	    scanner leaves it out of the block. Defaults to 1.
 	*/
 	u8   submit;
+	/*
+	    `sync=0` in ra.cfg: skip the network ladder entirely and play from the per-game cache. Measured
+	    reason -- a boot with no AP in range burns forty seconds failing to associate, and one with an AP
+	    spends fifteen re-fetching yesterday's set. Detection, notification and queueing all keep working
+	    without it, because none of them ever touched the radio. Defaults to 1.
+	*/
+	u8   sync;
 	u8   debug;
 	u8   found;          /* the file existed */
 	u8   usable;         /* ...and both credentials are set */

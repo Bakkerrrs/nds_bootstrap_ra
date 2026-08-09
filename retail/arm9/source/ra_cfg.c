@@ -54,6 +54,21 @@
     Defaults to 1, so a card without the key behaves as before.
 */
 #define RA_CFG_SUBMIT    "submit"
+/*
+    Also this fork's own. `sync=0` skips the whole network ladder and plays from the cached set.
+
+    The reason it is worth having is a measurement rather than a preference: a boot with no access point
+    in range spends **forty seconds** failing to associate before the game starts, and a boot with one
+    spends about fifteen doing work it already did yesterday. Neither is a cost worth paying to play.
+
+    Nothing about detecting achievements needs the radio -- the cardengine never had it -- so with the
+    ladder skipped the set comes from the per-game cache, unlocks are still detected, still notified and
+    still queued, and one later boot with sync on drains the queue and refreshes the set. Syncing and
+    playing become separate activities, which is what they always were.
+
+    Defaults to 1.
+*/
+#define RA_CFG_SYNC      "sync"
 
 /*
     Keys odelot's file has that this fork parses and then does nothing with, because what they
@@ -125,6 +140,7 @@ bool raConfigRead(const char* path, raConfig* cfg) {
 	    the memset and before parsing, so `submit=0` can turn it off and nothing else can.
 	*/
 	cfg->submit = 1;
+	cfg->sync   = 1;
 
 	file = fopen(path, "r");
 	if (!file) {
@@ -161,6 +177,8 @@ bool raConfigRead(const char* path, raConfig* cfg) {
 			cfg->debug = raCfgFlag(value);
 		} else if (strcmp(key, RA_CFG_SUBMIT) == 0) {
 			cfg->submit = raCfgFlag(value);
+		} else if (strcmp(key, RA_CFG_SYNC) == 0) {
+			cfg->sync = raCfgFlag(value);
 		} else if (raCfgKnownUnused(key)) {
 			cfg->notYet++;
 		} else {

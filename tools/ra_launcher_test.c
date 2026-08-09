@@ -407,6 +407,24 @@ static void test_config(void) {
 			fclose(sf);
 			CHECK(raConfigRead(sp, &scfg) == true);
 			CHECK(scfg.submit == 1);
+
+			/*
+			    sync is the same shape and the same risk: a default that flipped would start bringing
+			    the radio up on cards that asked for it to stay off.
+			*/
+			sf = fopen(sp, "w");
+			fputs("username=Bakke\npassword=x\n", sf);
+			fclose(sf);
+			CHECK(raConfigRead(sp, &scfg) == true);
+			CHECK(scfg.sync == 1);
+
+			sf = fopen(sp, "w");
+			fputs("username=Bakke\npassword=x\nsync=0\n", sf);
+			fclose(sf);
+			CHECK(raConfigRead(sp, &scfg) == true);
+			CHECK(scfg.sync == 0);
+			/* And the two switches are independent -- one is not the other spelled differently. */
+			CHECK(scfg.submit == 1);
 			remove(sp);
 		} else {
 			printf("  cannot write %s -- skipped\n", sp);

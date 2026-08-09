@@ -1742,6 +1742,23 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 		          sdFound ? RA_CFG_PATH : RA_CFG_PATH_FAT);
 	}
 
+	/*
+	    `sync=0`: stop here, before a single register of the radio is touched.
+
+	    This is the point to do it because of the order the stages happen to be in, which turns out to be
+	    exactly right: the ROM's hash is stage 0b and the config is stage 0c, so both are already in hand
+	    before the ARM7 is asked for anything. The cache is keyed by that hash, so `done:` can load this
+	    ROM's set with nothing powered up -- no association attempt, no forty-second wait, no fifteen
+	    seconds re-fetching a set that has not changed.
+
+	    Everything the game does still happens: rcheevos evaluates the cached set, the notification draws,
+	    and an unlock is queued to the card for whichever later boot has sync on.
+	*/
+	if (!config.sync) {
+		raWifiLog("\n\x1b[33msync=0 in ra.cfg -- the radio stays off\x1b[37m\n");
+		goto done;
+	}
+
 	raWifiLog("\n-- the ARM7 half --\n");
 
 	if (!raWifiWaitArm7()) {
