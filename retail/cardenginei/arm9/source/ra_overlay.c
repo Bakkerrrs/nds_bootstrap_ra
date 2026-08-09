@@ -36,6 +36,13 @@
 #define SUB_MASTER_BRIGHT (*(vu16*)0x0400106C)
 
 #define SUB_BGCNT(i) (*(vu16*)(0x04001008 + (i) * 2))
+/*
+    The window registers, read only to be reported. A layer the game has excluded from every active
+    window is a layer that is enabled and drawn and shows nowhere -- which is one of the two mechanisms
+    left that could explain the notification going missing. See raSnapshot.overlayWindow.
+*/
+#define SUB_WININ    (*(vu16*)0x04001048)
+#define SUB_WINOUT   (*(vu16*)0x0400104A)
 /* Scroll is per layer, four bytes apart -- not always BG0's. */
 #define SUB_BGHOFS(i) (*(vu16*)(0x04001010 + (i) * 4))
 #define SUB_BGVOFS(i) (*(vu16*)(0x04001012 + (i) * 4))
@@ -198,6 +205,12 @@ u32 raOverlayDeniedNoLayer;
 /* SUB_DISPCNT bit 30 as of the last show(); see raSnapshot.overlayExtPal. */
 /* The sub engine's state and our choice out of it, as of the last show(). See raSnapshot. */
 u8  raOverlayState;
+/*
+    The sub engine as the game had it, at the moment of the last show(). Whole registers rather than
+    picked bits: picking the bit is what went wrong with the fade. See raSnapshot.overlayDispcnt.
+*/
+u32 raOverlayDispcnt;
+u32 raOverlayWindow;
 
 /*
     Which 16K blocks of sub BG VRAM the game is using, for tiles or for maps. Read
@@ -304,6 +317,14 @@ static void draw(int b, const void* text) {
 	                      | (brightActive() ? 0x20 : 0)
 	                      /* bit 6: this one was held back until a fade ended */
 	                      | (pendingFrames ? 0x40 : 0));
+	/*
+	    Captured before a single register of the game's is disturbed, which is the only order that makes
+	    them mean anything: the layer-enable bit the overlay is about to set would otherwise show up here
+	    as the game's own.
+	*/
+	raOverlayDispcnt = SUB_DISPCNT;
+	raOverlayWindow  = (u32)SUB_WININ | ((u32)SUB_WINOUT << 16);
+
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 

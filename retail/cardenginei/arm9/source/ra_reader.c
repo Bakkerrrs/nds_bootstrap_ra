@@ -118,7 +118,10 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 		snapshot.deniedNoLayer = raOverlayDeniedNoLayer;
 		{
 			extern u8 raOverlayState;
-			snapshot.overlayState = raOverlayState;
+			extern u32 raOverlayDispcnt, raOverlayWindow;
+			snapshot.overlayState   = raOverlayState;
+			snapshot.overlayDispcnt = raOverlayDispcnt;
+			snapshot.overlayWindow  = raOverlayWindow;
 		}
 	}
 	/*

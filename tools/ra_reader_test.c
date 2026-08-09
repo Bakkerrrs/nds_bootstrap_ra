@@ -651,7 +651,10 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, overlayState) == 0xB3);
 	/* Where the rendered strip is; see RA_TEXT_BYTES and ra_overlay_tick(). */
 	CHECK(__builtin_offsetof(raSnapshot, overlayText) == 0xB4);
-	CHECK(sizeof(raSnapshot) == 0xB8);
+	/* The sub engine as the game had it; see the note beside these in ra.h. */
+	CHECK(__builtin_offsetof(raSnapshot, overlayDispcnt) == 0xB8);
+	CHECK(__builtin_offsetof(raSnapshot, overlayWindow) == 0xBC);
+	CHECK(sizeof(raSnapshot) == 0xC0);
 
 	/*
 	    The shared block's real size, pinned because overrunning it is silent: slot 13 is

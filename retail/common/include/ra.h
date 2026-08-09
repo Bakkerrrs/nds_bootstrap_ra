@@ -567,7 +567,40 @@ typedef struct raSnapshot {
 	    running game's VRAM.
 	*/
 	u32 overlayText;      /* +0xB4 */
-} raSnapshot;            /*              0xB8 bytes */
+	/*
+	    The sub engine as the *game* had it configured, captured at show() time before the overlay
+	    touches anything. Two words, and they exist because every explanation this project had for
+	    "borrowed, drawn, held, invisible" is now dead.
+
+	    The reading that killed them: Contra 4, `shows 1`, `denied` `evicted` `deniedNoLayer` all 0,
+	    `overlayState` 0x4A -- layer 1, block 1, extended palettes off, **not** inside a fade, deferred
+	    and released -- `overlayText` 0x03754288, which is exactly where nm puts raTextStrip in the WRAM
+	    binary. `ticks` 12,736 against a three-minute session, so the hook held every frame; `rcActivated`
+	    45 with `rcBadLine` 0, so all 45 definitions parsed with their titles attached. The overlay wrote
+	    two kilobytes of real glyphs into a block the survey said was free, enabled its layer at priority
+	    0, and held it for 180 frames. Nothing appeared.
+
+	    So the question moved to whether a background *can* appear at all, and neither of the two
+	    mechanisms that would answer it was being measured:
+
+	      dispcnt  bits 16-17 are the display mode -- 0 is display off, and no background shows in it
+	               whatever its registers say. Bits 8-12 say which layers the game itself has enabled,
+	               which decides whether one of them sits in front of ours: at equal priority the DS
+	               resolves ties by *layer number*, so the game's BG0 covers our BG1. Bits 0-2 are the
+	               BG mode and bit 30 is extended palettes, both free in the same word.
+
+	      window   WININ in the low half, WINOUT in the high. If the game has windows enabled -- DISPCNT
+	               bits 13-15 -- then a layer is only drawn where these permit it, and a game masking its
+	               HUD with a window that excludes BG1 would hide ours everywhere. Nothing in this
+	               project has ever looked at them.
+
+	    Whole registers rather than picked bits, because the picked bit is what went wrong last time:
+	    `overlayState` bit 5 was reported as "the screen was fading" when all it could prove was that a
+	    blend factor was non-zero, and a conclusion was built on it.
+	*/
+	u32 overlayDispcnt;   /* +0xB8  sub DISPCNT, 0x04001000 */
+	u32 overlayWindow;    /* +0xBC  WININ 0x04001048 low, WINOUT 0x0400104A high */
+} raSnapshot;            /*              0xC0 bytes */
 
 /*
     The shape of that strip, and it is here rather than with the code that fills it because **both
