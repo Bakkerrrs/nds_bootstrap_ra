@@ -133,6 +133,11 @@ paying for them:
 The immediate next step is **step 4**, and it splits into two failures that are worth keeping
 apart, because they have different fixes.
 
+**4a is confirmed on hardware, and step 5 — the block carrying achievement ids — is written and
+awaiting a run.** Ids gate everything that reports: `r=unlocks` answers in them and
+`r=awardachievement` is asked in them. Read `rcDefsWithId` at `0x027FEDF4` and `rcFirstId` at
+`0x027FEDF0`; see *Step 5* below.
+
 **Both halves of the offline path are done, and 4a — fetch at boot, then boot — is confirmed on
 hardware.** What remains is **4b**: `r=awardachievement` at the moment an achievement fires, which is
 network *inside* the game. Two facts from the 4a run bear on it and point opposite ways — the radio is
@@ -3832,6 +3837,93 @@ the pagefile creation both do exactly that on the first run of any game.
 And the failure that would be worth the most: a log ending at `the ARM7 never confirmed
 wifi_card_deinit()`. That is mode 2 refusing to boot rather than crashing, and it would mean the
 teardown needs more than dsiwifi's own four steps.
+
+## Step 5: the block carries achievement ids
+
+The staged definitions had no ids. Every line was a memaddr and nothing else, and the cardengine
+numbered them 1..56 by position. That was invisible while nothing reported anything, and it blocks
+everything that would:
+
+| | |
+| --- | --- |
+| `r=unlocks` | answers in ids, so "which of these are already earned" has no answer |
+| `r=awardachievement` | is *asked* in ids |
+| a popup, a leaderboard, rich presence | all name an achievement |
+
+So each line is now `<id>:<memaddr>`. Done here rather than later because the format has exactly one
+producer and one consumer today, and both are in this tree.
+
+### Digits then a colon, and why that is exact rather than heuristic
+
+The discriminator has to survive a definition that *begins with a digit*, because the real set's
+first line is `1=1.300.`. It does, and not by luck: **every memaddr prefix flag that ends in a colon
+is a letter** — `A:`, `B:`, `C:`, `G:`, `I:`, `K:`, `M:`, `N:`, `O:`, `P:`, `Q:`, `R:`, `T:`, `Z:`.
+Checked against the shipped set rather than asserted: of its 47 lines containing a colon, the
+character before the first one is `M`, `N`, `O`, `P`, `R` or `T`, never a digit. And no line already
+matches `<digits>:`.
+
+A line with no id still works. `docs/logs/ra_definitions-14856.txt` — the artifact the console
+produced before this step — has none, and a hand-written `ra_achievements.txt` is not expected to.
+
+### The bug this found before it shipped: the first achievement inherited the game's id
+
+The scanner tracks the most recent `"ID":` and attaches it to the next `MemAddr`. Ids arrive *before*
+their MemAddr, which is the opposite of `Flags` and makes them much simpler — no deferral needed.
+
+Except that the reply opens `{"Success":true,"PatchData":{"ID":14856,...` and only then reaches
+`"Achievements":[{"ID":1,...`. So an achievement that arrived **without** an id of its own would
+inherit the *game's*, and be counted as having one. That is worse than having none: a wrong id
+reports an unlock for an achievement the player did not earn, where a missing id reports nothing.
+
+The fix is one character: **clear the pending id at every `{`**, because an id belongs to the object
+it was written in. Safe against a brace inside a string because of RA's field order — `ID` is first
+in each object and `MemAddr` immediately after, so there is no text between them for a stray `{` to
+sit in, and a brace in a Title lands after the id has already been consumed. The host test feeds
+exactly the id-less-first-achievement case and requires the id *not* to appear.
+
+The needle also carries its opening quote, which is what keeps `"GameID":` and `"ConsoleID":` from
+matching — both contain `ID":` and neither has a quote before the `I`. Pinned as its own test.
+
+### `RA_SYNTHETIC_ID_BASE`, which is not tidiness
+
+A line without an id needs one anyway, because rcheevos identifies achievements *by id* and reuses
+the trigger of one it has already seen. Numbering the id-less ones from 1 — as every build before
+this did — was safe only while nothing carried a real id. The moment both appear in one file, a real
+id of 3 collides with the third id-less line and two definitions become one achievement.
+
+So id-less lines are numbered from **`0xF0000000`**. Real RA ids are six or seven digits and cannot
+reach it.
+
+Two smaller consequences of ids being real, both of which would have been silent:
+
+- `rc_runtime_get_achievement_measured()` and `rc_runtime_get_achievement()` were asked about the
+  constant `RA_TEST_ACHIEVEMENT_ID`. That was the first definition's id only while everything was
+  numbered from it; now they ask about `defIds[0]`, whatever it turned out to be.
+- the event handler derived a line number as `id - base + 1`. There is no arithmetic that recovers a
+  line from a server-assigned id, so it searches `defIds` — at most 128 entries, on the frame an
+  achievement unlocks.
+
+### What to read
+
+The snapshot grows from `0xA0` to `0xA8`, appended, so **every offset above keeps its address** and
+the checklist stays valid.
+
+| | | |
+| --- | --- | --- |
+| `rcFirstId` | `0x027FEDF0`, 4 bytes | the RA id of the first achievement to unlock — a number you can look up on the set's page |
+| `rcDefsWithId` | `0x027FEDF4`, 2 bytes | staged lines that carried an id |
+| `rcDefsNoId` | `0x027FEDF6`, 2 bytes | and lines that did not, which can never be awarded |
+
+And in the log, stage 12 gains `ids   N with, M without`.
+
+**Predictions:** `rcDefsWithId` 56 and `rcDefsNoId` 0 with a fetched set — RA sends an id per
+achievement, and one short would mean one achievement that can never be awarded. `rcFirstId` should
+be the id of whichever achievement `1=1.300.` is on the set's page, and `rcFirstTriggered` should
+still read 1.
+
+The block grows by the ids: 56 of about six digits plus a colon is **+392 bytes**, taking it from
+28,585 to roughly **28,977 of 32,759 — 88.5% full**. Which moves the block-size question from
+"comfortable" to "worth watching", and `wanted` reports it either way.
 
 ## Known graphical limitations of the overlay (deferred)
 

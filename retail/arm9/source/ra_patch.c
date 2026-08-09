@@ -52,6 +52,18 @@
 */
 static const char raPatchSayMemAddr[] = "\"MemAddr\":\"";
 static const char raPatchSayFlags[]   = "\"Flags\":";
+/*
+    And the achievement's own id, which arrives *before* its MemAddr in each object -- the opposite
+    of Flags, and the reason ids need no deferral while flags do.
+
+    The needle includes the opening quote, and that is what keeps it from matching the fields that
+    merely end in ID: `"GameID":` and `"ConsoleID":` both contain `ID":` but neither has a quote
+    immediately before the `I`. The reply's root object does carry a bare `"ID"` -- the game's -- and
+    it appears before any achievement, so the pending id is *cleared when a MemAddr consumes it*
+    rather than left standing. Otherwise an achievement that arrived without an id of its own would
+    silently inherit the game's, and be counted as having one.
+*/
+static const char raPatchSayId[]      = "\"ID\":";
 
 /* RA's own two values for the field. 3 is published; 5 is unofficial and not scored. */
 #define RA_PATCH_FLAGS_CORE       3
@@ -87,6 +99,33 @@ static u8 raPatchAdvance(const char* needle, u8 at, char c) {
 }
 
 /*
+    How many decimal digits an id needs, and the digits themselves. Written by hand rather than with
+    sniprintf() because this file is deliberately free of stdio -- it runs in a launcher whose heap
+    is already accounted for to the byte, and a decimal conversion is six lines.
+*/
+static u32 raPatchIdDigits(u32 id) {
+	u32 digits = 1;
+	u32 scale  = 10;
+
+	while (id >= scale && digits < 10) {
+		digits++;
+		scale *= 10;
+	}
+	return digits;
+}
+
+static u32 raPatchWriteId(char* out, u32 id) {
+	const u32 digits = raPatchIdDigits(id);
+	u32       i      = digits;
+
+	while (i > 0) {
+		out[--i] = (char)('0' + (id % 10));
+		id /= 10;
+	}
+	return digits;
+}
+
+/*
     Put the held definition in the block, or account for why it did not go.
 
     Every outcome is counted, and that is the point of the function: a set where thirty
@@ -97,6 +136,7 @@ static u8 raPatchAdvance(const char* needle, u8 at, char c) {
 */
 static void raPatchCommit(raPatch* p) {
 	u32 length;
+	u32 idLength = 0;
 
 	if (!p->pendingOpen) {
 		return;
@@ -132,7 +172,20 @@ static void raPatchCommit(raPatch* p) {
 			p->oddFlags++;
 		}
 
-		p->wanted += length + 1;   /* the newline the reader splits on */
+		/*
+		    The id's own digits count toward the block, because they are in the block. Formatted
+		    here rather than measured separately so `wanted` stays the one number that answers
+		    "would a complete set have fit".
+		*/
+		if (p->pendingId) {
+			p->withId++;
+			idLength = raPatchIdDigits(p->pendingId) + 1;   /* the digits and the colon */
+		} else {
+			p->withoutId++;
+			idLength = 0;
+		}
+
+		p->wanted += idLength + length + 1;   /* id, memaddr, and the newline the reader splits on */
 
 		/*
 		    Zero is the unset marker rather than a counter, and it is safe as one: an empty value
@@ -142,7 +195,11 @@ static void raPatchCommit(raPatch* p) {
 			p->shortest = length;
 		}
 
-		if (p->block && p->used + length + 1 <= p->blockMax) {
+		if (p->block && p->used + idLength + length + 1 <= p->blockMax) {
+			if (idLength) {
+				p->used += raPatchWriteId(p->block + p->used, p->pendingId);
+				p->block[p->used++] = ':';
+			}
 			memcpy(p->block + p->used, p->pending, length);
 			p->used += length;
 			p->block[p->used++] = '\n';
@@ -159,6 +216,12 @@ static void raPatchCommit(raPatch* p) {
 	p->pendingLength = 0;
 	p->flagsSeen     = 0;
 	p->flags         = 0;
+	/*
+	    Consumed, not carried. See raPatchSayId: the reply's root object has an "ID" of its own and
+	    it precedes every achievement, so a definition that arrived without one must read as
+	    id-less rather than inherit the game's.
+	*/
+	p->pendingId     = 0;
 }
 
 /* One decoded byte of the value being read. */
@@ -215,10 +278,32 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 				p->state   = RA_PATCH_SCAN;
 				p->memAt   = 0;
 				p->flagsAt = 0;
+				p->idAt    = 0;
 				continue;
 			}
 			raPatchPending(p, c);
 			continue;
+		}
+
+		if (p->state == RA_PATCH_ID) {
+			if (c >= '0' && c <= '9') {
+				/*
+				    Clamped rather than wrapped. RA ids are six or seven digits today; a value that
+				    overflowed would name a different achievement, which is worse than naming none.
+				*/
+				if (p->pendingId < 100000000u) {
+					p->pendingId = p->pendingId * 10 + (u32)(c - '0');
+				}
+				continue;
+			}
+			/*
+			    Falls through to the scanner with the same character, for the reason the Flags state
+			    does: what ends the digits could be the quote that opens the next key.
+			*/
+			p->state   = RA_PATCH_SCAN;
+			p->memAt   = 0;
+			p->flagsAt = 0;
+			p->idAt    = 0;
 		}
 
 		if (p->state == RA_PATCH_FLAGS) {
@@ -240,10 +325,31 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->state   = RA_PATCH_SCAN;
 			p->memAt   = 0;
 			p->flagsAt = 0;
+			p->idAt    = 0;
+		}
+
+		/*
+		    An id belongs to the object it was written in, and `{` is where an object starts.
+
+		    Clearing there is what makes the *first* achievement correct, and nothing else would.
+		    The reply opens `{"Success":true,"PatchData":{"ID":14856,...` -- the game's id -- and
+		    then `"Achievements":[{"ID":1,"MemAddr":...`. Without this, an achievement that arrived
+		    with no id of its own would inherit whatever preceded it, which for the first one is the
+		    **game's** id. That is worse than having none: a wrong id reports an unlock for an
+		    achievement the player did not earn, where a missing one reports nothing.
+
+		    Safe against a brace inside a string because of the field order RA uses: `ID` comes
+		    first in each object and `MemAddr` immediately after, so there is no text between them
+		    for a stray `{` to sit in. A brace in a Title or Description lands after the id has
+		    already been consumed.
+		*/
+		if (c == '{') {
+			p->pendingId = 0;
 		}
 
 		p->memAt   = raPatchAdvance(raPatchSayMemAddr, p->memAt, c);
 		p->flagsAt = raPatchAdvance(raPatchSayFlags, p->flagsAt, c);
+		p->idAt    = raPatchAdvance(raPatchSayId, p->idAt, c);
 
 		if (raPatchSayMemAddr[p->memAt] == 0) {
 			/*
@@ -257,6 +363,7 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->escape      = 0;
 			p->memAt       = 0;
 			p->flagsAt     = 0;
+			p->idAt        = 0;
 			continue;
 		}
 		if (raPatchSayFlags[p->flagsAt] == 0) {
@@ -265,6 +372,20 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->flagsSeen = 0;
 			p->memAt     = 0;
 			p->flagsAt   = 0;
+			p->idAt      = 0;
+			continue;
+		}
+		if (raPatchSayId[p->idAt] == 0) {
+			/*
+			    No commit here, unlike the MemAddr needle. An id belongs to the definition that is
+			    about to arrive, not to the one being held -- which is the whole reason ids are
+			    simpler than flags.
+			*/
+			p->state     = RA_PATCH_ID;
+			p->pendingId = 0;
+			p->memAt     = 0;
+			p->flagsAt   = 0;
+			p->idAt      = 0;
 		}
 	}
 }

@@ -217,10 +217,52 @@ static u32 eventCount;
     functions report through the snapshot they are handed rather than owning one.
 */
 static u8  firstTriggered;
+static u32 firstId;
 static u8  initMaxLines;
 static u32 initTotalLines;
 static u8  rcStage;
 static u8  linesMax;
+
+/*
+    128, raised from 8 when `r=patch` arrived.
+
+    The 8 was right for what it was for: the definitions file was a hand-typed line or three,
+    and a limit that small made the split obviously bounded. A real achievement set is a
+    hundred definitions or more, so the number had to follow the source of the definitions
+    changing from a person to a server.
+
+    What it costs is 4 bytes of pointer each, and they are `static` below rather than on the
+    stack for that reason -- `ra_rc_init()` is reached from the cardengine's own context, whose
+    stack is not this binary's to spend 512 bytes of. It runs once, so static is not a
+    compromise.
+
+    The other half of the limit is the block itself: 32,760 bytes of text at
+    CARDENGINEI_ARM9_RA_DEFS_MAX. 128 definitions therefore average 255 bytes each before the
+    block runs out first, which is the constraint worth knowing about -- RA memaddr strings run
+    from tens to a few hundred characters. tools/ra_reader_test.c pins the two numbers against
+    each other so raising one without the other fails on the host.
+*/
+#define RA_DEFS_MAX_LINES 128
+
+/*
+    The split definitions, and how far activation has got through them.
+
+    File statics rather than locals because activation is spread over frames now: ra_rc_prepare()
+    fills these in once and ra_rc_activate_next() is called on later ticks. The pointers are into
+    the staging block, which is not going anywhere -- ra_split_definitions() writes its
+    terminators in place and never copies.
+*/
+static char* defLines[RA_DEFS_MAX_LINES];
+/*
+    Each line's RetroAchievements id, or RA_SYNTHETIC_ID_BASE + index when the line carried none.
+    Parallel to defLines rather than packed with it because the pointers are into the staging block
+    and the ids are not in it any more -- ra_take_id() consumes them on the way past.
+*/
+static u32   defIds[RA_DEFS_MAX_LINES];
+static u8    defCount;
+static u8    defIndex;
+static u8    activatedCount;
+static int   defFirstError;
 
 /*
     The test achievement's id. Any non-zero number does; it is only how the runtime
@@ -294,10 +336,22 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
 		    `1=1.300.` and should unlock about five seconds in, so this is what turns that into
 		    a prediction that can be wrong.
 		*/
-		if (firstTriggered == 0) {
-			const unsigned line = runtimeEvent->id - RA_TEST_ACHIEVEMENT_ID + 1;
+		if (firstId == 0) {
+			u8 i;
 
-			firstTriggered = (u8)((line > 255) ? 255 : line);
+			firstId = runtimeEvent->id;
+			/*
+			    The line is looked up rather than derived. It used to be `id - base + 1`, which only
+			    worked because every definition was numbered from RA_TEST_ACHIEVEMENT_ID in order;
+			    with the server's own ids there is no arithmetic that recovers a line, and a search
+			    over at most 128 entries costs nothing on the frame an achievement unlocks.
+			*/
+			for (i = 0; i < defCount; i++) {
+				if (defIds[i] == runtimeEvent->id) {
+					firstTriggered = (u8)(i + 1);
+					break;
+				}
+			}
 		}
 	}
 }
@@ -346,40 +400,6 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
     misbehaving. A definition from a text file gets no more faith than one from the server,
     because eventually it *is* one from the server.
 */
-/*
-    128, raised from 8 when `r=patch` arrived.
-
-    The 8 was right for what it was for: the definitions file was a hand-typed line or three,
-    and a limit that small made the split obviously bounded. A real achievement set is a
-    hundred definitions or more, so the number had to follow the source of the definitions
-    changing from a person to a server.
-
-    What it costs is 4 bytes of pointer each, and they are `static` below rather than on the
-    stack for that reason -- `ra_rc_init()` is reached from the cardengine's own context, whose
-    stack is not this binary's to spend 512 bytes of. It runs once, so static is not a
-    compromise.
-
-    The other half of the limit is the block itself: 32,760 bytes of text at
-    CARDENGINEI_ARM9_RA_DEFS_MAX. 128 definitions therefore average 255 bytes each before the
-    block runs out first, which is the constraint worth knowing about -- RA memaddr strings run
-    from tens to a few hundred characters. tools/ra_reader_test.c pins the two numbers against
-    each other so raising one without the other fails on the host.
-*/
-#define RA_DEFS_MAX_LINES 128
-
-/*
-    The split definitions, and how far activation has got through them.
-
-    File statics rather than locals because activation is spread over frames now: ra_rc_prepare()
-    fills these in once and ra_rc_activate_next() is called on later ticks. The pointers are into
-    the staging block, which is not going anywhere -- ra_split_definitions() writes its
-    terminators in place and never copies.
-*/
-static char* defLines[RA_DEFS_MAX_LINES];
-static u8    defCount;
-static u8    defIndex;
-static u8    activatedCount;
-static int   defFirstError;
 
 /*
     Split the staged text into lines, in place.
@@ -548,6 +568,42 @@ static const char* ra_definition(raSnapshot* snapshot) {
 }
 
 /*
+    Take a leading `<digits>:` off a line and return the id, advancing the pointer past it.
+
+    Zero means the line had no id, which is not an error -- a hand-written ra_achievements.txt is
+    not expected to carry them and the set this project shipped as an artifact does not.
+
+    The test is **digits then colon**, and it is exact rather than heuristic. Every memaddr prefix
+    flag that ends in a colon is a letter (`A:`, `M:`, `N:`, `O:`, `P:`, `Q:`, `R:`, `T:`, `I:`,
+    `K:`, `Z:`, `G:`, `C:`, `B:`), so a digit run before the first colon cannot be memaddr syntax.
+    A definition may certainly *begin* with a digit -- the real set's first line is `1=1.300.` --
+    which is why the colon is required and why tools/ra_reader_test.c feeds exactly that line.
+*/
+static u32 ra_take_id(char** line) {
+	const char* at = *line;
+	u32         id = 0;
+	u32         digits = 0;
+
+	while (at[digits] >= '0' && at[digits] <= '9') {
+		digits++;
+	}
+	if (digits == 0 || at[digits] != ':') {
+		return 0;
+	}
+	{
+		u32 i;
+		for (i = 0; i < digits; i++) {
+			/* Clamped rather than wrapped: a truncated id names a different achievement. */
+			if (id < 100000000u) {
+				id = id * 10 + (u32)(at[i] - '0');
+			}
+		}
+	}
+	*line = (char*)(at + digits + 1);
+	return id;
+}
+
+/*
     Bring rcheevos up and report how far it got. Two functions rather than one, and the split is
     the whole point of this build.
 
@@ -598,6 +654,27 @@ static u8 ra_rc_prepare(raSnapshot* snapshot) {
 	    carried a previous run's count showed up. A function whose correctness depends on being
 	    called only once is a function that will eventually be called twice.
 	*/
+	/*
+	    Ids taken here, once, right after the split -- not at activation time. The pointers in
+	    defLines are what everything downstream uses, so they have to already be past the id; doing
+	    it later would mean every user of a line remembering to skip it.
+	*/
+	snapshot->rcDefsWithId = 0;
+	snapshot->rcDefsNoId   = 0;
+	for (i = 0; i < defCount; i++) {
+		defIds[i] = ra_take_id(&defLines[i]);
+		if (defIds[i]) {
+			snapshot->rcDefsWithId++;
+		} else {
+			/*
+			    Numbered far from anything real, because rcheevos identifies achievements by id and
+			    reuses the trigger of one it has already seen. See RA_SYNTHETIC_ID_BASE.
+			*/
+			defIds[i] = RA_SYNTHETIC_ID_BASE + i;
+			snapshot->rcDefsNoId++;
+		}
+	}
+
 	defIndex       = 0;
 	defFirstError  = RC_OK;
 	activatedCount = 0;
@@ -681,7 +758,7 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
 		*/
 		startLine = RA_VCOUNT;
 		one = rc_runtime_activate_achievement(
-			&runtime, RA_TEST_ACHIEVEMENT_ID + line, defLines[line], 0, 0);
+			&runtime, defIds[line], defLines[line], 0, 0);
 		spent = (u16)((RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME)
 		              % RA_SCANLINES_PER_FRAME);
 
@@ -721,6 +798,14 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
 		                                   RA_TEST_DEFINITION, 0, 0) != RC_OK) {
 			return RA_RC_PARSE_BAD;
 		}
+		/*
+		    Recorded in defIds too, so the measured-progress lookup and the line search below both
+		    find it. The fallback used to be indistinguishable from a staged definition because both
+		    were numbered 1; now it has to say so.
+		*/
+		defLines[0]           = (char*)RA_TEST_DEFINITION;
+		defIds[0]             = RA_TEST_ACHIEVEMENT_ID;
+		defCount              = 1;
 		activatedCount        = 1;
 		snapshot->rcActivated = 1;
 	}
@@ -806,13 +891,24 @@ void ra_rc_tick(raSnapshot* snapshot) {
 
 	rcStage = RA_RC_FRAME;
 
-	rc_runtime_get_achievement_measured(&runtime, RA_TEST_ACHIEVEMENT_ID, &measured, &target);
-	trigger = rc_runtime_get_achievement(&runtime, RA_TEST_ACHIEVEMENT_ID);
+	/*
+	    Reported for the *first staged definition*, whatever its id turned out to be, rather than for
+	    the constant 1. Those were the same thing while every definition was numbered from
+	    RA_TEST_ACHIEVEMENT_ID; with real ids they are not, and asking for 1 would have quietly
+	    reported on an achievement that does not exist.
+	*/
+	{
+		const u32 firstId = defCount ? defIds[0] : RA_TEST_ACHIEVEMENT_ID;
+
+		rc_runtime_get_achievement_measured(&runtime, firstId, &measured, &target);
+		trigger = rc_runtime_get_achievement(&runtime, firstId);
+	}
 
 	snapshot->rcStage         = rcStage;
 	snapshot->rcTriggerState  = trigger ? trigger->state : RC_TRIGGER_STATE_INACTIVE;
 	snapshot->rcTriggered     = triggeredCount;
 	snapshot->rcFirstTriggered = firstTriggered;
+	snapshot->rcFirstId        = firstId;
 	/*
 	    Latched at the last active reading rather than copied blindly. rcheevos reports
 	    measured progress only while a trigger is active, so both of these go back to zero

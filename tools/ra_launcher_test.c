@@ -471,8 +471,11 @@ static const char patchReply[] =
 	"],\"Leaderboards\":[{\"ID\":9,\"Mem\":\"STA:0xH1=1::CAN:0=1\",\"Format\":\"SCORE\"}],"
 	"\"RichPresencePatch\":\"Display:\\nStars: @Number(0xH1)\"}}";
 
-/* The two published definitions, one per line, with the escaped slash decoded. */
-#define PATCH_EXPECT "0xH0a1b2c=1_d0xH0a1b2c=0\n0xH000010>d0xH000010\n"
+/*
+    The two published definitions, one per line, each prefixed with the achievement's own
+    RetroAchievements id -- 1 and 3 in the fixture; 2 is the unofficial one and is not here.
+*/
+#define PATCH_EXPECT "1:0xH0a1b2c=1_d0xH0a1b2c=0\n3:0xH000010>d0xH000010\n"
 
 /*
     A whole fixture into the scanner in one call.
@@ -517,6 +520,12 @@ static void test_patch(void) {
 	/* Decoded length, so the escaped slash counts as the one character it becomes. */
 	CHECK(patch.longest == strlen("0xH0a1b2c=1_d0xH0a1b2c=0"));
 	CHECK(patch.shortest == strlen("0xH000010>d0xH000010"));
+	/*
+	    The ids came off the reply, not out of a counter. Both published achievements carried one;
+	    the count of id-less definitions is what would say a set cannot be reported on.
+	*/
+	CHECK(patch.withId == 2);
+	CHECK(patch.withoutId == 0);
 
 	/*
 	    Every split, because the boundary the network chooses is not ours -- and the interesting
@@ -616,6 +625,57 @@ static void test_patch(void) {
 		CHECK(patch.longest == strlen("0xH1=1_0xH2=2_0xH3=3"));
 	}
 
+	printf("\nthe id needle takes achievement ids and nothing that merely ends in ID\n");
+	{
+		/*
+		    "GameID" and "ConsoleID" both contain `ID":` and neither may match, because the needle
+		    carries the opening quote. This is the check that keeps a set from being staged under the
+		    game's number instead of each achievement's own.
+		*/
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch,
+			"{\"GameID\":14856,\"ConsoleID\":18,"
+			"\"ID\":9007,\"MemAddr\":\"0xH1=1\",\"Flags\":3}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 1 && patch.withId == 1 && patch.withoutId == 0);
+		CHECK(strcmp(block, "9007:0xH1=1\n") == 0);
+
+		/*
+		    An achievement with no id of its own must *not* inherit the root object's. The reply
+		    really does open with the game's `"ID"`, so without clearing the pending id on commit
+		    this would have staged 14856 and counted it as a proper id.
+		*/
+		raPatchReset(&patch, block, sizeof(block) - 1);
+		patchFeedAll(&patch,
+			"{\"ID\":14856,\"Achievements\":["
+			"{\"MemAddr\":\"0xH1=1\",\"Flags\":3},"
+			"{\"ID\":77,\"MemAddr\":\"0xH2=2\",\"Flags\":3}]}");
+		raPatchFinish(&patch);
+		CHECK(patch.kept == 2);
+		CHECK(patch.withId == 1 && patch.withoutId == 1);
+		CHECK(strcmp(block, "14856:0xH1=1\n77:0xH2=2\n") != 0);
+		CHECK(strcmp(block, "0xH1=1\n77:0xH2=2\n") == 0);
+
+		/* Ids survive being split across chunks like everything else. */
+		{
+			const char* reply = "\"ID\":123456,\"MemAddr\":\"0xH9=9\",\"Flags\":3";
+			const int   total = (int)strlen(reply);
+			int         split, bad = 0;
+
+			for (split = 0; split <= total; split++) {
+				raPatchReset(&patch, block, sizeof(block) - 1);
+				raPatchFeed(&patch, reply, split);
+				raPatchFeed(&patch, reply + split, total - split);
+				raPatchFinish(&patch);
+				if (strcmp(block, "123456:0xH9=9\n") != 0) {
+					bad = split + 1;
+					break;
+				}
+			}
+			CHECK(bad == 0);
+		}
+	}
+
 	printf("\nthe carry buffer holds the largest definition hardware has produced\n");
 	{
 		/*
@@ -678,12 +738,12 @@ static void test_patch(void) {
 		    that `wanted` reports what a complete set would have needed. That number is the
 		    measurement step 3d exists to take.
 		*/
-		char small[26];
+		char small[28];   /* "1:" + 24 + newline = 27, and not the 22 the second needs */
 
 		patchRun(&patch, small, sizeof(small) - 1, patchReply, 0);
-		CHECK(strcmp(small, "0xH0a1b2c=1_d0xH0a1b2c=0\n") == 0);
+		CHECK(strcmp(small, "1:0xH0a1b2c=1_d0xH0a1b2c=0\n") == 0);
 		CHECK(patch.kept == 1 && patch.dropped == 1);
-		CHECK(patch.used == 25 && patch.wanted == strlen(PATCH_EXPECT));
+		CHECK(patch.used == 27 && patch.wanted == strlen(PATCH_EXPECT));
 		CHECK(patch.used <= sizeof(small) - 1);
 
 		/* No room at all: nothing is written and everything is accounted for. */

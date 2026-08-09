@@ -562,7 +562,14 @@ int main(void) {
 	*/
 	CHECK(__builtin_offsetof(raSnapshot, rcFirstTriggered) == 0x9D);
 	CHECK(__builtin_offsetof(raSnapshot, rcInitTotal) == 0x9E);
-	CHECK(sizeof(raSnapshot) == 0xA0);
+	CHECK(__builtin_offsetof(raSnapshot, rcFirstId) == 0xA0);
+	CHECK(__builtin_offsetof(raSnapshot, rcDefsWithId) == 0xA4);
+	CHECK(__builtin_offsetof(raSnapshot, rcDefsNoId) == 0xA6);
+	/*
+	    0xA8, grown from 0xA0 by step 5's three fields -- appended, so every offset above them keeps
+	    the address the hardware checklist reads it at.
+	*/
+	CHECK(sizeof(raSnapshot) == 0xA8);
 
 	*DISPCNT = 0x1F40;
 
@@ -1391,6 +1398,51 @@ int main(void) {
 			ra_watch_clear();
 			ra_install_defaults(&snapshot);
 		}
+	}
+
+	printf("\nan id prefix is digits then a colon, and nothing else is\n");
+	{
+		/*
+		    The discriminator for step 5's block format, and the case that decides it is the real
+		    set's own first line: `1=1.300.` begins with a digit and is not an id. Every memaddr
+		    prefix flag that ends in a colon is a letter, so digits-then-colon cannot collide with
+		    memaddr syntax -- checked against the shipped set, where the character before the first
+		    colon is M, N, O, P, R or T on all 47 lines that have one.
+		*/
+		char        line[64];
+		char*       at;
+
+		strcpy(line, "123456:0xH1=1");
+		at = line;
+		CHECK(ra_take_id(&at) == 123456);
+		CHECK(strcmp(at, "0xH1=1") == 0);
+
+		/* A definition that merely starts with a digit keeps all of itself. */
+		strcpy(line, "1=1.300.");
+		at = line;
+		CHECK(ra_take_id(&at) == 0);
+		CHECK(strcmp(at, "1=1.300.") == 0);
+
+		/* A letter-prefixed flag is not an id, however many colons follow. */
+		strcpy(line, "A:0xH1=1_M:0xH2=2");
+		at = line;
+		CHECK(ra_take_id(&at) == 0);
+		CHECK(strcmp(at, "A:0xH1=1_M:0xH2=2") == 0);
+
+		/* A colon with no digits before it, and digits with no colon after them. */
+		strcpy(line, ":0xH1=1");
+		at = line;
+		CHECK(ra_take_id(&at) == 0);
+		strcpy(line, "0xH000010>d0xH000010");
+		at = line;
+		CHECK(ra_take_id(&at) == 0);
+		CHECK(strcmp(at, "0xH000010>d0xH000010") == 0);
+
+		/* An id of 1 is a real id, and is not the same thing as no id. */
+		strcpy(line, "1:0xH1=1");
+		at = line;
+		CHECK(ra_take_id(&at) == 1);
+		CHECK(strcmp(at, "0xH1=1") == 0);
 	}
 
 	test_wifi_verdict();

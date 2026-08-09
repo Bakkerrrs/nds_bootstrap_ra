@@ -312,11 +312,37 @@ typedef struct raNetStream {
 #define RA_PATCH_SCAN   0
 #define RA_PATCH_VALUE  1
 #define RA_PATCH_FLAGS  2
+#define RA_PATCH_ID     3
+
+/*
+    Each staged line is `<id>:<memaddr>`, and the id is the achievement's own number on
+    retroachievements.org.
+
+    Without it nothing downstream is possible: `r=unlocks` answers in ids, `r=awardachievement` is
+    asked in ids, and "which achievement just fired" has no answer the server would recognise. The
+    block carried none until now because nothing needed them, and adding them while the format has
+    exactly one producer and one consumer is far cheaper than adding them later.
+
+    **A leading run of decimal digits followed by a colon is an id, and nothing else is.** That is a
+    property of memaddr syntax rather than a convention chosen here: every prefix flag that ends in a
+    colon -- `A:`, `M:`, `N:`, `O:`, `P:`, `Q:`, `R:`, `T:`, `I:`, `K:`, `Z:`, `G:`, `C:`, `B:` -- is a
+    letter. Checked against the real set for GameID 14856: of its 47 lines containing a colon, the
+    character before the first one is `M`, `N`, `O`, `P`, `R` or `T`, never a digit. And a definition
+    may certainly *begin* with a digit -- that set's first line is `1=1.300.` -- which is exactly why
+    the test is digits-then-colon and not digits.
+
+    A line with no id still works, and files written by hand are not expected to carry them. See
+    RA_SYNTHETIC_ID_BASE.
+*/
 
 typedef struct raPatch {
 	char* block;          /* where the definitions go, one per line */
 	u32   blockMax;       /* bytes for text, terminator excluded */
 	u32   used;
+
+	u32   pendingId;      /* the "ID" seen most recently, waiting for its MemAddr */
+	u16   withId;         /* definitions written with a RetroAchievements id */
+	u16   withoutId;      /* ...and without one, which is a set we cannot report on */
 
 	u16   kept;           /* written to the block */
 	u16   unofficial;     /* dropped: Flags 5, not part of the published set */
@@ -334,6 +360,7 @@ typedef struct raPatch {
 	u8    state;
 	u8    memAt;
 	u8    flagsAt;
+	u8    idAt;
 	u8    escape;
 	u8    pendingOpen;    /* a value has started, so there is something to commit */
 	u8    pendingBad;     /* ...and it overran RA_PATCH_MEMADDR_MAX */

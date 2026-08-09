@@ -720,6 +720,12 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	raWifiLog("body was         %d bytes\n", got);
 	raWifiLog("definitions      %u kept, %u unofficial\n",
 	          patch.kept, patch.unofficial);
+	/*
+	    The reading step 5 exists for. A set where every definition carried its own achievement id is
+	    a set that can be reported on; one id short is one achievement that can never be awarded, and
+	    the block alone cannot say which of those happened.
+	*/
+	raWifiLog("ids              %u with, %u without\n", patch.withId, patch.withoutId);
 	if (patch.dropped || patch.tooLong || patch.cutShort || patch.empty
 	 || patch.oddFlags || patch.noFlags) {
 		/*

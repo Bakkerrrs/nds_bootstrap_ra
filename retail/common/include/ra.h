@@ -398,7 +398,24 @@ typedef struct raSnapshot {
 	    simply be one delta.
 	*/
 	u16 rcInitTotal;      /* +0x9E */
-} raSnapshot;            /*              0xA0 bytes */
+	/*
+	    Step 5's three fields, appended for the reason every block above them was: **every existing
+	    offset keeps its address**, so the hardware checklist in docs/retroachievements.md stays
+	    valid and the magic does not need another bump. The struct grows from 0xA0 to 0xA8.
+
+	    The staged definitions carry RetroAchievements' own achievement ids now -- each line is
+	    `<id>:<memaddr>`. Without them nothing can be reported to the server: `r=unlocks` answers in
+	    ids and `r=awardachievement` is asked in them, and "which achievement fired" had no answer
+	    the server would recognise.
+
+	    rcFirstId is the one that proves it end to end. rcFirstTriggered says *which line* unlocked
+	    first and has since the offline half; this says which achievement, in the server's own
+	    numbering, which is the number a person can look up on the set's page.
+	*/
+	u32 rcFirstId;        /* +0xA0  RA id of the first achievement to unlock, 0 if none */
+	u16 rcDefsWithId;     /* +0xA4  staged lines that carried an id */
+	u16 rcDefsNoId;       /* +0xA6  ...and lines that did not, which cannot be reported */
+} raSnapshot;            /*              0xA8 bytes */
 
 /*
     How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail
@@ -429,6 +446,19 @@ typedef struct raSnapshot {
     loading state that sorts *after* active would invert every one of those guards, and a wrong
     guard is worse than a stale number in a document I control.
 */
+/*
+    The id given to a definition that arrived without one -- a hand-written file, or a set from a
+    server that omitted the field.
+
+    Far out of the range real RA ids occupy, and that is the whole point rather than tidiness:
+    rcheevos identifies achievements *by id* and will treat two definitions sharing one as the same
+    achievement, reusing the first's trigger for the second. Numbering the id-less ones from 1 (as
+    every build before this did) was safe only while nothing carried a real id; the moment both
+    appear in one file, a real id of 3 would collide with the third id-less line. Real ids are six
+    or seven digits, so 0xF0000000 cannot be reached by one.
+*/
+#define RA_SYNTHETIC_ID_BASE 0xF0000000u
+
 #define RA_RC_LOADING     5  /* activating, one per frame; rcActivated says how far */
 #define RA_RC_ACTIVE      6  /* every definition activated and validated */
 #define RA_RC_FRAME       7  /* rc_runtime_do_frame() has run */
