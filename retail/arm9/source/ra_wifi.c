@@ -256,6 +256,52 @@ static void raWifiLog(const char* fmt, ...) {
 }
 
 /*
+    A whole reply body in the log, in pieces that fit, with the token removed on the way.
+
+    Two reasons this is not just raWifiLog("%s", body). The line buffer above is 192 bytes, so a
+    900-byte reply logged that way is silently cut at the first 192 -- which is how three runs went by
+    with `r=unlocks` reporting a parsed count and never showing what it was parsing. And this log is
+    written to be sent to someone else, so a body must never carry the session token out with it.
+
+    The redaction is a safety net rather than a fix for a known leak: no reply this client reads is
+    supposed to echo the token back. A net is worth having anyway, because the cost of being wrong
+    once is an account, and because the next endpoint added here does not have to remember the rule.
+    See raConfigRedact() for the same rule applied to the password.
+
+    The `>= 8` guard is load-bearing: strncmp against a zero-length token matches at every position,
+    which would spin here forever.
+*/
+static void raWifiLogBody(const char* label, const char* body) {
+	const size_t tokenLength = strlen(raToken);
+	size_t       i = 0;
+	char         chunk[144];
+
+	raWifiLog("%s:\n", label);
+
+	while (body[i]) {
+		size_t n = 0;
+
+		while (body[i] && n < sizeof(chunk) - 1) {
+			if (tokenLength >= 8 && strncmp(body + i, raToken, tokenLength) == 0) {
+				if (n + 7 >= sizeof(chunk) - 1) {
+					break;   /* no room; flush and let the next chunk carry it */
+				}
+				memcpy(chunk + n, "(token)", 7);
+				n += 7;
+				i += tokenLength;
+				continue;
+			}
+			chunk[n++] = body[i++];
+		}
+		if (n == 0) {
+			break;           /* cannot happen with a 144-byte chunk; not worth risking a spin */
+		}
+		chunk[n] = 0;
+		raWifiLog("  %s\n", chunk);
+	}
+}
+
+/*
     dsiwifi's narration, unedited, captured from the interrupt. This is the channel that
     answers the question, so it is passed through rather than summarised -- the summary is
     derived from it afterwards and can be checked against it.
@@ -721,6 +767,15 @@ static void raWifiSubmitOne(const raConfig* cfg, u32 id, raQueue* q) {
 	if (raNetJsonTrue(response, "Success")) {
 		q->accepted++;
 		raWifiLog("\x1b[32m  %lu  awarded\x1b[37m\n", (unsigned long)id);
+		/*
+		    Logged on *success* too, and that is not verbosity. The first accepted award read
+		    `93119 awarded` and the very next rung still reported one unlock, the server's own
+		    notice -- so Success:true and the account holding the achievement are not the same
+		    statement, and a one-word summary cannot tell them apart. The reply carries
+		    AchievementID, Score and AchievementsRemaining; those are what say whether anything
+		    was recorded. See docs/retroachievements.md.
+		*/
+		raWifiLogBody("award reply", raNetBody(response));
 		return;
 	}
 
@@ -737,8 +792,8 @@ static void raWifiSubmitOne(const raConfig* cfg, u32 id, raQueue* q) {
 			raWifiLog("\x1b[33m  %lu  refused: %s\x1b[37m\n", (unsigned long)id, error);
 		} else {
 			raWifiLog("\x1b[33m  %lu  refused\x1b[37m\n", (unsigned long)id);
-			raWifiLog("  body: %s\n", raNetBody(response));
 		}
+		raWifiLogBody("award reply", raNetBody(response));
 	}
 }
 
@@ -894,6 +949,14 @@ static void raWifiUnlocks(const raConfig* cfg) {
 		return;
 	}
 	raWifiLog("%d bytes back\n", got);
+
+	/*
+	    The whole reply, before anything is parsed out of it. Three runs reported a count from this
+	    endpoint without ever showing what produced the count, and then a run awarded 93119 and this
+	    endpoint still named only the notice -- at which point the parsed number is the one thing that
+	    cannot settle the question. Under 1 KB, and the log has room.
+	*/
+	raWifiLogBody("unlocks reply", raNetBody(response));
 
 	count = raNetJsonIdList(response, "UserUnlocks", unlockedIds, RA_WIFI_UNLOCKS_MAX);
 	if (count < 0) {

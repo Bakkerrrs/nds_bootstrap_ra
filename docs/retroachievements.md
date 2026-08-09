@@ -4489,6 +4489,103 @@ Then the real test, and it needs no code: **put a real id in the file by hand.**
 
 If instead it is refused, the server's `Error` string is in the log and says which of the two it was.
 
+### Hardware: the plumbing run, then the real one
+
+Two runs, exactly the two the section above asked for.
+
+**The plumbing.** Log at `docs/logs/ra_wifi_launcher_queue-3ds.log`. Every new line read as designed:
+
+```
+-- stage 12: report what the last session earned --
+queue            created, 1024 bytes, nothing owed
+-- stage 13: what has this account already earned --
+already earned    1
+  earned id      101000001  (server notice)
+-- stage 14: fetch the set --
+already earned   0 of 1 matched this set
+of those, 1 is the server's own notice
+reached stage 14 of 14
+```
+
+No yellow warning, because the notice now accounts for the whole mismatch — which is the change from
+the run before it working.
+
+One prediction in that section was wrong and the log says so. I wrote "2.3 KB more `.bss`; this line is
+where that shows". `heap after award` reports `45056 safe`, against `53248` before — an 8 KB drop, not
+2.3 KB. `safe` is literally `IMAGES_LOCATION - heapTop`, so what moved is the heap top, from
+`0232B000` to `0232D000`. The statics added come to about 2,370 bytes (`file[1024]`, `response[1024]`,
+a `raQueue`, `raUser`), so **most of that 8 KB is not accounted for** and this document is not going to
+pretend otherwise. What can be said: free space did not fall — `fordblks` went from 9,144 to 10,840,
+and run-to-run variation on the same binary was already 9,144–9,592 — and 45 KB of headroom remains, so
+nothing is tight. The number is logged every run and will be measured properly if it ever matters.
+
+**The real one.** `93119` typed into `sd:/ra_unlocks.txt` with a text editor. Log at
+`docs/logs/ra_wifi_launcher_awarded-3ds.log`:
+
+```
+-- stage 12: report what the last session earned --
+queue            1 to send
+  93119  awarded
+awarded 1, refused 0, still owed 0
+```
+
+**The protocol works.** The signature, the parameter names, the token, and plain `GET` against
+`dorequest.php` are all accepted — `Success:true` for a real achievement in this set. That is the whole
+sending half proven, and it needed no code beyond what was already committed: a human typed an id into
+a file.
+
+#### But the loop did not close, and the next rung is where that shows
+
+One rung later, in the same run, seconds after the award:
+
+```
+-- stage 13: what has this account already earned --
+already earned    1
+  earned id      101000001  (server notice)
+...
+definitions      55 kept
+```
+
+Still one unlock, still only the notice, still 55 definitions. **`Success:true` and the account holding
+the achievement are not the same statement.**
+
+Both endpoints were re-read from the vendored rcheevos before theorising, and neither is being called
+wrong: `r=unlocks` sends `g=` and `h=` and returns `UserUnlocks` as a **flat array of numbers**, which
+is exactly what `raNetJsonIdList()` parses; `h=0` is the softcore form. So the server really did answer
+`[101000001]` right after accepting 93119.
+
+What is left is a short list, and nothing in the current log distinguishes its entries:
+
+| | |
+| --- | --- |
+| `r=unlocks` is cached or replicated late | the award landed and this query did not see it yet |
+| the award was accepted and discarded | the standing User-Agent problem — RA does not recognise `nds-bootstrap-ra/0.1`, injects the `Warning: Unknown Emulator` achievement, and blocks hardcore. Whether it also drops softcore unlocks from an unregistered client is exactly the open question |
+| something else about the request | `r=startsession` is a verb this client never sends, and rcheevos sends it when a game loads |
+
+#### The blind spot this exposed, and the fix
+
+For three runs `r=unlocks` reported a *parsed count* and never showed what it was parsing, and the award
+reported one word. At the point where the parsed number is the thing in doubt, that is the wrong thing
+to have logged.
+
+So both replies are now logged verbatim — `award reply` and `unlocks reply`. `raWifiLog()`'s line buffer
+is 192 bytes and these bodies are 900+, which is why a new `raWifiLogBody()` exists rather than a
+`%s`: it chunks at 144 bytes and would have made this visible three runs ago.
+
+It also **strips the session token** on the way out. No reply this client reads is supposed to echo the
+token back, so that is a safety net and not a fix for a known leak — but this log is written to be sent
+to someone else, the cost of being wrong once is an account, and the next endpoint added here does not
+have to remember the rule. The `>= 8` length guard on it is load-bearing: `strncmp` against a
+zero-length token matches at every position and would spin forever.
+
+The reply carries `AchievementID`, `Score` and `AchievementsRemaining`. Those say whether anything was
+recorded, and they are what the next run will show.
+
+There is also a check that costs nothing and settles the biggest branch immediately: **look at the
+account's page on retroachievements.org.** If 93119 shows as unlocked in softcore, the award landed and
+`r=unlocks` is a caching question. If it does not, the client is being accepted and ignored, and the
+User-Agent stops being a standing annoyance and becomes the blocker.
+
 ### What is not built, and what it needs
 
 3b — the cardengine writing to the queue — is not started. Sizing it honestly, from reading the code
