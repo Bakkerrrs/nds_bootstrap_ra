@@ -38,6 +38,7 @@
 
 #include <nds.h>
 #include <stdio.h>
+#include <sys/stat.h>   /* mkdir(), for the per-game cache directory */
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
@@ -137,6 +138,12 @@ static char          raToken[64];
     r=awardachievement wants must be computed over the same spelling that goes in u=.
 */
 static char          raUser[sizeof(((raConfig*)0)->username)];
+/*
+    Which card the launcher booted from, kept at file scope for one reason: the failure paths in the
+    fetch have to reach the per-game cache, and they are called from places that were never given the
+    flag. Set once by raWifiProbe() before anything can use it.
+*/
+static bool          raWifiSdFound;
 /*
     Achievements the account already holds. 128 because RA_DEFS_MAX_LINES is 128 and a skip list
     longer than the set it filters would be pointless; a bigger set truncates and says so.
@@ -1143,7 +1150,23 @@ static void raWifiUnlocks(const raConfig* cfg) {
     Re-staging rather than preserving, because the reply is three times the size of the block and
     there is nowhere else to scan it. Cheap: one file read, and only on the path that already failed.
 */
+/* Defined further down, beside the cache writer it mirrors. */
+static bool raWifiCacheLoad(bool sdFound);
+
+/*
+    Put something in the block after a fetch that did not produce one.
+
+    The cache first, because it is the set *for this ROM* -- a previous boot's own answer from the
+    server. ra_achievements.txt is the fallback under it: one hand-managed file that has no way to know
+    which game is running, which is exactly the limitation the cache was added to remove.
+
+    Called from every failure path in the fetch, because the fetch streams into this block and destroys
+    whatever was there on its way even when it then fails.
+*/
 static void raWifiRestoreDefinitionsFile(void) {
+	if (raWifiCacheLoad(raWifiSdFound)) {
+		return;
+	}
 	loadRaDefinitions();
 	if (*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION == CARDENGINEI_ARM9_RA_DEFS_MAGIC) {
 		raWifiLog("restored         ra_achievements.txt (%lu bytes)\n",
@@ -1438,6 +1461,109 @@ static void raWifiRecordHash(bool sdFound, const char* romPath) {
 	raWifiLog("hashes           added to %s\n", path);
 }
 
+/*
+    Write whatever is staged in the definitions block to a file.
+
+    Factored out of raWifiDumpDefinitions() so the per-game cache writes the same bytes through the same
+    path: two writers of one format would be two chances for them to disagree, and the cache is read
+    back by the same reader that reads ra_achievements.txt.
+
+    Returns false and says nothing -- the caller knows which file it was and what that means.
+*/
+static bool raWifiWriteBlockTo(const char* path) {
+	const char* const text = (const char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
+	                                       + CARDENGINEI_ARM9_RA_DEFS_HEADER);
+	const u32         length = *(u32*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + 4);
+	FILE*             out;
+	bool              ok;
+
+	if (*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION != CARDENGINEI_ARM9_RA_DEFS_MAGIC
+	 || length == 0) {
+		return false;
+	}
+	out = fopen(path, "w");
+	if (!out) {
+		return false;
+	}
+	ok = (fwrite(text, 1, length, out) == length);
+	fclose(out);
+	return ok;
+}
+
+/*
+    The fetched set, kept for this exact ROM.
+
+    Named by the hash rather than the GameID, because the GameID needs the network and the hash does not
+    -- a cache a later boot cannot find without doing the request is not a cache. See RA_CACHE_DIR.
+
+    mkdir every time and ignore the result: there is no portable "does this directory exist" here that is
+    cheaper than trying, and an existing directory failing is the normal case.
+*/
+static void raWifiCachePath(char* out, size_t outSize, bool sdFound) {
+	sniprintf(out, outSize, "%s/%s.txt",
+	          sdFound ? RA_CACHE_DIR : RA_CACHE_DIR_FAT, romHash);
+}
+
+static void raWifiCacheWrite(bool sdFound) {
+	char path[96];
+
+	if (!romHash[0]) {
+		return;
+	}
+	mkdir(sdFound ? RA_CACHE_DIR : RA_CACHE_DIR_FAT, 0777);
+	raWifiCachePath(path, sizeof(path), sdFound);
+
+	if (raWifiWriteBlockTo(path)) {
+		raWifiLog("cached           %s\n", path);
+	} else {
+		raWifiLog("\x1b[33mcould not cache to %s\x1b[37m\n", path);
+	}
+}
+
+/*
+    ...and load it back, into the same block the fetch would have filled.
+
+    Byte-for-byte the staging conf_sd.cpp does for ra_achievements.txt -- magic written *last*, so a
+    half-written block is never mistaken for a whole one. Used when the fetch did not happen or did not
+    work, which is the case the cache exists for.
+*/
+static bool raWifiCacheLoad(bool sdFound) {
+	char   path[96];
+	FILE*  file;
+	long   size;
+	bool   ok = false;
+
+	if (!romHash[0]) {
+		return false;
+	}
+	raWifiCachePath(path, sizeof(path), sdFound);
+	file = fopen(path, "rb");
+	if (!file) {
+		return false;
+	}
+	fseek(file, 0, SEEK_END);
+	size = ftell(file);
+	fseek(file, 0, SEEK_SET);
+
+	if (size > 0
+	 && size < (long)(CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1)) {
+		u8* text = (u8*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
+		                 + CARDENGINEI_ARM9_RA_DEFS_HEADER);
+
+		if (fread(text, 1, size, file) == (size_t)size) {
+			text[size] = 0;
+			*(u32*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + 4) = (u32)size;
+			*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = CARDENGINEI_ARM9_RA_DEFS_MAGIC;
+			ok = true;
+		}
+	}
+	fclose(file);
+	if (ok) {
+		raWifiLog("\x1b[32mcached set       %ld bytes for this ROM\x1b[37m\n", size);
+	}
+	return ok;
+}
+
 static void raWifiDumpDefinitions(bool sdFound) {
 	const char* const path = sdFound ? RA_DEFS_DUMP_PATH : RA_DEFS_DUMP_PATH_FAT;
 	const char* const text = (const char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
@@ -1530,6 +1656,7 @@ bool raWifiShutdown(void) {
 }
 
 void raWifiProbe(bool sdFound, const char* ndsPath) {
+	raWifiSdFound = sdFound;
 	static raConfig config;
 	int             stage;
 
@@ -1823,6 +1950,12 @@ done:
 	}
 	if (verdict.patched) {
 		raWifiDumpDefinitions(sdFound);
+		/*
+		    And keep it for this ROM, so a boot that skips the ladder still has a set. Written after
+		    the dump rather than instead of it: the dump is the artifact a human reads against the
+		    set's page, the cache is what the next boot loads.
+		*/
+		raWifiCacheWrite(sdFound);
 		raWifiSync();
 	}
 

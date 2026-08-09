@@ -101,6 +101,20 @@
     definition. Same file format the launcher already *reads* from ra_achievements.txt, which
     makes it directly re-usable -- copy it there and the game boots with the server's own set.
 */
+/*
+    The per-game cache: the fetched set, kept so a later boot does not have to ask for it again.
+
+    **Keyed by the ROM's hash, not by its GameID**, and that is the whole design. The GameID comes from
+    r=gameid, which needs the network -- so a cache indexed by it could only ever be found by a boot
+    that had already done the thing the cache exists to avoid. The hash is computed locally at stage 0b
+    from the file on the card, with no radio up, and it identifies exactly one set.
+
+    One file per ROM, so a card with a shelf of games has a set for each rather than for whichever one
+    was copied by hand last. Without this the offline path only ever worked for the most recent game.
+*/
+#define RA_CACHE_DIR           "sd:/_nds/nds-bootstrap/ra"
+#define RA_CACHE_DIR_FAT       "fat:/_nds/nds-bootstrap/ra"
+
 #define RA_DEFS_DUMP_PATH      "sd:/ra_definitions.txt"
 #define RA_DEFS_DUMP_PATH_FAT  "fat:/ra_definitions.txt"
 
