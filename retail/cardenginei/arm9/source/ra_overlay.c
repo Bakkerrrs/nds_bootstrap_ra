@@ -160,7 +160,7 @@ static bool brightActive(void) {
 static u32  stateMagic;
 static u32  framesLeft;   /* non-zero while visible */
 #if OVERLAY_DEMO_INTERVAL
-static u32  demoCounter;
+static u16  demoCounter;
 #endif
 static u32  lastUnlocks;
 /*
@@ -529,9 +529,16 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 	}
 
 	#if OVERLAY_DEMO_INTERVAL
+	/*
+	    Raises it through `pending` rather than calling show() directly, which is not tidiness: show() is
+	    static, and a second call site stops gcc inlining it. The demo build overflowed the window by 20
+	    bytes with a direct call and fits with this one. It also means the probe exercises the deferral,
+	    which is the path a real unlock takes.
+	*/
 	if (++demoCounter >= OVERLAY_DEMO_INTERVAL) {
 		demoCounter = 0;
-		show(text);
+		pending = 1;
+		pendingFrames = 0;
 	}
 	#endif
 }

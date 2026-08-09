@@ -858,6 +858,22 @@ static u8 ra_rc_prepare(raSnapshot* snapshot) {
 	snapshot->rcInitTotal = 0;
 
 	/*
+	    A strip rendered before any achievement has fired, so raSnapshot.overlayText is a valid address
+	    from the first frame instead of zero until the first unlock.
+
+	    It exists to make the overlay testable without spending an achievement. A build with
+	    -DRA_OVERLAY_DEMO=60 pulses the notification once a second, which is the only way to ask "can
+	    anything be seen at all" in ten seconds rather than in a three-minute session that ends with one
+	    achievement permanently earned. With a zero strip that probe draws a blank box and answers
+	    nothing.
+
+	    Harmless in an ordinary build: nothing raises a notification except a trigger, and a trigger
+	    re-renders with the real title first. The placeholder can only ever reach the screen in a build
+	    that asked for it.
+	*/
+	textStrip = ra_text_render(RA_TEXT_HEADING, "probe 0123456789");
+
+	/*
 	    Watches first, and only clearing the defaults if the file actually supplies some -- a
 	    file of definitions alone should still show the self-test watches, which are the thing
 	    that says the reader is alive at all.
