@@ -1564,6 +1564,73 @@ static bool raWifiCacheLoad(bool sdFound) {
 	return ok;
 }
 
+/*
+    Copy the log's tail into the definitions block, so it can be read from inside the game.
+
+    Read back off the card rather than kept in RAM: the log is written line by line as the ladder runs
+    and there was never a buffer holding all of it, and reading it back is what makes the copy include
+    the summary -- the part worth reading.
+
+    The *tail*, because what fits is decided by the set. A definitions block full of achievements leaves
+    no room and that is the correct precedence: the game needs the set, the log is a diagnostic. When
+    there is room the last N bytes are what matter anyway, since a failure is at the end.
+
+    The address printed is the *final* one in DSi WRAM, not the staging copy -- that is where the RAM
+    viewer has to be pointed, and working it out by hand from two constants is exactly the kind of step
+    that produces a wrong reading.
+*/
+static void raWifiStashLog(bool sdFound) {
+	const u32 base    = CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION;
+	const u32 defsLen = (*(u32*)base == CARDENGINEI_ARM9_RA_DEFS_MAGIC)
+	                    ? *(u32*)(base + 4) : 0;
+	const u32 at      = CARDENGINEI_ARM9_RA_DEFS_HEADER + defsLen + 1;
+	u32       room;
+	FILE*     file;
+	long      size;
+
+	if (at + CARDENGINEI_ARM9_RA_LOG_HEADER >= CARDENGINEI_ARM9_RA_DEFS_MAX) {
+		return;
+	}
+	room = CARDENGINEI_ARM9_RA_DEFS_MAX - at - CARDENGINEI_ARM9_RA_LOG_HEADER - 1;
+	if (room < CARDENGINEI_ARM9_RA_LOG_MIN) {
+		raWifiLog("\x1b[33mno room for the log in the block (%lu free)\x1b[37m\n",
+		          (unsigned long)room);
+		return;
+	}
+
+	/* Flushed first, or the tail read back would be missing everything since the last sync. */
+	raWifiSync();
+
+	file = fopen(sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT, "rb");
+	if (!file) {
+		return;
+	}
+	fseek(file, 0, SEEK_END);
+	size = ftell(file);
+	if (size > (long)room) {
+		fseek(file, size - (long)room, SEEK_SET);
+		size = (long)room;
+	} else {
+		fseek(file, 0, SEEK_SET);
+	}
+
+	{
+		char* const text = (char*)(base + at + CARDENGINEI_ARM9_RA_LOG_HEADER);
+		const size_t got = fread(text, 1, (size_t)size, file);
+
+		fclose(file);
+		text[got] = 0;
+		*(u32*)(base + at + 4) = (u32)got;
+		/* Magic last, so a half-written section is never mistaken for a whole one. */
+		*(u32*)(base + at)     = CARDENGINEI_ARM9_RA_LOG_MAGIC;
+
+		raWifiLog("log in memory    %lu bytes at %08lX\n",
+		          (unsigned long)got,
+		          (unsigned long)(CARDENGINEI_ARM9_RA_DEFS_LOCATION + at
+		                          + CARDENGINEI_ARM9_RA_LOG_HEADER));
+	}
+}
+
 static void raWifiDumpDefinitions(bool sdFound) {
 	const char* const path = sdFound ? RA_DEFS_DUMP_PATH : RA_DEFS_DUMP_PATH_FAT;
 	const char* const text = (const char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
@@ -1986,6 +2053,12 @@ done:
 	if (verdict.submitKept) {
 		raWifiLog("still owed       %u, next boot\n", verdict.submitKept);
 	}
+	/*
+	    Last thing that touches the block, and it has to be: it fills what the definitions left over, so
+	    it can only know how much that is once they are final. Unconditional -- a run that failed is the
+	    one whose log is worth reading from inside the game.
+	*/
+	raWifiStashLog(sdFound);
 	if (verdict.unlocksKnown) {
 		raWifiLog("already earned   %u\n", verdict.unlockCount);
 	} else {
