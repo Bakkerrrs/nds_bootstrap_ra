@@ -68,11 +68,15 @@
     trigger it. There is now -- rcheevos delivers RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED and the count
     reaches here as raSnapshot.rcTriggered -- so the timer is off and the notification means something.
 
-    Kept rather than deleted, at 0 so it compiles out: setting it non-zero is how the borrow-and-return
-    negotiation gets exercised on a game without spending an achievement to do it, and that is worth
-    one #if.
+    Kept rather than deleted, at 0 so it compiles out, and overridable from the command line -- which
+    is what it is for. Contra 4 froze `ticks` at 19, so the reader dies about three tenths of a second
+    into the game and nothing can ever unlock; a build with -DOVERLAY_DEMO_INTERVAL=60 answers "is
+    ra_tick still being called" by pulsing once a second on screen, with no RAM viewer and nothing to
+    interpret. It also exercises the borrow-and-return negotiation without spending an achievement.
 */
+#ifndef OVERLAY_DEMO_INTERVAL
 #define OVERLAY_DEMO_INTERVAL 0
+#endif
 
 /*
     "RA UNLOCKED", one 1bpp 8x8 glyph per character in message order. In order rather

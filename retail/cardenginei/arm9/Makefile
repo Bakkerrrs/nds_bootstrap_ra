@@ -40,6 +40,14 @@ CFLAGS	:=	-g -Wall -O2\
 
 # ADD -DDEBUG here for logging/debug
 CFLAGS	+=	$(INCLUDE) -DARM9 -DNO_CARDID
+
+# A diagnostic, off by default: RA_OVERLAY_DEMO=60 raises the achievement notification once a
+# second regardless of whether anything unlocked. That answers "is ra_tick still being called
+# during play" visually, with no RAM viewer -- which is exactly the question Contra 4 raised by
+# freezing raSnapshot.ticks at 19. See OVERLAY_DEMO_INTERVAL in source/ra_overlay.c.
+ifneq ($(RA_OVERLAY_DEMO),)
+CFLAGS	+=	-DOVERLAY_DEMO_INTERVAL=$(RA_OVERLAY_DEMO)
+endif
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 
 ASFLAGS	:=	-g $(ARCH) $(INCLUDE)
