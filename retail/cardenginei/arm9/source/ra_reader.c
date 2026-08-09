@@ -117,6 +117,19 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 		snapshot.evicted       = raOverlayEvicted;
 		snapshot.deniedNoLayer = raOverlayDeniedNoLayer;
 	}
+	/*
+	    From misc.c, where the re-arm lives. Published here rather than there for the same reason the
+	    overlay's counters are: this file owns the snapshot and the others stay leaves.
+
+	    Note what a non-zero rearmTable together with a rising `ticks` means -- the hook was removed and
+	    put back, and the reader is alive *because* of the re-arm rather than in spite of it.
+	*/
+	{
+		extern u8 raRearmTable, raRearmIe, raRearmDispstat;
+		snapshot.rearmTable    = raRearmTable;
+		snapshot.rearmIe       = raRearmIe;
+		snapshot.rearmDispstat = raRearmDispstat;
+	}
 
 	/*
 	    Last frame's count: the WRAM binary that increments it runs below. One frame of latency on a

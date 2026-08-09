@@ -464,7 +464,22 @@ typedef struct raSnapshot {
 	u16 unlockSent;       /* +0xAC  ids handed to the ARM7 */
 	u8  unlockQueued;     /* +0xAE  still waiting in the ring */
 	u8  unlockLost;       /* +0xAF  fired while the ring was full */
-} raSnapshot;            /*              0xB0 bytes */
+	/*
+	    How often the per-frame hook had to be put back, and *which* part of it was gone.
+
+	    Contra 4 froze `ticks` at 19 while Mario 64 ran to 2,863 on the same binary, so something in
+	    that game takes the hook away three tenths of a second in. Three things have to hold for it to
+	    fire -- the game's IRQ table entry, IRQ_VCOUNT in REG_IE, and the Y-trigger in REG_DISPSTAT --
+	    and a blind re-arm would fix it without ever saying which. These count them separately, so the
+	    next run names the mechanism instead of leaving it inferred.
+
+	    Zero on a game that never disturbs it, which is every game measured before this one.
+	*/
+	u8  rearmTable;       /* +0xB0  irqTable[2] no longer pointed at our handler */
+	u8  rearmIe;          /* +0xB1  IRQ_VCOUNT had been cleared from REG_IE */
+	u8  rearmDispstat;    /* +0xB2  the Y-trigger interrupt had been switched off */
+	u8  reserved5;        /* +0xB3 */
+} raSnapshot;            /*              0xB4 bytes */
 
 /*
     How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail

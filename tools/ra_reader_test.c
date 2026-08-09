@@ -606,11 +606,16 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, unlockSent) == 0xAC);
 	CHECK(__builtin_offsetof(raSnapshot, unlockQueued) == 0xAE);
 	CHECK(__builtin_offsetof(raSnapshot, unlockLost) == 0xAF);
+	/* The hook re-arm's three counters, appended after step 3b's four. */
+	CHECK(__builtin_offsetof(raSnapshot, rearmTable) == 0xB0);
+	CHECK(__builtin_offsetof(raSnapshot, rearmIe) == 0xB1);
+	CHECK(__builtin_offsetof(raSnapshot, rearmDispstat) == 0xB2);
 	/*
-	    0xB0, grown 0xA0 -> 0xA8 by step 5 and 0xA8 -> 0xB0 by step 3b -- appended both times, so every
-	    offset above them keeps the address the hardware checklist reads it at.
+	    0xB4, grown 0xA0 -> 0xA8 by step 5, 0xA8 -> 0xB0 by step 3b and 0xB0 -> 0xB4 by the hook re-arm
+	    -- appended every time, so every offset above them keeps the address the hardware checklist
+	    reads it at.
 	*/
-	CHECK(sizeof(raSnapshot) == 0xB0);
+	CHECK(sizeof(raSnapshot) == 0xB4);
 
 	/*
 	    The shared block's real size, pinned because overrunning it is silent: slot 13 is

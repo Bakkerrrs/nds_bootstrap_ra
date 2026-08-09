@@ -403,6 +403,9 @@ extern void enableIPC_SYNC(void);
 
 #ifndef TWLSDK
 extern void initialize(void);
+#if RA_READER_ENABLED
+extern void raRearmVCount(void);   /* misc.c -- puts the per-frame hook back if the game removed it */
+#endif
 #endif
 
 //static void clearIcache (void) {
@@ -796,6 +799,13 @@ void cardRead(u32* cacheStruct, u8* dst0, u32 src0, u32 len0) {
 	}
 	#else
 	initialize();
+	/*
+	    Cheap, and here because here is what survives: see raRearmVCount(). Four register compares on a
+	    path that already does a card read, against a per-frame hook that a game can silently remove.
+	*/
+	#if RA_READER_ENABLED
+	raRearmVCount();
+	#endif
 
 	if (!(ce9->valueBits & isSdk5)) {
 		debugRamMpuFix();

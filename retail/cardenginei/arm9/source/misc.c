@@ -140,6 +140,72 @@ void hookIPC_SYNC(void) {
 	#endif
 }
 
+/*
+    Put the per-frame hook back if the game took it away.
+
+    hookIPC_SYNC() above installs it exactly once, guarded by IPC_SYNC_hooked, which was fine for every
+    game measured until Contra 4: the same binary ran 2,863 ticks on Super Mario 64 DS and froze at 19
+    there, three tenths of a second in, with the achievement set fully armed and rcheevos evaluating.
+    Nothing put it back because nothing was watching.
+
+    Called from cardRead(), and that choice is the whole point. cardRead is patched into the *game's
+    code* rather than into its interrupt table, and it demonstrably runs for the entire session -- a game
+    that stopped reading its own ROM would not load a level. So it survives exactly the thing suspected
+    of killing the hook.
+
+    Three separate counters instead of one, because a blind re-arm would fix the symptom and destroy the
+    evidence. Three conditions have to hold for the handler to fire and any of them could be the one
+    Contra 4 disturbs; the next run says which by name. See raSnapshot.rearmTable.
+
+    Same guards as the install, in the same order, so a console or a game that never wanted this hook
+    still never gets one: the reader is 3DS-family only and colorLutBlockVCount vetoes it.
+*/
+#if RA_READER_ENABLED
+u8 raRearmTable;
+u8 raRearmIe;
+u8 raRearmDispstat;
+
+void raRearmVCount(void) {
+	u32* vcountHandler;
+
+	if (ce9->consoleModel == 0
+	 || (ce9->valueBits & colorLutBlockVCount)
+	 || !ce9->irqTable
+	 || !ce9->patches->vcountHandlerRef) {
+		return;
+	}
+
+	vcountHandler = ce9->irqTable + 2;
+	if (*vcountHandler != (u32)ce9->patches->vcountHandlerRef) {
+		/*
+		    The game's own handler is saved again rather than kept from the first install: whatever it
+		    put there is what our handler has to chain to now, and using the stale one would return
+		    into code the game may have moved.
+		*/
+		ce9->intr_vcount_orig_return = *vcountHandler;
+		*vcountHandler = (u32)ce9->patches->vcountHandlerRef;
+		if (raRearmTable < 255) {
+			raRearmTable++;
+		}
+	}
+
+	if (!(REG_IE & IRQ_VCOUNT)) {
+		REG_IE |= IRQ_VCOUNT;
+		if (raRearmIe < 255) {
+			raRearmIe++;
+		}
+	}
+
+	if (!(REG_DISPSTAT & DISP_YTRIGGER_IRQ)) {
+		SetYtrigger(0);
+		REG_DISPSTAT |= DISP_YTRIGGER_IRQ;
+		if (raRearmDispstat < 255) {
+			raRearmDispstat++;
+		}
+	}
+}
+#endif
+
 void enableIPC_SYNC(void) {
 	#ifndef GSDD
 	if (IPC_SYNC_hooked && !(REG_IE & IRQ_IPC_SYNC)) {
