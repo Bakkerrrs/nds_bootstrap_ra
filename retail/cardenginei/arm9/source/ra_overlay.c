@@ -71,6 +71,16 @@
 #define OVERLAY_SHOW_FRAMES 180
 
 /*
+    How long a notification will wait for the screen to stop fading before giving up and showing anyway.
+
+    Bounded rather than patient: a game that leaves the screen dimmed -- a pause menu, a dark room, a
+    brightness setting -- must not swallow the notification forever. Ten seconds is far longer than any
+    transition and far shorter than a session, so the worst case is a notification that arrives late
+    rather than one that never arrives.
+*/
+#define OVERLAY_FADE_WAIT_FRAMES 600
+
+/*
     Was: raise the overlay on a timer, because when this was written there was no achievement logic to
     trigger it. There is now -- rcheevos delivers RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED and the count
     reaches here as raSnapshot.rcTriggered -- so the timer is off and the notification means something.
@@ -115,7 +125,21 @@ static const u8 glyphs[][8] = {
 static u32  stateMagic;
 static u32  framesLeft;   /* non-zero while visible */
 static u32  demoCounter;
-static u32  lastUnlocks;  /* rcTriggered as of the last frame; the notification fires on a rise */
+static u32  lastUnlocks;
+/*
+    A notification owed but not yet raised, because the screen was being faded when it was earned.
+
+    Measured, not guessed: a real unlock in Contra 4 read `shows 1` with denied, evicted and
+    deniedNoLayer all zero -- borrowed, held, drew, nobody took it back -- and was not seen, while the
+    demo timer's identical call in the same game was. overlayState bit 5 came back set, so the sub
+    engine's master brightness was non-zero: the glyphs were drawn into a screen on its way to black and
+    spent their 180 frames inside the transition.
+
+    Which is exactly when an achievement completes. A stage ends, the game fades, and that is the moment
+    rcheevos fires.
+*/
+static u8   pending;        /* a notification is owed */
+static u16  pendingFrames;  /* how long it has waited for the fade to end */  /* rcTriggered as of the last frame; the notification fires on a rise */
 static int  block;        /* character base block currently borrowed */
 static int  layer;        /* background layer currently borrowed */
 static u16  savedBgCnt;
@@ -223,7 +247,9 @@ static void draw(int b) {
 	                      | ((layer & 3) << 1)
 	                      | ((block & 3) << 3)
 	                      /* bit 5: the screen was being faded when this was raised */
-	                      | ((SUB_MASTER_BRIGHT & 0x1F) ? 0x20 : 0));
+	                      | ((SUB_MASTER_BRIGHT & 0x1F) ? 0x20 : 0)
+	                      /* bit 6: this one was held back until a fade ended */
+	                      | (pendingFrames ? 0x40 : 0));
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 
@@ -307,6 +333,8 @@ void ra_overlay_tick(u32 unlocks) {
 		stateMagic = STATE_MAGIC;
 		framesLeft = 0;
 		demoCounter = 0;
+		pending = 0;
+		pendingFrames = 0;
 		/*
 		    Synced to whatever the count already is, not to zero. Claiming with 0 would fire the
 		    notification once for a session that had already unlocked something before this ran.
@@ -352,9 +380,35 @@ void ra_overlay_tick(u32 unlocks) {
 	    Strictly greater, and resynced when it drops. rcheevos' count is reset when the runtime is
 	    re-initialised, and a count that went backwards must not be read as a new unlock.
 	*/
-	if (unlocks > lastUnlocks) {
-		lastUnlocks = unlocks;
+	/*
+	    Raise what is owed, once the screen is worth drawing on. Checked before the trigger below so a
+	    second unlock arriving while the first is still waiting does not queue behind itself -- one
+	    notification is one notification, and `lastUnlocks` has already moved past both.
+	*/
+	if (pending) {
+		if ((SUB_MASTER_BRIGHT & 0x1F) && pendingFrames < OVERLAY_FADE_WAIT_FRAMES) {
+			pendingFrames++;
+			return;
+		}
+		pending = 0;
+		/*
+		    show() reads pendingFrames for bit 6 of overlayState, so it is cleared *after* the call --
+		    zeroing it first would report every deferred notification as one that never waited, which
+		    is precisely the fact this bit exists to confirm.
+		*/
 		show();
+		pendingFrames = 0;
+		return;
+	}
+
+	if (unlocks > lastUnlocks) {
+		lastUnlocks   = unlocks;
+		/*
+		    Owed now, shown when the screen is not mid-fade. Deferring rather than drawing immediately
+		    is the whole fix: the draw always worked, it was the moment that was wrong.
+		*/
+		pending       = 1;
+		pendingFrames = 0;
 		return;
 	}
 	if (unlocks < lastUnlocks) {
