@@ -138,6 +138,13 @@ static char          raToken[64];
 #define RA_WIFI_UNLOCKS_MAX 128
 static u32           unlockedIds[RA_WIFI_UNLOCKS_MAX];
 static u16           unlockCount;
+/*
+    How many of those are the server's own pseudo-achievements rather than the set's, by the same
+    RA_ODD_ID_FROM boundary the scanner drops them on. Counted because it is the difference between
+    a skip list that matched nothing for a reason and one that matched nothing unexplained -- and on
+    this account it is the whole of the mismatch. See the reading in docs/retroachievements.md.
+*/
+static u16           unlockNotices;
 static char          textBuf[RA_WIFI_TEXT_MAX];
 static volatile u32  textHead;      /* written only by the interrupt */
 static u32           textTail;      /* read only by the main loop */
@@ -638,7 +645,8 @@ static void raWifiUnlocks(const raConfig* cfg) {
 	int           got;
 	int           count;
 
-	unlockCount = 0;
+	unlockCount   = 0;
+	unlockNotices = 0;
 
 	if (!verdict.gameId || !raToken[0] || !raNetUrlEncode(cfg->username, user, sizeof(user))) {
 		raWifiLog("\x1b[33mno GameID or token; staging the whole set\x1b[37m\n");
@@ -677,10 +685,15 @@ static void raWifiUnlocks(const raConfig* cfg) {
 
 	/*
 	    The ids themselves, and this line exists because a run reported `already earned 1` while the
-	    fetch kept all 55 -- so the server named an achievement that is not in the set we staged. A
-	    count cannot say which, and *which* is the only thing that distinguishes the possibilities:
-	    an unofficial achievement we filter, one belonging to a different subset of this game, or a
-	    numbering that does not match `r=patch`'s at all.
+	    fetch kept all 55 -- so the server had named an achievement that was not in the set we staged.
+	    A count could not say which, and *which* was the only thing that distinguished the
+	    possibilities: a pseudo-achievement we filter, one belonging to a different subset of this
+	    game, or a numbering that does not match `r=patch`'s at all.
+
+	    It was the first. The id was 101000001, the `Warning: Unknown Emulator` notice, which this
+	    client drops from the block by the same boundary -- so it is labelled here rather than left
+	    for the reader to cross-reference against the stage 13 warning. Nothing about the set's own
+	    numbering is settled by that; see the note in docs/retroachievements.md.
 
 	    Eight at most, because the point is to identify a mismatch rather than to dump a full account.
 	*/
@@ -688,8 +701,14 @@ static void raWifiUnlocks(const raConfig* cfg) {
 		int shown = (count < 8) ? count : 8;
 		int i;
 
+		for (i = 0; i < count; i++) {
+			if (unlockedIds[i] >= RA_ODD_ID_FROM) {
+				unlockNotices++;
+			}
+		}
 		for (i = 0; i < shown; i++) {
-			raWifiLog("  earned id      %lu\n", (unsigned long)unlockedIds[i]);
+			raWifiLog("  earned id      %lu%s\n", (unsigned long)unlockedIds[i],
+			          (unlockedIds[i] >= RA_ODD_ID_FROM) ? "  (server notice)" : "");
 		}
 		if (count > shown) {
 			raWifiLog("  ...and %d more\n", count - shown);
@@ -855,8 +874,20 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 		*/
 		raWifiLog("already earned   %u of %u matched this set\n",
 		          patch.alreadyDone, patch.skipCount);
-		if (patch.alreadyDone == 0) {
-			raWifiLog("\x1b[33mthe server named ids this set does not contain\x1b[37m\n");
+		/*
+		    Two different readings, and only one of them is a warning.
+
+		    Every unmatched id being a server notice is fully accounted for: the scanner drops those
+		    from the block by the same boundary, so of course the skip list finds nothing to skip.
+		    That is this account's whole mismatch and it needs a fact, not a colour. An id left over
+		    after the notices are subtracted is the interesting case -- the set does not contain it
+		    and we cannot say why -- and that one stays yellow.
+		*/
+		if (patch.alreadyDone + unlockNotices < patch.skipCount) {
+			raWifiLog("\x1b[33m%u named id(s) this set does not contain\x1b[37m\n",
+			          patch.skipCount - patch.alreadyDone - unlockNotices);
+		} else if (unlockNotices) {
+			raWifiLog("of those, %u is the server's own notice\n", unlockNotices);
 		}
 	}
 	/*

@@ -4124,8 +4124,9 @@ space rather than correctness.
 | | |
 | --- | --- |
 | `already earned    N` in stage 12 | how many the account holds, from the server |
-| `  earned id      X` in stage 12 | the ids themselves, up to eight |
+| `  earned id      X` in stage 12 | the ids themselves, up to eight, labelled `(server notice)` past `RA_ODD_ID_FROM` |
 | `already earned   M of N matched this set` in stage 13 | how many of those were in this set, printed even when M is 0 |
+| `N named id(s) this set does not contain` | yellow, and only for a remainder the notices do not explain |
 | `definitions      M kept` | should be 55 minus that |
 | `block ... used` | should fall by the same definitions' worth |
 | `reached stage 13 of 13` | the ladder grew a rung |
@@ -4266,6 +4267,62 @@ The prediction for that run, stated before it happens: **`earned id 101000001`**
 an achievement the server injects into this game's set and the account has been shown it on every boot.
 If that is what the log says, the mismatch closes as an artefact of our own filter and step 6b proceeds
 on the 55. If it is a five-digit id, the subset question becomes the next thing to answer.
+
+##### It was the notice, and the mismatch closes
+
+Log at `docs/logs/ra_wifi_launcher_earnedid-3ds.log`:
+
+```
+-- stage 12: what has this account already earned --
+930 bytes back
+already earned    1
+  earned id      101000001
+-- stage 13: fetch the set --
+definitions      55 kept, 3 unofficial
+already earned   0 of 1 matched this set
+the server named ids this set does not contain
+1 server notice(s) dropped, first id 101000001
+```
+
+The one id the account holds in game 14856 is `101000001` — the `Warning: Unknown Emulator`
+pseudo-achievement, the same id stage 13 reports dropping in the very next line. The prediction was
+exact, so the mismatch is an artefact of this client's own filter and nothing else: `r=unlocks` named
+an achievement, the scanner had already refused it, and the skip list therefore had nothing to skip.
+
+**`0 of 1` was structurally guaranteed, not unlucky.** In `raPatchCommit()` the `RA_ODD_ID_FROM` test
+(`ra_patch.c:197`) runs *before* the skip-list search (`:215`) and returns, so an id past that boundary
+can be counted as `oddIds` or as `alreadyDone` but never as both. An unlocks list containing only
+notices can only ever read `0 of N`.
+
+That makes the yellow warning wrong — it fires on the arithmetic being unexplained when this case is
+fully explained. So the boundary is applied on both sides now:
+
+- stage 12 labels the id, `earned id      101000001  (server notice)`, rather than leaving the reader
+  to notice that the number matches one four lines further down;
+- stage 13 subtracts the notices before deciding. `alreadyDone + unlockNotices < skipCount` is what is
+  actually unaccounted for, and only that stays yellow; a notices-only remainder prints the plain
+  `of those, 1 is the server's own notice`.
+
+One honest gap: `ra_wifi.c` needs `nds.h` and dsiwifi, so it is not one of the three host binaries and
+this arithmetic is not pinned by a test. Both sides read the same `RA_ODD_ID_FROM`, which is what keeps
+them from contradicting each other, and that is the whole of the guarantee.
+
+##### What this does *not* settle
+
+The tempting conclusion is that `r=unlocks` and `r=patch` share a numbering. This run does not show
+that. `101000001` is a synthetic id the server injects, and it matching itself across two requests says
+nothing about whether the five-digit ids line up — the account holds no real achievement in this game,
+so no real id has ever made the round trip.
+
+That question is answered by the loop step 6b builds and not before it: earn one achievement in the
+game, and see whether `r=unlocks` on the next boot returns the same `9XXXX` the set defines. Until then
+the subset possibility — the site redirects game 9983 to `?set=6112`, and `g=14856` is what both
+requests are given — stays open. It is cheap to keep open, because the first real unlock closes it as a
+side effect.
+
+The second reading is smaller and worth writing down: **the retry has now not fired for two full runs.**
+Six sockets, all first-try. The lwip race has been observed exactly once and the mitigation for it has
+never been observed working. That is the correct thing to say about it.
 
 ## Known graphical limitations of the overlay (deferred)
 
