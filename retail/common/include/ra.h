@@ -478,7 +478,20 @@ typedef struct raSnapshot {
 	u8  rearmTable;       /* +0xB0  irqTable[2] no longer pointed at our handler */
 	u8  rearmIe;          /* +0xB1  IRQ_VCOUNT had been cleared from REG_IE */
 	u8  rearmDispstat;    /* +0xB2  the Y-trigger interrupt had been switched off */
-	u8  reserved5;        /* +0xB3 */
+	/*
+	    Whether the sub engine had **BG extended palettes** enabled the last time the notification was
+	    raised, read straight out of SUB_DISPCNT bit 30.
+
+	    Because `shows` reaching 1 on Contra 4 with denied, evicted and deniedNoLayer all 0 says the
+	    overlay borrowed its block and its layer and drew -- and it still was not visible. The colour is
+	    written to standard palette RAM at 0x05000400, and with extended palettes on the hardware
+	    ignores that entirely for backgrounds: the glyphs would be drawn in whatever the game's extended
+	    palette holds at that index, which is very likely nothing at all.
+
+	    One bit, so the next run either confirms that or kills it. Fits in the byte that was already
+	    reserved, so the snapshot does not grow and no offset moves.
+	*/
+	u8  overlayExtPal;    /* +0xB3  1 when SUB_DISPCNT bit 30 was set at show() time */
 } raSnapshot;            /*              0xB4 bytes */
 
 /*

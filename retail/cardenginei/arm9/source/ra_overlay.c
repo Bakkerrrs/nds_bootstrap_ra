@@ -130,6 +130,8 @@ u32 raOverlayEvicted;  /* the game reclaimed the block mid-notification */
     accounts for nearly all of them.
 */
 u32 raOverlayDeniedNoLayer;
+/* SUB_DISPCNT bit 30 as of the last show(); see raSnapshot.overlayExtPal. */
+u8  raOverlayExtPal;
 
 /*
     Which 16K blocks of sub BG VRAM the game is using, for tiles or for maps. Read
@@ -199,6 +201,12 @@ static void draw(int b) {
 	vu16* map = mapOf(b);
 	int g, y, x;
 
+	/*
+	    Recorded, not worked around. With BG extended palettes on, this write goes to memory the sub
+	    engine is not reading for backgrounds, so the glyphs come out in the game's own colour at this
+	    index -- which is the leading explanation for a notification that reports drawn and is not seen.
+	*/
+	raOverlayExtPal = (SUB_DISPCNT & (1u << 30)) ? 1 : 0;
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 

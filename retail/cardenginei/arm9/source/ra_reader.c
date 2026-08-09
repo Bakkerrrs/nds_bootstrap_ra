@@ -116,6 +116,10 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 		snapshot.denied        = raOverlayDenied;
 		snapshot.evicted       = raOverlayEvicted;
 		snapshot.deniedNoLayer = raOverlayDeniedNoLayer;
+		{
+			extern u8 raOverlayExtPal;
+			snapshot.overlayExtPal = raOverlayExtPal;
+		}
 	}
 	/*
 	    From misc.c, where the re-arm lives. Published here rather than there for the same reason the
