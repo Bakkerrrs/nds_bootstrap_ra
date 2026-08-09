@@ -4822,7 +4822,7 @@ the server's own `AchievementsRemaining`, and filtered out of the next boot's bl
 of the loop still missing, and it is the part with no network in it at all: the cardengine writing an id
 into a file whose bytes are already allocated. Everything it needs to talk to has been measured.
 
-## In-game networking, reopened: the teardown never disconnects
+## In-game networking, reopened and then closed by measurement
 
 Open question #1 has always been settled for the launcher and open for the game, and the reason given
 was size: dsiwifi's ARM7 half is 104,148 bytes against a cardengine region of 62,464 with 12,636 free
@@ -4876,6 +4876,54 @@ frames are never processed, so the AP should eventually deauthenticate the stati
 
 What it would buy if it survives: rich presence, unlocks reported at the moment they fire, and step 3b's
 SD queue becoming unnecessary rather than merely late.
+
+### The answer: it dies seconds after the game starts
+
+The router listed the console during the ladder — MAC `04-03-D6-F9-36-52`, IP `192.168.0.112`, matching
+the launcher's log exactly, which is the control. **Seconds after the game booted the row was gone, and
+it never came back.**
+
+The prediction above was wrong, and wrong in the informative direction. It said the link would survive
+and then die at a group-rekey interval of ten minutes to an hour. Seconds rules the rekey out entirely:
+this is not time passing, it is the game booting.
+
+One hypothesis was worth killing with code before guessing further, and it also failed. The launcher logs
+`SCFG_EXT7 BIT(18) set` — that bit enables the WiFi SDIO block — and `bootloaderi/main.arm7.c:1839`
+writes `REG_SCFG_EXT = 0x93FFFB06`, which has BIT(18) set, the same value the launcher measured. **The
+chip's host interface is not switched off.** That was the best available explanation and it is not the
+one.
+
+#### What is not known, and why it is not worth chasing
+
+The mechanism is unmeasured. Plausible candidates are a "host lost" watchdog in the chip's firmware
+disconnecting when nothing drains its mailbox, or something in the boot path cutting power by another
+route. Neither was tested and naming one would be invention.
+
+It does not matter which. Both leave the same requirement: the association would have to be established
+*from inside the game*, which is bring-up, scan and the WPA2 handshake — the bulk of the 104 KB. No
+further diagnosis changes a decision, so none is proposed.
+
+#### What this settles
+
+The cheap path is closed. The reframing that opened this section — keeping the link is not keeping the
+stack — was right about the teardown, which verifiably does not disconnect, and wrong about the console,
+where the game's boot does. So the original number stands with the shortcut removed:
+
+```
+ARM7 cardengine region :  62,464 bytes
+  free                 :  12,636
+would be needed        : 104,148   -- and the bring-up can no longer be left out
+```
+
+Live rich presence and same-moment unlock reporting are out of reach in this architecture. Not
+impossible: they need a different memory home and a minimal stack written from scratch, which is a
+project rather than an increment.
+
+And it settles something in the other direction. **Deferred sync — queue to the SD, send on the next boot
+— stops being a fallback chosen for convenience and becomes the measured answer.** That raises the
+priority of finishing 3b, which is all that stands between the loop starting from play and the loop
+starting from a text editor. The whole result cost one session and no code, which is what the experiment
+was for.
 
 ## Known graphical limitations of the overlay (deferred)
 
