@@ -73,6 +73,7 @@
 	.global pageFileCluster
 	.global manualCluster
 	.global sharedFontCluster
+	.global raUnlocksCluster
 	.global dldiPatchBinaryOffset
 	.global patchMpuSize
 	.global patchMpuRegion
@@ -256,6 +257,19 @@ bannerSavPath:
 	.space	64
 version:
 	.space	20
+@---------------------------------------------------------------------------------
+@ Step 3b. Last field of loadCrt0, and it has to stay last: the C struct in
+@ load_crt0.h is read positionally through these labels, so anything inserted
+@ above moves every field the launcher wrote.
+@
+@ `.align 2`, not `.align 4`: in GNU as for ARM the argument is a power of two, so
+@ .align 4 means sixteen bytes. Written as .align 4 first, and the offset check in
+@ tools/ra_launcher_test.c caught it -- the assembler put this at 336 where C puts
+@ it at 324, which would have handed the ARM7 a cluster read out of the wrong bytes.
+@---------------------------------------------------------------------------------
+	.align 2
+raUnlocksCluster:
+	.word	0x00000000
 .align 4
 
 startUp:

@@ -206,4 +206,48 @@ else
 	echo "  (git submodule update --init, if you are building RA_LAUNCHER_WIFI=1)"
 fi
 
+#---------------------------------------------------------------------------------
+# Does loadCrt0's C layout match the assembly that mirrors it?
+#
+# retail/common/include/load_crt0.h is read *positionally* by load_crt0.s in both
+# bootloaders: the launcher writes the C struct, the bootloader reads the labels.
+# Nothing in either language checks the other, and a mismatch does not fail to
+# build -- it hands the ARM7 a value out of the wrong four bytes.
+#
+# It has already happened once. `.align 4` was written where `.align 2` was meant,
+# and in GNU as for ARM the argument is a power of two, so step 3b's field landed
+# at 336 where C puts it at 324. This is the check that said so.
+#---------------------------------------------------------------------------------
+echo
+echo "loadCrt0's two layouts agree, field by field"
+crt0_obj=retail/bootloaderi/build/load_crt0.o
+if [ -f "$crt0_obj" ] && command -v arm-none-eabi-nm >/dev/null 2>&1; then
+	$CC -std=gnu99 -Wall -O1 -I"$out/include" -Iretail/common/include \
+		tools/ra_crt0_offsets.c -o "$out/ra_crt0_offsets"
+	# A file rather than process substitution, and shell arithmetic rather than awk's
+	# strtonum(): this script is #!/bin/sh, and strtonum is a gawk extension that is
+	# absent on the awk most systems ship.
+	"$out/ra_crt0_offsets" > "$out/crt0_c_offsets"
+	arm-none-eabi-nm "$crt0_obj" > "$out/crt0_nm"
+	while read -r field c_off; do
+		# nm gives the offset within the section in hex; the labels share the struct's
+		# base, so the numbers are directly comparable once converted.
+		asm_hex=$(awk -v f="$field" '$3 == f { print $1 }' "$out/crt0_nm")
+		if [ -z "$asm_hex" ]; then
+			echo "  FAIL  $field -- no such label in $crt0_obj"
+			status=1
+			continue
+		fi
+		asm_off=$((0x$asm_hex))
+		if [ "$asm_off" = "$c_off" ]; then
+			echo "  ok    $field at $c_off"
+		else
+			echo "  FAIL  $field -- C says $c_off, the assembler says $asm_off"
+			status=1
+		fi
+	done < "$out/crt0_c_offsets"
+else
+	echo "  no bootloaderi build -- skipping (make bootloaderi to enable)"
+fi
+
 exit $status

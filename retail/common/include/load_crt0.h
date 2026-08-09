@@ -76,6 +76,16 @@ typedef struct loadCrt0 {
 	u16 cacheBlockSize;
 	char bannerSavPath[64];
 	unsigned char version[20];
+	/*
+	    Step 3b: sd:/ra_unlocks.txt, so the ARM7 cardengine can append an achievement id the game
+	    earned. Appended at the very end, and that is the only safe place: this struct is mirrored
+	    label-for-label by load_crt0.s in *both* bootloaders, which read it positionally, so a field
+	    inserted anywhere else silently moves every field after it.
+
+	    A u32 after a 20-byte array, so C and the assembler agree on the padding without either
+	    having to guess -- both align a word to four. tools/ra_launcher_test.c pins the offset.
+	*/
+	u32 raUnlocksCluster;
 } loadCrt0;
 
 #endif // LOAD_CRT0_H
