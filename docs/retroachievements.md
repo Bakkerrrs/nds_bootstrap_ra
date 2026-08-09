@@ -4822,6 +4822,61 @@ the server's own `AchievementsRemaining`, and filtered out of the next boot's bl
 of the loop still missing, and it is the part with no network in it at all: the cardengine writing an id
 into a file whose bytes are already allocated. Everything it needs to talk to has been measured.
 
+## In-game networking, reopened: the teardown never disconnects
+
+Open question #1 has always been settled for the launcher and open for the game, and the reason given
+was size: dsiwifi's ARM7 half is 104,148 bytes against a cardengine region of 62,464 with 12,636 free
+— 8.2× the free space and 1.7× the whole region. That number is right and it is not the whole story.
+
+**Keeping the link alive is not the same as keeping the stack alive**, and this project's own teardown
+turns out to be evidence for that. `wifi_card_deinit()` in
+`libs/dsiwifi/arm_iop/source/wifi_card.twl.c:1557` does five things and every one of them is masking an
+interrupt:
+
+```c
+wifi_sdio_enable_cardirq(REG_SDIO_BASE, false);
+irqDisableAUX(IRQ_WIFI_SDIO_CARDIRQ);
+irqDisable(IRQ_TIMER3);
+wifi_card_write_func1_u32(F1_INT_STATUS_ENABLE, 0x0);
+wifi_card_write_func0_u8(0x4, 0x0);          /* CCCR irq_enable */
+```
+
+No reset, no power-down, no WMI disconnect, nothing sent to the AP. And `DSiWifi_DisconnectAP()` is an
+unimplemented `sassert(false)`, so nothing else does it either. The chip's firmware keeps running with
+its WPA2 session and its association; what we switched off is the path by which it told us. The last two
+lines are writes *to the chip*, so undoing them is two register writes rather than a driver.
+
+That reframes the cost. Bring-up, scan and the WPA2 handshake are most of those 104 KB and are needed
+**once** — the launcher already did them. What would have to be resident in-game is much smaller:
+re-enable the two interrupt registers, a minimal WMI data path, and enough TCP for one outbound
+connection.
+
+### The experiment, which needs no code
+
+The shipped teardown is already the non-destructive one, so the first measurement is free: boot a game,
+leave it running, and look at the AP's client list for the console's MAC and IP — both of which the
+launcher already logs (`Dev 04:03:d6:f9:36:52`, `IP 192.168.0.112`). Check again at 5, 15 and 30 minutes.
+
+Do **not** ping the console. ICMP and ARP were answered by lwip on the ARM9, which no longer exists, so
+a failed ping proves nothing. The AP's association table is the right instrument because it looks at the
+802.11 layer, which is the layer in question.
+
+### The prediction, before the run
+
+It will appear, and then it will disappear — because the WPA2 supplicant is in **software on the ARM7**.
+The launcher's log shows it doing the work (`WPA2 Handshake 1/4`, `3/4`, `Added GTK 1`), and APs rekey the
+group key periodically, typically between 10 minutes and an hour. With the interrupts masked those EAPOL
+frames are never processed, so the AP should eventually deauthenticate the station.
+
+| what the router shows | what it means |
+| --- | --- |
+| gone at a suspiciously round interval | the GTK rekey. The link is reusable but time-limited, and the supplicant would have to stay resident too — materially more expensive than a data path |
+| listed for the whole session | either the AP does not rekey or the chip handles it in firmware. The cheap path is open: two register writes plus minimal TCP |
+| never listed | something else drops it, and the idea dies for the price of one session |
+
+What it would buy if it survives: rich presence, unlocks reported at the moment they fire, and step 3b's
+SD queue becoming unnecessary rather than merely late.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
