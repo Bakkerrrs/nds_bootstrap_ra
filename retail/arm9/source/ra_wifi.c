@@ -1373,6 +1373,57 @@ static void raWifiFetchPatch(const raConfig* cfg) {
     the server's own achievement set, with no network involved. That is a useful thing to have
     while step 4 is still being built.
 */
+/*
+    Add this ROM to sd:/ra_hashes.txt, once.
+
+    Called from stage 0b, right after the hash exists and before anything can fail. The point is
+    picking the next game to test: the launcher already prints the hash on screen and into the log two
+    seconds into the boot, but the log is truncated every boot, so a shelf of ROMs has to be walked one
+    copy-off-the-card at a time. This file is append-only, so booting each candidate once leaves a list
+    to check against the site in one sitting.
+
+    Deduplicated by reading what is already there and looking for the hash. Bounded at
+    RA_HASHES_READ_MAX and *fails toward appending* if the file is longer than that -- a duplicate line
+    costs nothing and a missing one costs a boot.
+
+    The ROM's own name goes on the line, because a bare hash is not something anyone can act on.
+*/
+static void raWifiRecordHash(bool sdFound, const char* romPath) {
+	const char* const path = sdFound ? RA_HASHES_PATH : RA_HASHES_PATH_FAT;
+	static char       seen[RA_HASHES_READ_MAX];
+	FILE*             f;
+	const char*       name;
+
+	if (!romHash[0]) {
+		return;
+	}
+
+	f = fopen(path, "rb");
+	if (f) {
+		const size_t got = fread(seen, 1, sizeof(seen) - 1, f);
+
+		fclose(f);
+		seen[got] = 0;
+		if (strstr(seen, romHash)) {
+			raWifiLog("hashes           already in %s\n", path);
+			return;
+		}
+	}
+
+	/* Just the file name: the directory is the same for every entry and the line has to stay short. */
+	name = romPath ? strrchr(romPath, '/') : NULL;
+	name = name ? name + 1 : (romPath ? romPath : "(unknown)");
+
+	f = fopen(path, "ab");
+	if (!f) {
+		raWifiLog("\x1b[33mcould not append to %s\x1b[37m\n", path);
+		return;
+	}
+	fprintf(f, "%s  %s\n", romHash, name);
+	fclose(f);
+	raWifiLog("hashes           added to %s\n", path);
+}
+
 static void raWifiDumpDefinitions(bool sdFound) {
 	const char* const path = sdFound ? RA_DEFS_DUMP_PATH : RA_DEFS_DUMP_PATH_FAT;
 	const char* const text = (const char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
@@ -1501,6 +1552,11 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 		raWifiLog("ROM              %s\n", ndsPath ? ndsPath : "(none given)");
 		if (ndsPath && raHashRom(ndsPath, romHash, &hashInfo)) {
 			raWifiLog("\x1b[32mhash             %s\x1b[37m\n", romHash);
+			/*
+			    Recorded here rather than at the end: this is the one line of the whole run that is
+			    useful for picking the *next* game, and a run that stops later must still leave it.
+			*/
+			raWifiRecordHash(sdFound, ndsPath);
 		} else {
 			raWifiLog("\x1b[31mhash failed: %s\x1b[37m\n", raHashLastError());
 		}

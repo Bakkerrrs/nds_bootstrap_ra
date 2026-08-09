@@ -73,6 +73,20 @@
 #define RA_WIFI_LOG_PATH_FAT  "fat:/ra_wifi_launcher.log"
 
 /*
+    A running list of every ROM this launcher has hashed, one line per game, never truncated.
+
+    The log beside it is opened with "w" and so is overwritten on every boot, which is right for a
+    diagnostic and wrong for this: finding a game whose set has an achievement worth testing means
+    booting several ROMs and comparing them afterwards, and a file that only remembers the last one
+    forces a copy off the card between each. This is append-only and deduplicated, so a card can be
+    walked through a shelf of games and end up with the whole list.
+*/
+#define RA_HASHES_PATH        "sd:/ra_hashes.txt"
+#define RA_HASHES_PATH_FAT    "fat:/ra_hashes.txt"
+#define RA_HASHES_READ_MAX    8192   /* enough for ~200 entries; only used to avoid duplicates */
+
+
+/*
     And where stage 12 writes the definitions it staged, verbatim, one per line.
 
     The first hardware run of that stage is why this exists. It reported 51 definitions in 6,791
