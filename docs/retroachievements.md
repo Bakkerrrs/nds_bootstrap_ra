@@ -5340,6 +5340,14 @@ question of which one to believe.
       `rc_client` remains ruled out, see open question #4.
 - [ ] Phase 2 rest: a real achievement set, which needs the client and therefore the
       network transport — open question #1 is now the critical path.
+- [x] **The loop, closed on hardware.** Contra 4, stage 1 cleared: rcheevos fired
+      inside the running game (`rcTriggered 1`, `rcFirstId 302329`, matching line 1 of
+      the fetched set), the notification drew on the sub screen (`shows 1` with
+      `denied`, `evicted` and `deniedNoLayer` all 0), the id crossed to the ARM7
+      (`unlockSent 1`, nothing queued, nothing lost), and the cardengine appended
+      `302329` to sd:/ra_unlocks.txt with no launcher and no network. Detect, notify,
+      persist -- every link measured rather than assumed. The submission is deliberately
+      not made: see `submit=0`.
 - [ ] Phase 3: real network, softcore unlocks. Both halves are **confirmed on hardware**
       from the launcher: `login`, `gameid`, `startsession`, `awardachievement`, `unlocks`
       and `patch` all answer over plain HTTP, an unlock is recorded by the server and
