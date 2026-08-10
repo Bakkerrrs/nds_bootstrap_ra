@@ -6150,6 +6150,79 @@ So this stays as it was, and it stays a known limitation rather than a fixed one
 hole than the mode-blindness was: it is only ever an *undercount* of one specific kind, and it applies
 equally to the text backgrounds the survey always handled, so nothing about it is new or worse.
 
+## The unlock remembers when it happened
+
+This is item 2 of "What is left". An achievement earned at nine in the evening and submitted at eight
+the next morning was being recorded by the server as an eight-in-the-morning unlock, because the only
+time in the request was the moment it arrived. The API's answer is `o=`, seconds since the unlock, and
+this client is exactly the case it exists for.
+
+### The two things the plan got wrong
+
+**The RTC was not where the note said it was.** `sharedAddr[7]/[8]` hold hours and minutes and nothing
+else, and only while the in-game menu is open, because `inGameMenu.c` is what writes them. No date, no
+seconds, and not available on the frame an achievement fires. The cardengine reads the RTC itself
+instead, with `rtcGetTimeAndDate()`.
+
+**`o=` changes the signature.** This is the one that would have shipped a build where every submission
+was refused. rcheevos' `rc_api_init_award_achievement_request_hosted()` normally hashes
+id + username + hardcore; when `o=` is sent it appends **the id a second time and then the seconds**,
+with rcheevos' own comment explaining that the server overloads its hash generator that way. The URL and
+the digest have to change together, so `raQueueSign()` takes the seconds and switches both, and the host
+suite pins the result against `printf '93119Bakke0931193600' | md5sum` rather than against itself.
+
+### What the record looks like now
+
+    <id>\t<YYYYMMDDhhmmss>\n
+
+The tab delimits for the same reason it delimits the staged definitions block: neither field can
+contain one. The record grew from 16 bytes to 32 to make room, so the file grew from 1,024 to 2,048 —
+and it migrates itself, because the launcher reads whatever length it finds and always writes
+`RA_QUEUE_BYTES` back.
+
+**The stamp is optional, and that is what makes the upgrade a non-event.** A bare id — one typed by
+hand, or queued by a build from before this existed — parses exactly as it always did and is sent
+without `o=`. Hand-writability was the property that let the sending half be tested before the writing
+half existed, and it survives intact.
+
+### Where each half of the work happens, and why
+
+The cardengine writes digits and does no arithmetic; the launcher does the calendar. That split is
+deliberate: leap years, month lengths and the epoch all live on the side with a host test, and the side
+running inside a game with no console stays a copy loop.
+
+- **`raUnlockStamp()`** (ARM7 cardengine) reads the RTC and formats six fields. It is called *outside*
+  the unlock's critical section — that section runs with IME off while an ARM9 card read may be waiting
+  on it, and two SPI transactions do not belong in it.
+- **`raQueueStampToUnix()` / `raQueueUnixToStamp()`** (launcher, pure) convert each way. Pinned against
+  `date -u +%s`, not against each other, and then also checked as a round trip.
+- **`raWifiSubmitOne()`** subtracts and sends.
+
+Three details that are decisions rather than mechanics:
+
+- **`rtcGetTimeAndDate()` returns integers, not BCD.** It masks the 12/24-hour bit and calls
+  `BCDToInteger(t, 7)` before returning — read out of the disassembly of `libnds7.a`, because the header
+  says nothing and the in-game menu's own use of it is ambiguous. What it does *not* normalise is the PM
+  flag in 12-hour mode, where the hour arrives with 40 added (`RTCtime`'s comment: *"0 to 11 for AM, 52
+  to 63 for PM"*). That subtraction is a no-op at 24 hours and the difference between 21:xx and 61:xx
+  at 12.
+- **Local time is treated as UTC at both ends.** The console has no zone, so the alternative is
+  inventing one — and it cancels out of a difference. What it cannot defend against is the user changing
+  the clock between earning and submitting, which no encoding could.
+- **Anything implausible sends no `o=` at all.** No stamp, a clock that was never set (year 2000, which
+  is why the floor is 2001), a clock that moved backwards, or a gap over a year: each one falls back to
+  the old behaviour. A wrong time would be worse than the old behaviour; no time merely *is* the old
+  behaviour. The launcher log says which happened, because `o=` is the one number in the request that
+  nothing downstream can check — the reply does not echo it back.
+
+### Not confirmed on hardware yet
+
+The suite covers the conversions, the parser, the round trip and both signature forms. What it cannot
+cover is whether `time()` returns a real clock in the launcher. It should: the launcher's own ARM7 calls
+`initClockIRQ()`, which is what maintains the value the ARM9 reads. If it does not, the plausibility
+guard turns every unlock back into the old no-`o=` form and the log says so — which is the reason the
+guard is there rather than an assertion.
+
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
@@ -6185,6 +6258,12 @@ equally to the text backgrounds the survey always handled, so nothing about it i
       used to be taken for a text background. Host-tested rather than hardware-confirmed,
       and deliberately: *Contra 4* runs in BG mode 0, where the old reading is correct by
       accident and the bug cannot fire.
+- [x] **An unlock carries when it was earned.** The cardengine stamps the queue record from the
+      RTC and the launcher sends `o=`, so the server dates an achievement by the moment it fired
+      rather than by the boot that reported it. Includes the signature change `o=` requires —
+      the id twice and then the seconds. Host-tested; the one part still unconfirmed on hardware
+      is whether the launcher's `time()` reads a real clock, and if it does not the request falls
+      back to the old form and says so in the log.
 - [ ] **Hardcore.** Blocked on nothing technical: the server injects a
       *"Warning: Unknown Emulator"* notice for an unrecognised User-Agent and blocks
       hardcore only, by its own wording. What it needs is `nds-bootstrap-ra/0.1`
@@ -6207,12 +6286,17 @@ decided here:
   measurement" — so an unlock is queued to the SD card and sent on a later boot. That is a real
   difference from every emulator integration and it is better raised than discovered.
 
-### 2. `o=` on `r=awardachievement`, so the timestamp is when it was earned
+### 2. ~~`o=` on `r=awardachievement`, so the timestamp is when it was earned~~ — done
 
-Today an unlock carries the time it was *submitted*, which can be a day later. The API takes
-`o=<seconds_since_unlock>`; the RTC is already in `sharedAddr[7]/[8]` for the in-game menu, so the
-cardengine can stamp the queue record and the launcher can subtract. Small, self-contained, and it makes
-the deferred-submission story defensible rather than merely honest.
+An unlock used to carry the time it was *submitted*, which with this client can be a day later. It now
+carries when it was earned. See "The unlock remembers when it happened".
+
+**Two things in that item were wrong, and both cost more than the rest of the work.** The RTC is *not*
+usably in `sharedAddr[7]/[8]` — those hold hours and minutes only, and only while the in-game menu is
+open, because the menu is what fills them. The cardengine reads the RTC directly instead. And the change
+is not confined to adding a parameter: sending `o=` **changes the signature**, because rcheevos appends
+the id a second time and then the seconds. `o=` with the old digest is refused, and refused with a
+message that says nothing about which half was wrong.
 
 ### 3. The in-game log reader
 

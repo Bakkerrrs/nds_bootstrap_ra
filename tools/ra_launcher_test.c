@@ -1192,7 +1192,7 @@ static void test_queue(void) {
 
 		/* The clearing case, which is the common one: everything went, nothing is owed. */
 		memset(out, 'x', sizeof(out));
-		written = raQueuePack(&q, NULL, 0, out, sizeof(out));
+		written = raQueuePack(&q, NULL, NULL, 0, out, sizeof(out));
 		CHECK(written == 0);
 		{
 			size_t i;
@@ -1209,7 +1209,7 @@ static void test_queue(void) {
 		/* Two owed: they land at record boundaries the cardengine can compute without reading. */
 		keep[0] = 93119;
 		keep[1] = 4294967295u;
-		written = raQueuePack(&q, keep, 2, out, sizeof(out));
+		written = raQueuePack(&q, keep, NULL, 2, out, sizeof(out));
 		CHECK(written == 2);
 		CHECK(memcmp(out + 0 * RA_QUEUE_RECORD, "93119\n", 6) == 0);
 		CHECK(memcmp(out + 1 * RA_QUEUE_RECORD, "4294967295\n", 11) == 0);
@@ -1223,10 +1223,10 @@ static void test_queue(void) {
 		    Refused rather than half-written. A partial queue is indistinguishable from a whole one
 		    on the next boot, so a buffer that is not a whole number of records is an error.
 		*/
-		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD - 1) == -1);
-		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD * 2 + 1) == -1);
+		CHECK(raQueuePack(&q, keep, NULL, 2, out, RA_QUEUE_RECORD - 1) == -1);
+		CHECK(raQueuePack(&q, keep, NULL, 2, out, RA_QUEUE_RECORD * 2 + 1) == -1);
 		/* More to keep than the file can hold is also an error rather than a truncation. */
-		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD) == -1);
+		CHECK(raQueuePack(&q, keep, NULL, 2, out, RA_QUEUE_RECORD) == -1);
 
 		/* A record has to hold the longest u32 plus its newline, or ids get mis-parsed. */
 		CHECK(RA_QUEUE_RECORD >= 11);
@@ -1240,11 +1240,11 @@ static void test_queue(void) {
 		    md5 of the id, the username and the hardcore flag as decimal text with no separators.
 		    Oracle: printf '93119Bakke0' | md5sum
 		*/
-		raQueueSign(93119, "Bakke", 0, v);
+		raQueueSign(93119, "Bakke", 0, 0, v);
 		CHECK(strcmp(v, "d9ac96231a45f0f275747a84a4c9271d") == 0);
 
 		/* Oracle: printf '1Cheevos1' | md5sum -- and it proves the flag is '1' and not 1. */
-		raQueueSign(1, "Cheevos", 1, v);
+		raQueueSign(1, "Cheevos", 1, 0, v);
 		CHECK(strcmp(v, "4787f01ee76713835a4f3bd5de506ec1") == 0);
 
 		/* Hardcore has to change it, or the flag is not in the hash at all. */
@@ -1252,8 +1252,8 @@ static void test_queue(void) {
 			char soft[33];
 			char hard[33];
 
-			raQueueSign(93119, "Bakke", 0, soft);
-			raQueueSign(93119, "Bakke", 1, hard);
+			raQueueSign(93119, "Bakke", 0, 0, soft);
+			raQueueSign(93119, "Bakke", 1, 0, hard);
 			CHECK(strcmp(soft, hard) != 0);
 		}
 
@@ -1262,7 +1262,7 @@ static void test_queue(void) {
 			int  i;
 			int  ok = 1;
 
-			raQueueSign(4294967295u, "a", 0, v);
+			raQueueSign(4294967295u, "a", 0, 0, v);
 			CHECK(strlen(v) == 32);
 			for (i = 0; i < 32; i++) {
 				if (!((v[i] >= '0' && v[i] <= '9') || (v[i] >= 'a' && v[i] <= 'f'))) {
@@ -1281,9 +1281,180 @@ static void test_queue(void) {
 			char raw[33];
 			char encoded[33];
 
-			raQueueSign(93119, "two words", 0, raw);
-			raQueueSign(93119, "two%20words", 0, encoded);
+			raQueueSign(93119, "two words", 0, 0, raw);
+			raQueueSign(93119, "two%20words", 0, 0, encoded);
 			CHECK(strcmp(raw, encoded) != 0);
+		}
+	}
+
+	printf("\nreads a record's stamp as seconds, pinned against date -u +%%s\n");
+	{
+		/*
+		    Every expected value here came out of coreutils, not out of this code:
+		        date -u -d "2024-02-29 12:00:00" +%s
+		    That is the whole point of the exercise. A calendar checked against itself proves that
+		    two functions agree, which is not the same as proving either one is right, and `o=` is a
+		    number nothing downstream can sanity-check -- the server's reply does not echo it back.
+		*/
+		CHECK(raQueueStampToUnix("20010101000000") == 978307200u);
+		CHECK(raQueueStampToUnix("20250101000000") == 1735689600u);
+		CHECK(raQueueStampToUnix("20260810142345") == 1786371825u);
+		/* A leap day, which is the case a wrong month table gets wrong by exactly one. */
+		CHECK(raQueueStampToUnix("20240229120000") == 1709208000u);
+		/* The last second of a leap year, one before the next year's first. */
+		CHECK(raQueueStampToUnix("20241231235959") == 1735689599u);
+		/*
+		    2100 is refused, and that is the contract rather than a limitation. The RTC reports two
+		    digits and the writer prefixes "20", so a stamp is 2000-2099 by construction and nothing
+		    outside it can be real. Refusing beyond 2099 is the same rule that refuses year 2000.
+		*/
+		CHECK(raQueueStampToUnix("21000101000000") == 0);
+
+		printf("\nand refuses a date it cannot vouch for rather than guessing\n");
+		/*
+		    Zero means "no stamp" everywhere downstream, so every one of these ends up sending the
+		    unlock without o= -- the behaviour every unlock had before this existed.
+		*/
+		CHECK(raQueueStampToUnix("20000101000000") == 0);  /* a clock that was never set */
+		CHECK(raQueueStampToUnix("20241301000000") == 0);  /* month 13 */
+		CHECK(raQueueStampToUnix("20241200000000") == 0);  /* day 0 */
+		CHECK(raQueueStampToUnix("20241232000000") == 0);  /* day 32 */
+		CHECK(raQueueStampToUnix("20241201240000") == 0);  /* hour 24 */
+		CHECK(raQueueStampToUnix("20241201006000") == 0);  /* minute 60 */
+		CHECK(raQueueStampToUnix("20241201000060") == 0);  /* second 60 */
+		CHECK(raQueueStampToUnix("2024120100000x") == 0);  /* not all digits */
+		CHECK(raQueueStampToUnix("") == 0);
+
+		printf("\nand the two conversions are exact inverses\n");
+		{
+			/*
+			    Round trip over a spread of real instants. Both directions have their own month
+			    table and their own leap rule, so agreeing is evidence rather than tautology.
+			*/
+			static const char* const when[] = {
+				"20010101000000", "20240229120000", "20241231235959",
+				"20260810142345", "20990630181530", "20991231235959",
+			};
+			size_t k;
+
+			for (k = 0; k < sizeof(when) / sizeof(when[0]); k++) {
+				char back[RA_QUEUE_STAMP + 1];
+
+				memset(back, 0, sizeof(back));
+				raQueueUnixToStamp(raQueueStampToUnix(when[k]), back);
+				CHECK(strcmp(back, when[k]) == 0);
+			}
+		}
+	}
+
+	printf("\nthe queue carries when an unlock was earned, and survives being kept\n");
+	{
+		raQueue q;
+		char    out[RA_QUEUE_RECORD * 4];
+		u32     keep[2];
+		u32     keepTimes[2];
+
+		/* A stamped record: the fourteen digits after the tab are a date, not a second id. */
+		raQueueScan(&q, "93119\t20260810142345\n", 21);
+		CHECK(q.count == 1);
+		CHECK(q.ids[0] == 93119);
+		CHECK(q.times[0] == 1786371825u);
+		CHECK(q.stamped == 1);
+
+		/*
+		    The regression this delimiter exists to prevent. Under the old rule -- every non-digit is
+		    a separator -- those digits would have parsed as a second unlock with an enormous id.
+		*/
+		CHECK(q.count == 1);
+
+		/* A bare id still works, which is what keeps the file hand-writable and old queues valid. */
+		raQueueScan(&q, "93119\n", 6);
+		CHECK(q.count == 1 && q.ids[0] == 93119);
+		CHECK(q.times[0] == 0 && q.stamped == 0);
+
+		/* Mixed, in one file: the launcher has to cope with both on the boot after an upgrade. */
+		raQueueScan(&q, "93119\n93121\t20260810142345\n", 27);
+		CHECK(q.count == 2);
+		CHECK(q.ids[0] == 93119 && q.times[0] == 0);
+		CHECK(q.ids[1] == 93121 && q.times[1] == 1786371825u);
+		CHECK(q.stamped == 1);
+
+		/* An unusable date is consumed as a date and reported as no stamp, not read as an id. */
+		raQueueScan(&q, "93119\t20001301000000\n", 21);
+		CHECK(q.count == 1 && q.ids[0] == 93119 && q.times[0] == 0);
+
+		/* A truncated stamp at the end of the buffer must not read past it -- nor become an id. */
+		raQueueScan(&q, "93119\t2026", 10);
+		CHECK(q.count == 1 && q.ids[0] == 93119 && q.times[0] == 0);
+
+		/*
+		    And a short stamp mid-file must not swallow the record after it. Counting off a fixed
+		    fourteen bytes here ate the next id instead, which turned two owed unlocks into one.
+		*/
+		raQueueScan(&q, "93119\t2026\n93121\n", 17);
+		CHECK(q.count == 2);
+		CHECK(q.ids[0] == 93119 && q.times[0] == 0);
+		CHECK(q.ids[1] == 93121);
+
+		/*
+		    Kept records keep their stamps. This is the case the whole feature turns on: an unlock
+		    whose request got no answer is retried on a later boot, and that is precisely when the
+		    difference between "earned then" and "submitted now" is largest.
+		*/
+		memset(&q, 0, sizeof(q));
+		keep[0]      = 93119;
+		keepTimes[0] = 1786371825u;
+		keep[1]      = 93121;
+		keepTimes[1] = 0;
+		CHECK(raQueuePack(&q, keep, keepTimes, 2, out, sizeof(out)) == 2);
+		CHECK(memcmp(out + 0 * RA_QUEUE_RECORD, "93119\t20260810142345\n", 21) == 0);
+		/* The unstamped one is written the old way, not with a bogus date. */
+		CHECK(memcmp(out + 1 * RA_QUEUE_RECORD, "93121\n", 6) == 0);
+
+		/* And read back: the round trip, through the file format rather than around it. */
+		raQueueScan(&q, out, sizeof(out));
+		CHECK(q.count == 2);
+		CHECK(q.ids[0] == 93119 && q.times[0] == 1786371825u);
+		CHECK(q.ids[1] == 93121 && q.times[1] == 0);
+
+		/* A record must hold the longest id, a tab, a stamp and a newline: 10+1+14+1. */
+		CHECK(RA_QUEUE_RECORD >= 26);
+	}
+
+	printf("\nand o= changes the signature as well as the URL\n");
+	{
+		char with[33];
+		char without[33];
+
+		/*
+		    The trap in this whole change. rcheevos appends the id a *second* time and then the
+		    seconds when o= is sent -- its own comment says the server overloads the hash that way --
+		    so a request that carries o= with the old three-field digest is refused, and refused with
+		    a message that does not say which half was wrong.
+		*/
+		raQueueSign(93119, "Bakke", 0, 0, without);
+		raQueueSign(93119, "Bakke", 0, 3600, with);
+		CHECK(strcmp(with, without) != 0);
+
+		/*
+		    Pinned against the formula rather than against this code: md5 of
+		    id + user + hardcore + id + seconds, which is what rc_api_runtime.c builds.
+		        printf '93119Bakke0931193600' | md5sum
+		*/
+		CHECK(strcmp(with, "52d7d7ff9f64ceb0784a29d2035133fa") == 0);
+
+		/* Zero seconds is "no o=", matching rcheevos, which writes the parameter only when non-zero. */
+		raQueueSign(93119, "Bakke", 0, 0, with);
+		CHECK(strcmp(with, without) == 0);
+
+		/* The seconds are part of it, so two different offsets cannot share a signature. */
+		{
+			char a[33];
+			char b[33];
+
+			raQueueSign(93119, "Bakke", 0, 60, a);
+			raQueueSign(93119, "Bakke", 0, 61, b);
+			CHECK(strcmp(a, b) != 0);
 		}
 	}
 

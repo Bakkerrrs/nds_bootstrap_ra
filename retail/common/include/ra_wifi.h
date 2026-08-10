@@ -142,10 +142,32 @@
 
     Clearing is done in place, zeros over the same length, for the first reason: truncating the file
     could hand its clusters back and break the allocation the cardengine depends on.
+
+    **A record carries when it was earned, not only what.** The layout is
+
+        <id>\t<YYYYMMDDhhmmss>\n
+
+    NUL-padded to RA_QUEUE_RECORD, and the stamp is local time straight off the console's RTC. It is
+    there so `r=awardachievement` can send `o=` -- seconds since the unlock -- instead of letting the
+    server date an achievement by when it was *submitted*, which with this client can be a day later.
+    See raQueueStampToUnix() for the conversion and raQueueSign() for what `o=` does to the signature.
+
+    The tab is the delimiter for the same reason it delimits the staged definitions block: it cannot
+    occur inside either field, so no field needs escaping.
+
+    **The stamp is optional, and that is load-bearing.** A record that is a bare id -- one a human
+    typed, or one written by a build from before this existed -- parses exactly as it always did and
+    is sent without `o=`. That is what keeps the file hand-writable and what makes the upgrade a
+    non-event: an old queue drains normally, it just cannot say when.
+
+    Growing the record from 16 bytes to 32 is what made room for the stamp. The file grows with it,
+    from 1,024 bytes to 2,048, and it migrates itself: the launcher reads whatever length it finds,
+    and always writes RA_QUEUE_BYTES back, so the first boot on a new build extends the file in place.
 */
 #define RA_QUEUE_PATH          "sd:/ra_unlocks.txt"
 #define RA_QUEUE_PATH_FAT      "fat:/ra_unlocks.txt"
-#define RA_QUEUE_RECORD        16                              /* one id, ASCII, NUL-padded */
+#define RA_QUEUE_RECORD        32                              /* <id>\t<stamp>\n, ASCII, NUL-padded */
+#define RA_QUEUE_STAMP         14                              /* YYYYMMDDhhmmss */
 #define RA_QUEUE_MAX           64                              /* a session earning more is not a thing */
 #define RA_QUEUE_BYTES         (RA_QUEUE_RECORD * RA_QUEUE_MAX)
 
@@ -158,6 +180,13 @@
 */
 typedef struct raQueue {
 	u32  ids[RA_QUEUE_MAX];  /* what the file held, deduped, in file order */
+	/*
+	    When each of those was earned, as Unix seconds, or 0 for "the record did not say" -- a bare id
+	    from a hand-edited file or from a build before the stamp existed. Parallel to `ids` rather than
+	    a struct, because `ids` is passed on its own to the sender and this is only ever read beside it.
+	*/
+	u32  times[RA_QUEUE_MAX];
+	int  stamped;            /* how many of those carried a usable stamp */
 	int  count;              /* how many of those */
 	int  dropped;            /* unparseable or out of range, so the file said something we ignored */
 	int  truncated;          /* the file held more than RA_QUEUE_MAX */
@@ -715,7 +744,18 @@ void raPatchFinish(raPatch* p);
     computed by coreutils rather than by this code.
 */
 void raQueueScan(raQueue* q, const char* text, int length);
-int  raQueuePack(const raQueue* q, const u32* keep, int keepCount, char* out, int outSize);
+int  raQueuePack(const raQueue* q, const u32* keep, const u32* keepTimes, int keepCount,
+                 char* out, int outSize);
+
+/*
+    A record's `YYYYMMDDhhmmss` and Unix seconds, each way. `raQueueStampToUnix()` reads 14 bytes and
+    returns 0 for any date it will not vouch for; `raQueueUnixToStamp()` writes exactly 14 bytes and
+    appends no terminator. Local time is treated as UTC at both ends, which cancels out of the
+    difference `o=` actually sends -- see the note in ra_queue.c.
+*/
+u32  raQueueStampToUnix(const char* digits);
+void raQueueUnixToStamp(u32 when, char* out);
+
 /*
     v=, the parameter that makes the server believe the unlock came from an account rather than from
     anyone who knows an id. md5 of the id, the username and the hardcore flag, concatenated as
@@ -723,11 +763,15 @@ int  raQueuePack(const raQueue* q, const u32* keep, int keepCount, char* out, in
     rc_api_init_award_achievement_request_hosted(), read out of the vendored copy rather than
     remembered. `out` needs 33 bytes.
 
+    `seconds` is what goes in `o=`, and it changes the digest as well as the URL: when it is non-zero
+    the id is appended a *second* time and then the seconds. Sending `o=` without that is a refusal
+    the server explains as nothing in particular. Pass 0 for no `o=`, which signs exactly as before.
+
     The username must be the *raw* one, not the URL-encoded form that goes in u=: the server hashes
     what it decoded. Getting that backwards is a signature failure on any account with a space in it
     and on no other, which is exactly the kind of bug that ships.
 */
-void raQueueSign(u32 id, const char* username, int hardcore, char* out);
+void raQueueSign(u32 id, const char* username, int hardcore, u32 seconds, char* out);
 
 /* The ARM7 half: hand this CPU to dsiwifi. One call, and where it goes matters. */
 void raWifiInstall(void);

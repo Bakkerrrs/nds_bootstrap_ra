@@ -26,6 +26,7 @@
 #include <nds/input.h>
 #include <nds/timers.h>
 #include <nds/arm7/audio.h>
+#include <nds/arm7/clock.h>   /* rtcGetTimeAndDate(), to stamp an unlock with when it was earned */
 #include <nds/arm7/i2c.h>
 #include <nds/memory.h> // tNDSHeader
 /* Step 3b: RA_SHARED_UNLOCK_* -- the contract with the ARM9, in one place rather than two. */
@@ -974,7 +975,68 @@ static u8  raUnlockSlot;      /* next record to write, RA_QUEUE_MAX when full */
 static u8  raUnlockWritten;   /* appended this session */
 static u8  raUnlockDropped;   /* fired with the queue already full */
 
-static void raUnlockAppend(u32 id) {
+/*
+    The console's clock as `YYYYMMDDhhmmss`, or false if it is not worth writing down.
+
+    Read from the RTC rather than from sharedAddr[7]/[8], and that is not a preference: those two hold
+    hours and minutes only, and only while the in-game menu is open, because the menu is what asks for
+    them. An unlock needs the date and the seconds, on the frame it fires.
+
+    rtcGetTimeAndDate() hands back plain integers, not BCD -- it masks the 12/24-hour bit and calls
+    BCDToInteger(t, 7) itself before returning, which is what the disassembly of libnds7 shows. The one
+    thing it does not normalise is the PM flag in 12-hour mode, where the hour comes back with 40 added
+    to it (RTCtime's own comment: "0 to 11 for AM, 52 to 63 for PM"). Subtracting it is a no-op on a
+    console set to 24 hours and the difference between 21:xx and 61:xx on one set to 12.
+
+    **Called outside the unlock's critical section**, deliberately. This does two SPI transactions, and
+    the section it would otherwise sit in runs with IME off while an ARM9 card read may be waiting on
+    it -- that section is already the most expensive thing this file does per unlock, and there is no
+    reason to make it longer for a value that does not depend on anything inside it.
+
+    Refused rather than written wrong: a console whose clock was never set reads as year 0 with a month
+    of 0, and no stamp is better than a wrong one. The launcher applies its own floor as well; see
+    raQueueStampToUnix().
+
+    Only the digits are written here and none of the arithmetic. Turning them into seconds is the
+    launcher's job, which keeps the calendar -- leap years, month lengths, the epoch -- on the side
+    that has a host test, and keeps this side to a copy loop.
+*/
+static bool raUnlockStamp(char* out) {
+	RTCtime now;
+	u8      field[5];
+	u8      hours;
+	int     f;
+	int     at = 0;
+
+	rtcGetTimeAndDate((uint8*)&now);
+	hours = now.hours;
+	if (hours >= 40) {
+		hours -= 40;
+	}
+
+	if (now.year > 99 || now.month < 1 || now.month > 12 || now.day < 1 || now.day > 31
+	 || hours > 23 || now.minutes > 59 || now.seconds > 59) {
+		return false;
+	}
+
+	field[0] = now.month;
+	field[1] = now.day;
+	field[2] = hours;
+	field[3] = now.minutes;
+	field[4] = now.seconds;
+
+	out[at++] = '2';
+	out[at++] = '0';
+	out[at++] = (char)('0' + (now.year / 10));
+	out[at++] = (char)('0' + (now.year % 10));
+	for (f = 0; f < 5; f++) {
+		out[at++] = (char)('0' + (field[f] / 10));
+		out[at++] = (char)('0' + (field[f] % 10));
+	}
+	return true;
+}
+
+static void raUnlockAppend(u32 id, const char* stamp) {
 	char record[RA_QUEUE_RECORD];
 	char digits[11];
 	u32  value = id;
@@ -1019,6 +1081,23 @@ static void raUnlockAppend(u32 id) {
 		record[i] = digits[n - 1 - i];
 	}
 	record[n] = '\n';
+
+	/*
+	    Stamp it with when, not only what, so the launcher can send `o=` and the server dates the
+	    unlock by the moment it was earned instead of the boot that reported it -- which with this
+	    client can be a day later. See RA_QUEUE_PATH for the record layout.
+
+	    `stamp` is read by the caller, outside the critical section, and is NULL when the clock could
+	    not be believed -- in which case the record is a bare id and is sent without `o=`, which is
+	    exactly what every unlock did before this existed.
+	*/
+	if (stamp) {
+		record[n] = '\t';
+		for (i = 0; i < RA_QUEUE_STAMP; i++) {
+			record[n + 1 + i] = stamp[i];
+		}
+		record[n + 1 + RA_QUEUE_STAMP] = '\n';
+	}
 
 	fileWrite(record, &raUnlocksFile, raUnlockSlot * RA_QUEUE_RECORD, RA_QUEUE_RECORD);
 	raUnlockSlot++;
@@ -2099,9 +2178,15 @@ void myIrqHandlerVBlank(void) {
 	    the request standing and the next one retries.
 	*/
 	if (sharedAddr[RA_SHARED_UNLOCK_REQ] == RA_SHARED_UNLOCK_MAGIC) {
-		int oldIME = enterCriticalSection();
+		char stamp[RA_QUEUE_STAMP];
+		bool timed;
+		int  oldIME;
 
-		raUnlockAppend(sharedAddr[RA_SHARED_UNLOCK_ID]);
+		/* Before the section, not inside it: two SPI transactions the section does not need. */
+		timed  = raUnlockStamp(stamp);
+		oldIME = enterCriticalSection();
+
+		raUnlockAppend(sharedAddr[RA_SHARED_UNLOCK_ID], timed ? stamp : NULL);
 		leaveCriticalSection(oldIME);
 		sharedAddr[RA_SHARED_UNLOCK_REQ] = 0;
 	}

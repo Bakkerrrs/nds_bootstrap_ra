@@ -43,6 +43,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <malloc.h>
+/*
+    time(), for `o=` on r=awardachievement. It works here because the launcher's own ARM7 starts
+    libnds' RTC tracking IRQ -- initClockIRQ() in retail/arm7/source/main.c -- which is what keeps the
+    value the ARM9 reads. The cardengine half cannot rely on that, because in there the ARM7 is the
+    game's; it reads the RTC directly instead. See raUnlockAppend().
+*/
+#include <time.h>
 
 /*
     Step 3 links dsiwifi's ARM9 half after all -- see retail/dsiwifi9/, which rebuilds it with
@@ -818,19 +825,55 @@ static void raWifiStartSession(const raConfig* cfg) {
     **The file is rewritten in place, same length.** Truncating it could hand its clusters back, and
     the cardengine half of this can only write into clusters that already exist.
 */
-static void raWifiSubmitOne(const raConfig* cfg, u32 id, raQueue* q) {
+static void raWifiSubmitOne(const raConfig* cfg, u32 id, u32 when, raQueue* q) {
 	static char   response[1024];
 	char          user[3 * sizeof(raUser)];
 	char          path[384];
 	char          signature[33];
+	char          offset[32];
+	u32           seconds;
 	raNetProgress p;
 	int           got;
 
 	/*
-	    Signed with the raw username, encoded with the escaped one. Both come from the same string,
-	    and the reason they must is in raQueueSign().
+	    How long ago this was earned, which is what the server wants rather than when. Best effort by
+	    design: anything that does not make sense sends no `o=` at all and the unlock is dated by its
+	    submission, which is exactly what every unlock did before this existed. A wrong time would be
+	    worse than the old behaviour; no time is merely the old behaviour.
+
+	    Three ways it can make no sense, and each one is real. The record may carry no stamp -- a
+	    hand-typed id, or one queued by a build from before the stamp. The console's clock may be
+	    unset, in which case raQueueStampToUnix() has already refused the date and `now` is nonsense
+	    too. And the clock may have moved backwards between earning and submitting, which makes the
+	    subtraction wrap; that is caught by comparing before subtracting rather than after.
 	*/
-	raQueueSign(id, raUser, cfg->hardcore ? 1 : 0, signature);
+	seconds = 0;
+	offset[0] = 0;
+	if (when) {
+		const u32 now = (u32)time(NULL);
+
+		if (now >= when) {
+			seconds = now - when;
+		}
+		/*
+		    A year, as a sanity bound rather than a rule. Past it the likelier explanation is a clock
+		    that is wrong at one end than an achievement genuinely waiting that long to be sent, and
+		    the server is better served by no claim than by an implausible one.
+		*/
+		if (seconds > 365u * 24u * 60u * 60u) {
+			seconds = 0;
+		}
+		if (seconds) {
+			sniprintf(offset, sizeof(offset), "&o=%lu", (unsigned long)seconds);
+		}
+	}
+
+	/*
+	    Signed with the raw username, encoded with the escaped one. Both come from the same string,
+	    and the reason they must is in raQueueSign() -- which also takes `seconds`, because `o=` in the
+	    URL and the two extra fields in the digest have to appear together or the server refuses it.
+	*/
+	raQueueSign(id, raUser, cfg->hardcore ? 1 : 0, seconds, signature);
 
 	if (!raNetUrlEncode(raUser, user, sizeof(user))) {
 		raWifiLog("\x1b[31musername too long to encode\x1b[37m\n");
@@ -838,12 +881,22 @@ static void raWifiSubmitOne(const raConfig* cfg, u32 id, raQueue* q) {
 		return;
 	}
 	if (sniprintf(path, sizeof(path),
-	              "/dorequest.php?r=awardachievement&u=%s&t=%s&a=%lu&h=%d&v=%s",
-	              user, raToken, (unsigned long)id, cfg->hardcore ? 1 : 0, signature)
+	              "/dorequest.php?r=awardachievement&u=%s&t=%s&a=%lu&h=%d%s&v=%s",
+	              user, raToken, (unsigned long)id, cfg->hardcore ? 1 : 0, offset, signature)
 	    >= (int)sizeof(path)) {
 		raWifiLog("\x1b[31maward request too long\x1b[37m\n");
 		q->kept++;
 		return;
+	}
+	/*
+	    Said out loud, because this is the only number in the request that cannot be checked against
+	    anything else afterwards: the reply does not echo it back. If the console's clock is wrong the
+	    log is where that shows.
+	*/
+	if (seconds) {
+		raWifiLog("  %lu  earned %lu s ago\n", (unsigned long)id, (unsigned long)seconds);
+	} else if (when) {
+		raWifiLog("\x1b[33m  %lu  stamp unusable, sent without o=\x1b[37m\n", (unsigned long)id);
 	}
 
 	memset(&p, 0, sizeof(p));
@@ -899,6 +952,7 @@ static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
 	static char       file[RA_QUEUE_BYTES];
 	static raQueue    q;
 	u32               keep[RA_QUEUE_MAX];
+	u32               keepTimes[RA_QUEUE_MAX];
 	int               keepCount = 0;
 	int               i;
 	FILE*             f;
@@ -983,9 +1037,10 @@ static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
 	for (i = 0; i < q.count; i++) {
 		const int before = q.kept;
 
-		raWifiSubmitOne(cfg, q.ids[i], &q);
+		raWifiSubmitOne(cfg, q.ids[i], q.times[i], &q);
 		if (q.kept > before) {
-			keep[keepCount++] = q.ids[i];
+			keepTimes[keepCount] = q.times[i];
+			keep[keepCount++]    = q.ids[i];
 		}
 	}
 
@@ -1000,7 +1055,7 @@ static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
 	    Rewrite whatever is still owed, over the same length. Done even when keepCount is 0 -- that is
 	    the clearing case and it is the common one.
 	*/
-	if (raQueuePack(&q, keep, keepCount, file, sizeof(file)) < 0) {
+	if (raQueuePack(&q, keep, keepTimes, keepCount, file, sizeof(file)) < 0) {
 		raWifiLog("\x1b[31mthe queue could not be packed; %s left alone\x1b[37m\n", path);
 		return;
 	}
