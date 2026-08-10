@@ -5525,7 +5525,23 @@ That is a mapping question, not tidiness: how much VRAM sits behind 0x06600000 d
 `VRAMCNT`, and a write past the end does not fail — it mirrors, onto tiles the game *is* using. 16K is the
 smallest allocation a game using sub objects realistically makes.
 
-OAM entries are taken from the **back**, and that is a correction hardware made within one run.
+### Confirmed: the notification appears and the game loses nothing
+
+*"El aviso se ve y no falta nada — ni escenario ni balas ni personaje."*
+
+Which is the whole point of this path, and it closes the question the overlay has been open on since
+phase 1. Objects beat every background at the same priority, so no layer is taken; the OAM entries come
+from where the game does not reach, so no sprite is taken; the object VRAM is surveyed and given back, so
+no tiles are taken. The notification names the achievement, waits for a screen worth drawing on, holds
+for three seconds, and costs the running game nothing observable.
+
+The background path stays underneath it as the fallback for a game with 2D object mapping, with objects
+switched off, or with no free OAM entry or VRAM slot -- and it is a *working* fallback, measured, at the
+price of a background layer for three seconds.
+
+### OAM entries are taken from the back
+
+And that is a correction hardware made within one run.
 
 They were taken from the front, on the reasoning that objects are ordered among themselves by OAM index —
 lower is in front — so the earliest free entries are the ones least likely to be covered by one of the
@@ -5596,6 +5612,24 @@ layer and no character block — reporting through those bits would make "object
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately
 left alone — including for a first public release. They are listed together so the
 decision is on the record rather than implicit in what nobody got around to fixing.
+
+**What the object path changed about this list**, since it arrived after the list was written:
+
+- **Item 5 is closed.** Skipped notifications were a "no free layer" condition; there is no layer to be
+  free now, and the deferral holds a notification until the screen is worth drawing on rather than
+  dropping it.
+- **Item 3's exposure collapsed.** `surveyBlocks()` is still mode-blind — it reads every `BGCNT` as a
+  text background — but it now only runs on the fallback path, so a game that takes the object path never
+  reaches it. The bug is unchanged; the odds of meeting it are not.
+- **Item 2 moved rather than closed.** The object path borrows one entry of the *object* palette instead
+  of one of the background palette. One entry either way, and for the same unavoidable reason: the text
+  has to be some colour.
+- **Items 1 and 4 are untouched.** The menu collision and having no say over which physical screen the
+  sub engine feeds are both exactly as they were.
+
+One item the object path adds: at OAM index 120 the overlay is **behind** the game's own sprites, so a
+bullet crossing the text wins that pixel. Deliberate, and the alternative was measured — taking entries
+from the front put us in front and deleted the game's sprites instead.
 
 The reason they are acceptable is the same in every case: the overlay's design rule is
 that **a notification that corrupts the game is worse than no notification**, and it
