@@ -1,26 +1,36 @@
 /*
     RetroAchievements support for nds-bootstrap -- on-screen text overlay (DSi WRAM).
 
-    Composites text over the running game on a spare sub-engine background layer.
+    Composites text over the running game, on its **own sprites** where it can and on a borrowed
+    background layer where it cannot.
 
-    The lesson from hardware: a game's VRAM layout is not fixed. This game moved its
-    BG2 character base onto the block the overlay had chosen at boot, so holding that
-    block meant overwriting the game's tiles and wrecking its graphics. Nothing here
-    may assume a spot stays free.
+    Two paths, and the order matters. Objects first: an object at a given priority is drawn above
+    every background at that priority, so it needs no layer at all, and what it does need -- a
+    disabled OAM entry and a range of object VRAM nobody references -- it *finds* rather than
+    borrows. Confirmed on hardware to cost the running game nothing observable: no scenery, no
+    sprites, no tiles. See spriteShow().
 
-    The layer is different, and the difference took five hypotheses to pin down. It is not
-    about VRAM at all but about ordering: the DS puts the lower-numbered background in front
-    when two share a priority, so on any layer above an enabled priority-0 one the overlay is
-    drawn perfectly and covered completely. Free and hidden looked exactly like
-    drawn-and-lost. See chooseLayer().
+    Backgrounds second, as the fallback for a game with 2D object mapping, with objects switched
+    off, or with nothing free. That path works and was measured to work, at the price of one
+    background layer for three seconds.
 
-    So the overlay negotiates over VRAM and *insists* on the layer. It picks a block only when
-    about to show, from the live registers; it re-checks every frame while visible and gives it
-    back the moment the game wants it. For the layer it takes the one it needs to be seen on,
-    even an enabled one -- but it never touches that layer's VRAM, and it restores every
-    register it took, so the layer's content is intact throughout and merely absent for three
-    seconds. A notification that corrupts the game is worse than no notification; one that is
-    correct and never appears is not a notification.
+    Three lessons from hardware are built into both, and every one of them cost a run.
+
+    A game's VRAM layout is not fixed. One game moved its BG2 character base onto the block the
+    overlay had chosen at boot, so holding that block meant overwriting its tiles. Nothing here may
+    assume a spot stays free: every claim is re-surveyed each frame and given back on eviction.
+
+    Being drawn is not being seen. The DS puts the lower-numbered background in front when two share
+    a priority, so on any layer above an enabled priority-0 one the overlay is drawn perfectly and
+    covered completely. Free-and-hidden looked exactly like drawn-and-lost, and took five hypotheses
+    to separate. See chooseLayer().
+
+    And "unused right now" is not "not wanted". A game builds its object list from index 0 up each
+    frame and leaves the rest disabled, so the earliest free OAM entries are the next ones it will
+    need -- taking those deleted its bullets. See chooseSprites().
+
+    The rule the whole file holds to: a notification that corrupts the game is worse than no
+    notification, and one that is correct and never appears is not a notification.
 
     It lived in the ARM9 cardengine until sprites needed writing, and the window that had already
     refused a four-byte diagnostic field was never going to hold OAM negotiation. Moving it here

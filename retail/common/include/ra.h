@@ -3,14 +3,21 @@
 
     Layering (kept deliberately strict, see docs/retroachievements.md):
 
-      ra_reader  -- the per-frame bridge in the cardengine, plus the snapshot that is
-                    this project's only debug channel. The watchlist it used to hold now
-                    lives in cardenginei_arm9_ra, where there is room for it.
-      ra_overlay -- draws a notification over the game. Knows nothing about RA.
-      ra_client  -- wraps rcheevos' rc_client. Decides what to watch. (not yet)
-      ra_net     -- HTTP transport to the RA servers.                  (not yet)
+      ra_reader   -- the per-frame bridge in the cardengine, plus the snapshot that is this
+                     project's only debug channel. The watchlist it used to hold, and later
+                     the overlay, both moved to cardenginei_arm9_ra where there is room.
+      ra_overlay  -- draws a notification over the game. Knows nothing about RA: it is handed
+                     a count and some pixels. Lives in cardenginei_arm9_ra.
+      ra_text     -- the font and the renderer, also in cardenginei_arm9_ra. 760 bytes of
+                     printable ASCII that never had anywhere else to go.
+      ra_rcheevos -- the rcheevos runtime, the staged set, and the unlock ring that crosses
+                     to the ARM7. cardenginei_arm9_ra.
+      ra_net      -- HTTP transport to the RA servers, in the launcher.
+      ra_patch    -- the streaming scanner that turns r=patch into the staged block.
+      ra_wifi     -- the fifteen-rung ladder the launcher climbs, and the log it writes.
 
-    Only ra_reader and ra_overlay exist at this point.
+    `rc_client` is deliberately absent and stays absent -- see open question #4. The session
+    layer is the launcher's ladder instead.
 
     This file is part of nds-bootstrap and is licensed under the GPL-3.0,
     the same terms as the rest of the project.

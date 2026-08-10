@@ -1842,29 +1842,53 @@ games that never asked for one.
 
 ## Open questions from the project brief
 
-### #2 — is the VBlank hook the right point, and what is the cycle budget?
+### #2 — is the VBlank hook the right point, and what is the cycle budget? **Yes, and no.**
 
-The ARM9 **VCOUNT** interrupt (line 0) is used rather than VBlank, because that is
-the per-frame ARM9 hook the cardengine already owns. The ARM7 has an always-active
-VBlank hook (`vblankHandler` in `retail/cardenginei/arm7/source/card_engine_header.s`)
-but the ARM7's view of main RAM is not the ARM9's cached view, so it is the wrong
-side to read from for RAM-watching accuracy.
+**The hook is VBlank, and it took a reversal to get there.** This section answered "VCOUNT, line 0"
+for most of the project's life, on the reasoning that VCOUNT was the per-frame ARM9 hook the
+cardengine already owned. Hardware overturned that: three conditions have to hold for a VCOUNT
+interrupt to fire — the game's `irqTable[2]` entry, `IRQ_VCOUNT` in `REG_IE`, and the Y-trigger in
+`REG_DISPSTAT` — and Contra 4 clears the third constantly. `ticks` reached 1,132 across a session of
+many thousands of frames while `rearmDispstat` saturated at 255: the reader was running on about **8%
+of frames**, and the overlay, which has to re-assert its borrowed registers every frame, was visible
+about one frame in twelve.
 
-The cycle budget is **measured, and it is not the constraint**. `ra_reader_tick()`
-samples `VCOUNT` on entry and again on exit and records the difference in `linesLast` /
-`linesMax`. On hardware `linesLast` was 0 in every sample across two games, so a typical
-tick costs under one scanline of 262. `linesMax` was 1 on one game and 11 on a busier
-one, which is a ceiling on the *window* rather than on the reader: the work per tick is
-fixed at a few hundred cycles and 11 scanlines is ~17,000, so the difference is the
-machine being busy, not the reader. See the phase 1 measurements for the detail and for
-what it would take to separate the two. Scanlines are a coarse
-unit — one is roughly 1,600 ARM9 cycles — but they are the right unit for the question
-being asked, which is whether the watchlist eats into the frame, and `VCOUNT` is the
-only clock available: the game owns the hardware timers.
+VBlank has no third condition. A DS game keeps `IRQ_VBLANK` enabled and `irqTable[0]` pointed at
+something of its own because it needs the interrupt itself, and hardware confirmed that directly:
+`rearmIe` reads **0** across a three-minute session, so the game never once cleared it. `ticks` now
+tracks the frame count one for one — 10,715 over about three minutes.
 
-The measurement is deliberately of the reader alone, not of the overlay that runs
-just before it in the same handler. The overlay's cost is fixed; the reader's is the
-one that scales with configuration, so it is the one worth a knob and a number.
+Two things follow that the old answer had wrong. A reader build no longer forces `IRQ_VCOUNT` on for
+a game that never asked for one, which it used to do purely for the reader's sake. And every duration
+in the overlay is honest again: 180 frames is three seconds rather than half a minute.
+
+The ARM7 still has an always-active VBlank hook (`vblankHandler` in
+`retail/cardenginei/arm7/source/card_engine_header.s`) and it is still the wrong side to read game RAM
+from, for the original reason: the ARM7's view of main RAM is not the ARM9's cached view.
+
+**The cycle budget is measured, and it is no longer negligible.** The reader samples `VCOUNT` on entry
+and on exit and records the difference in `linesLast` / `linesMax`.
+
+| | Phase 1, watchlist only | Now, with rcheevos and the overlay |
+| --- | --- | --- |
+| `linesLast` typical | 0 of 262 | **28–33** |
+| `linesMax` | 1, and 11 on a busier game | **154–211** |
+
+The steady-state figure is `rcLines`, 28–31, and that is rcheevos evaluating 45 definitions and 21
+distinct addresses. It is now paid on **every** frame rather than on 8% of them, so the real per-frame
+cost went up roughly twelvefold with the hook change.
+
+What makes it affordable is where it is spent rather than how much: VBlank is 71 scanlines and this
+uses about 30, so in steady state the work fits inside the blanking period and touches no visible
+line at all. The old VCOUNT hook fired at line 0 and spent its scanlines on drawn pixels. `linesMax`
+of 154–211 is the initialisation frames — `rcInitLines` 85–88 for the slowest single activation,
+`rcInitTotal` about 1,080 summed — and those happen once per boot.
+
+Scanlines are a coarse unit, roughly 1,600 ARM9 cycles, but they are the right unit for the question
+being asked and `VCOUNT` is the only clock available: the game owns the hardware timers.
+
+The measurement covers the reader, the WRAM call and the overlay together, which is the honest scope —
+it is what the game pays per frame for all of this.
 
 ### #4 — does `rc_client` fit in the cardengine? **No.**
 
@@ -6033,33 +6057,87 @@ question of which one to believe.
 - [x] Phase 0: per-frame game RAM snapshot — **confirmed on hardware**
 - [x] Phase 0.5: text notification over a running game — **confirmed on hardware**
 - [x] Phase 1: parameterised watchlist + pointer chains — **confirmed on hardware**,
-      on *Space Invaders Extreme* and *Final Fantasy III*. Known overlay limitations
-      found along the way are catalogued and deferred, see above.
+      on *Space Invaders Extreme* and *Final Fantasy III*
 - [x] `cardenginei_arm9_ra`, a separate ARM9 binary in DSi WRAM — **confirmed on
       hardware**. Staged, copied, recognised, called every frame, executing, and
-      reporting back. 256K of window with code execution, which retires the cardengine's
+      reporting back. 256K of window with code execution, which retired the cardengine's
       12K as the project's binding constraint.
-- [x] Phase 2 core: `rcheevos` evaluating a real achievement definition — **confirmed on
-      hardware**. Submodule pinned at v12.4.0, runtime only, running on our own allocator
-      in DSi WRAM, `peek()` routed through the watchlist's own validation. An achievement
-      unlocked on a 3DS running a DS game, at a cost of under one scanline per frame.
-      `rc_client` remains ruled out, see open question #4.
-- [ ] Phase 2 rest: a real achievement set, which needs the client and therefore the
-      network transport — open question #1 is now the critical path.
-- [x] **The loop, closed on hardware.** Contra 4, stage 1 cleared: rcheevos fired
-      inside the running game (`rcTriggered 1`, `rcFirstId 302329`, matching line 1 of
-      the fetched set), the notification drew on the sub screen (`shows 1` with
-      `denied`, `evicted` and `deniedNoLayer` all 0), the id crossed to the ARM7
-      (`unlockSent 1`, nothing queued, nothing lost), and the cardengine appended
-      `302329` to sd:/ra_unlocks.txt with no launcher and no network. Detect, notify,
-      persist -- every link measured rather than assumed. The submission is deliberately
-      not made: see `submit=0`.
-- [ ] Phase 3: real network, softcore unlocks. Both halves are **confirmed on hardware**
-      from the launcher: `login`, `gameid`, `startsession`, `awardachievement`, `unlocks`
-      and `patch` all answer over plain HTTP, an unlock is recorded by the server and
-      cross-checks against its own `AchievementsRemaining`, the already-earned ones are
-      filtered out of the staging block, the radio comes back down, and the game boots.
-      What is missing is the half with no network in it: the **cardengine writing an
-      earned id into the queue file**, so that the loop starts from play rather than from
-      a text editor. See step 6b.
+- [x] Phase 2: `rcheevos` evaluating a **real achievement set** — **confirmed on
+      hardware**. Submodule pinned at v12.4.0, runtime only, on our own allocator in DSi
+      WRAM, `peek()` routed through the watchlist's own validation. 45 definitions from
+      the server, all 45 activated, `rcBadLine` 0. `rc_client` remains ruled out, see
+      open question #4.
+- [x] Phase 3: **real network, softcore unlocks, closed end to end on hardware.**
+      `login`, `gameid`, `startsession`, `awardachievement`, `unlocks` and `patch` all
+      answer over plain HTTP; the set is fetched, cached per ROM and staged; already-earned
+      achievements are filtered out; the radio comes down and the game boots. rcheevos
+      fires inside the running game, the id crosses to the ARM7 through `sharedAddr`, the
+      cardengine appends it to `sd:/ra_unlocks.txt` with no launcher and no network, and
+      the next boot submits it. **The server registered it** — `rcActivated` fell from 45
+      to 44 on the following fetch, which is the submission confirmed from the other end.
+- [x] **The notification says which achievement.** Titles ride the staged block as
+      `<id>:<memaddr>\t<title>`; the font and the renderer live in `cardenginei_arm9_ra`;
+      the overlay draws on **its own sprites**, so no background layer, no game sprite and
+      no tile of the game's is taken. Read back on hardware as *"Welcome to the jungle"*,
+      stable, with nothing missing from the screen.
+- [ ] **Hardcore.** Blocked on nothing technical: the server injects a
+      *"Warning: Unknown Emulator"* notice for an unrecognised User-Agent and blocks
+      hardcore only, by its own wording. What it needs is `nds-bootstrap-ra/0.1`
+      recognised by RetroAchievements, which is a conversation rather than a commit.
 - [ ] Phase 4: rich presence, achievement list, login status
+
+## What is left
+
+Ordered by value rather than by effort, and the first item is not code.
+
+### 1. Get the User-Agent recognised — the only thing blocking hardcore
+
+The server's own notice says it blocks **hardcore only** for an unrecognised client, so softcore works
+today and hardcore is a registration away. Two questions belong in that conversation rather than being
+decided here:
+
+- What the registration process is for a client that is not an emulator.
+- Whether **deferred submission** is sanctioned. This client cannot reach the network while a game is
+  running — measured and documented under "In-game networking, reopened and then closed by
+  measurement" — so an unlock is queued to the SD card and sent on a later boot. That is a real
+  difference from every emulator integration and it is better raised than discovered.
+
+### 2. `o=` on `r=awardachievement`, so the timestamp is when it was earned
+
+Today an unlock carries the time it was *submitted*, which can be a day later. The API takes
+`o=<seconds_since_unlock>`; the RTC is already in `sharedAddr[7]/[8]` for the in-game menu, so the
+cardengine can stamp the queue record and the launcher can subtract. Small, self-contained, and it makes
+the deferred-submission story defensible rather than merely honest.
+
+### 3. The in-game log reader
+
+The launcher's log is written to the SD card and read on a PC. The in-game menu could show it, by the
+route already built for `ra_unlocks.txt`: hand the menu the log file's cluster. A previous attempt
+stashed the log in memory and shared the definitions block, which was reverted — the clean route is the
+cluster.
+
+### 4. `surveyBlocks()` is still mode-blind
+
+It reads every `BGCNT` as though it were a text background, ignoring the BG mode and the colour-depth
+bit, so for an affine or bitmap background the character and screen bases mean different things. It can
+both miss a block the game is using and mark one it is not.
+
+Much less urgent than it was: this only runs on the **fallback** path now, so a game that takes the
+sprite path never reaches it. The bug is unchanged; the odds of meeting it are not.
+
+### 5. The deferred graphical limitations
+
+Catalogued above with what the sprite path changed about each. Items 1 (the in-game menu collision) and
+4 (no say over which physical screen the sub engine feeds) are untouched and both need work outside the
+overlay.
+
+### Not on this list, and deliberately
+
+- **`rc_client`.** Ruled out with a measurement, open question #4. Nothing has changed that.
+- **In-game networking.** Closed by measurement, not by preference: the link dies seconds after the game
+  boots, and `SCFG_EXT7 BIT(18)` survives, so the SDIO enable is not the cause.
+- **Token caching.** The password stays in the plaintext config file in odelot's format, by explicit
+  decision, which means `r=login` sends it in the clear over plain HTTP on every boot. Neither the
+  password nor the token is ever written to `ra_wifi_launcher.log`, because that log is shared:
+  `raConfigRedact()` emits only `(set, N chars)` and `raWifiLogBody()` strips the token from any logged
+  reply body.
