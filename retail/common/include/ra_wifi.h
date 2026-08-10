@@ -188,6 +188,25 @@
 #define RA_QUEUE_MAX           64                              /* a session earning more is not a thing */
 #define RA_QUEUE_BYTES         (RA_QUEUE_RECORD * RA_QUEUE_MAX)
 
+#define RA_PENDING_MAGIC       0x31504152u   /* 'RAP1' */
+#define RA_PENDING_GAMES_MAX   8
+
+typedef struct raPendingGame {
+	char code[RA_QUEUE_CODE + 1];    /* the ROM's gameCode, NUL-terminated */
+	char title[RA_QUEUE_TITLE + 1];  /* its gameTitle, trimmed */
+	u16  count;                      /* unlocks of this game still owed */
+	u16  waitDays;                   /* how long the oldest of them has waited */
+} raPendingGame;
+
+typedef struct raPendingBlock {
+	u32 magic;                       /* RA_PENDING_MAGIC, so an uninitialised block is not read */
+	u16 games;                       /* entries below that are filled */
+	u16 total;                       /* unlocks across all of them, including any dropped games */
+	u16 dropped;                     /* games past RA_PENDING_GAMES_MAX, so the menu can say so */
+	u16 unnamed;                     /* records with no game -- hand-typed, or from an older build */
+	raPendingGame game[RA_PENDING_GAMES_MAX];
+} raPendingBlock;
+
 /*
     What one pass over the queue did, so the log can say it rather than imply it.
 
@@ -798,24 +817,6 @@ int  raQueuePack(const raQueue* q, const int* keep, int keepCount, char* out, in
     reads it for `o=` -- so the subtraction happens there, at boot, and the menu prints an integer. A
     session lasts hours, so a number computed at boot is still right when the menu opens.
 */
-#define RA_PENDING_MAGIC       0x31504152u   /* 'RAP1' */
-#define RA_PENDING_GAMES_MAX   8
-
-typedef struct raPendingGame {
-	char code[RA_QUEUE_CODE + 1];    /* the ROM's gameCode, NUL-terminated */
-	char title[RA_QUEUE_TITLE + 1];  /* its gameTitle, trimmed */
-	u16  count;                      /* unlocks of this game still owed */
-	u16  waitDays;                   /* how long the oldest of them has waited */
-} raPendingGame;
-
-typedef struct raPendingBlock {
-	u32 magic;                       /* RA_PENDING_MAGIC, so an uninitialised block is not read */
-	u16 games;                       /* entries below that are filled */
-	u16 total;                       /* unlocks across all of them, including any dropped games */
-	u16 dropped;                     /* games past RA_PENDING_GAMES_MAX, so the menu can say so */
-	u16 unnamed;                     /* records with no game -- hand-typed, or from an older build */
-	raPendingGame game[RA_PENDING_GAMES_MAX];
-} raPendingBlock;
 
 /*
     Group a queue by game. Pure, and the reason it is its own function rather than part of the staging

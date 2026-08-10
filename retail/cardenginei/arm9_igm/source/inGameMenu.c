@@ -10,6 +10,7 @@
 
 #include "igm_text.h"
 #include "locations.h"
+#include "ra_wifi.h"   /* raPendingBlock -- the tally the launcher staged */
 #include "cardengine_header_arm9.h"
 #include "nds_header.h"
 #include "tonccpy.h"
@@ -533,6 +534,102 @@ static void drawMainMenu(MenuItem *menuItems, int menuItemCount) {
 	#endif
 }
 
+/*
+    RetroAchievements: what is earned and not yet sent.
+
+    One line per game, three fields -- the game, how many of its unlocks are still owed, and how long
+    the oldest has waited. Counts rather than a list of achievements, because achievement titles only
+    exist in the staged definitions of the game that is *running*: a list could name the current game's
+    unlocks and could only ever print bare ids for every other game, and the other games are exactly
+    what this page exists to show. The player was already told which achievement by the notification,
+    with its name, when it fired.
+
+    The block is read where the bootloader put it, and its magic is what says a boot actually staged
+    one. An unset window reads as whatever the previous occupant left, so "no magic" and "nothing
+    pending" have to look different here -- the first is a boot that never looked.
+*/
+static void raPendingPage(void) {
+	const raPendingBlock* b = (const raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_LOCATION;
+	int line;
+
+	clearScreen(false);
+	print(0, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
+
+	if (b->magic != RA_PENDING_MAGIC) {
+		print(0, 2, (unsigned char*)"No queue was read this boot", FONT_LIGHT_GRAY, false);
+	} else if (b->total == 0) {
+		print(0, 2, (unsigned char*)"Nothing waiting to sync", FONT_LIME, false);
+	} else {
+		printDec(0, 2, b->total, 1, FONT_WHITE, false);
+		print(2, 2, (unsigned char*)"waiting to sync", FONT_WHITE, false);
+
+		line = 4;
+		for (int i = 0; i < b->games && line < 19; i++, line++) {
+			print(1, line, (unsigned char*)b->game[i].title, FONT_WHITE, false);
+			printDec(15, line, b->game[i].count, 2, FONT_LIGHT_BLUE, false);
+
+			/*
+			    Days, not a date. Five characters cannot tell 08/09 the ninth of August from the
+			    eighth of September, and what this column is for is how long something has been
+			    stuck. The launcher does the subtraction at boot -- it has a real clock, which in
+			    here nothing does: sharedAddr[7]/[8] carry hours and minutes and no date at all.
+			*/
+			if (b->game[i].waitDays == 0)
+				printRight(31, line, (unsigned char*)"today", FONT_LIGHT_GRAY, false);
+			else if (b->game[i].waitDays == 1)
+				printRight(31, line, (unsigned char*)"yesterday", FONT_LIGHT_GRAY, false);
+			else {
+				printDec(24, line, b->game[i].waitDays, 3, FONT_LIGHT_GRAY, false);
+				print(28, line, (unsigned char*)"days", FONT_LIGHT_GRAY, false);
+			}
+		}
+
+		/* Said rather than folded away: a screen that under-reports what is owed is worse. */
+		if (b->dropped) {
+			printDec(1, line + 1, b->dropped, 1, FONT_RED, false);
+			print(3, line + 1, (unsigned char*)"more game(s) not shown", FONT_RED, false);
+			line++;
+		}
+		if (b->unnamed) {
+			printDec(1, line + 1, b->unnamed, 1, FONT_LIGHT_GRAY, false);
+			print(3, line + 1, (unsigned char*)"of unknown origin", FONT_LIGHT_GRAY, false);
+		}
+	}
+
+	print(0, 21, (unsigned char*)"Sent on the next boot with wifi", FONT_DARKER_GRAY, false);
+	print(0, 23, igmText.bNo, FONT_WHITE, false);
+
+	waitKeys(KEY_B);
+}
+
+/*
+    The folder. One entry today, and it is a folder rather than a page so that forcing a sync, reading
+    the launcher's log or showing the session have somewhere to go that is not the root menu.
+*/
+static void raMenu(void) {
+	int cursor = 0;
+
+	clearScreen(false);
+	print(2, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
+	print(1, 0x18 - 3, igmText.ndsBootstrap, FONT_LIGHT_GRAY, false);
+	print(0, 23, igmText.bNo, FONT_WHITE, false);
+	drawCursor(0);
+
+	while (1) {
+		waitKeys(KEY_A | KEY_B);
+		if (KEYS & KEY_B)
+			return;
+		{
+			raPendingPage();
+			clearScreen(false);
+			print(2, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
+			print(1, 0x18 - 3, igmText.ndsBootstrap, FONT_LIGHT_GRAY, false);
+			print(0, 23, igmText.bNo, FONT_WHITE, false);
+			drawCursor(cursor);
+		}
+	}
+}
+
 static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 	OptionsItem optionsItems[8];
 	int optionsItemCount = 0;
@@ -968,7 +1065,7 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 	// Let ARM7 know the menu loaded
 	sharedAddr[5] = 0x59444552; // 'REDY'
 
-	MenuItem menuItems[8];
+	MenuItem menuItems[9];
 	int menuItemCount = 0;
 	if(!exception)
 		menuItems[menuItemCount++] = MENU_EXIT;
@@ -980,6 +1077,13 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 	if(!exception)
 		menuItems[menuItemCount++] = MENU_OPTIONS;
 	menuItems[menuItemCount++] = MENU_RAM_VIEWER;
+	/*
+	    Not offered on an exception screen, like every other entry that reads staged memory: the
+	    block lives in cardenginei_arm9_ra's window and a crashed game is the one case where nothing
+	    about that window can be trusted.
+	*/
+	if (!exception)
+		menuItems[menuItemCount++] = MENU_RETROACHIEVEMENTS;
 	menuItems[menuItemCount++] = MENU_QUIT;
 
 	if(exception) {
@@ -1068,6 +1172,9 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 					break;
 				case MENU_RAM_VIEWER:
 					ramViewer();
+					break;
+				case MENU_RETROACHIEVEMENTS:
+					raMenu();
 					break;
 				case MENU_QUIT:
 					if (boolQuestion(igmText.quitGameMessage)) {
