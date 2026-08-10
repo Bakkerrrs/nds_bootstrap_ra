@@ -348,6 +348,11 @@ static int chooseLayer(void) {
 			    enable bit. So the layer's content is intact the whole time and simply does not display
 			    for the three seconds the notification is up.
 
+			    Measured on hardware and it works: `overlayState` 0x48 on a real unlock -- layer 0, block 1,
+			    deferred and released -- with the achievement's name on screen, stable, no flicker. The
+			    prediction that displacing an enabled layer would bring back the "who writes last" race
+			    against the game's own code did not come true.
+
 			    Sprites are the answer that costs nothing at all -- an OBJ at a given priority draws above
 			    every background at that priority, whatever the game is doing with its layers -- and they
 			    are the next piece of work. This stays as the fallback for when no object slot is free.

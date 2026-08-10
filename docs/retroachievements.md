@@ -5463,6 +5463,29 @@ Two consequences worth writing down before the next run rather than after it:
   the notification flash one frame in twelve on the old VCOUNT hook, and it is stated here as a prediction
   so the next reading can confirm or kill it rather than have it explained afterwards.
 
+### It works, and the flicker prediction was wrong
+
+`overlayState` **0x48** on the real unlock: layer **0**, block 1, extended palettes off, not inside a fade,
+deferred and released. `shows` 1 with `denied`, `evicted` and `deniedNoLayer` all zero. `rcFirstId` 302329
+at line 1, 45 definitions active. And on screen: the achievement's name, **stable, no flicker**.
+
+The prediction in the previous section was that displacing an *enabled* layer would bring back the
+"who writes last" race and show as flicker. It did not. Either Contra 4 does not rewrite that layer's
+`BGCNT` during the three seconds, or the once-per-frame re-assert from VBlank wins. Written down before the
+run precisely so it could be killed this way.
+
+**And one thing was described worse than it is.** The cost was written up as "part of the bottom-screen
+map". On Contra 4 the sub engine feeds the **top** screen — the one being played on — so what actually
+happens is that a background layer of the gameplay screen goes missing for three seconds. Which panel the
+sub engine drives is `POWCNT1` bit 15 and belongs to the game; see limitation 4 below.
+
+Nothing is corrupted and nothing about the game's state changes: `evicted` 0, the layer's VRAM was never
+touched, and `hide()` puts `BGCNT`, both scroll registers and the enable bit back, so it returns exactly.
+The game keeps rendering that layer throughout; it simply is not displayed.
+
+But as a finished state it is not good enough. Eating a piece of the scenery you are dodging bullets in is
+not an acceptable toaster, and that is the honest reading of an otherwise working notification.
+
 **Sprites remain the answer that costs nothing.** An OBJ at a given priority draws above every background
 at that priority, whatever the game is doing with its layers, and it disturbs no layer at all. It is the
 next piece of work — a new borrow-and-return over OAM entries and object VRAM — and this stays as the
