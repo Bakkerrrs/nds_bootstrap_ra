@@ -263,6 +263,11 @@ typedef struct raSnapshot {
 	    block. Split because the two have different answers and the obvious hypothesis
 	    was otherwise untestable -- see the phase 1 field notes in
 	    docs/retroachievements.md.
+
+	    **Retired at 0, like rearmDispstat.** chooseLayer() cannot fail any more: it takes the layer it
+	    needs to be seen on, enabled or not, so there is always one. A field that reads 0 for the rest of
+	    time is the clearest statement available that a whole category of denial is gone -- and if it ever
+	    moves again, something reintroduced a refusal.
 	*/
 	u32 deniedNoLayer;   /* +0x14 */
 	u8  watchCount;      /* +0x18  slots in use */

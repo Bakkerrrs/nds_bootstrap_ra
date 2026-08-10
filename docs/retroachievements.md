@@ -5436,14 +5436,37 @@ is the trade this file makes everywhere else — `denied` and `deniedNoLayer` bo
 `overlayDispcnt` says which layer blocked it. It does **not** make the notification appear at the moment
 that matters, because at the start of stage 2 the game's BG0 is on.
 
-Making it appear needs one of two things, and both have a visible cost:
+### So it takes the layer it needs, and stops refusing
 
-- **Borrow BG0 anyway**, saving and restoring its control and scroll registers and its enable bit, and never
-  touching its VRAM. The layer's content is intact throughout; it simply does not display for three
-  seconds. Cheap — about fifteen bytes.
-- **Use sprites.** An OBJ at a given priority draws above every background at that priority, so this works
-  regardless of what the game is doing with its layers. It is the correct answer and it is real work: a new
-  borrow-and-return over OAM entries and object VRAM.
+A change of policy, and the reason is that the honest refusal delivers nothing. At the start of stage 2 the
+game's BG0 is on at priority 0, and that is exactly when the stage-1 achievement's notification is due. A
+notification that is correct and never appears is not a notification.
+
+`chooseLayer()` now returns the first layer that is either free-and-reachable or **enabled at priority 0**,
+taking the second kind rather than giving up on it. What that costs is bounded and reversible, and both
+halves matter:
+
+- **The layer's VRAM is never touched.** The overlay points its character and screen bases at a block of
+  its own, so the game's tiles and tilemap for that layer sit there untouched throughout.
+- **Every register taken is put back** by `hide()` — `BGCNT`, both scroll registers, and the enable bit.
+
+So the layer's content is intact the whole time and simply does not display for the three seconds the
+notification is up. On Contra 4 that is part of the bottom-screen map.
+
+Two consequences worth writing down before the next run rather than after it:
+
+- **`deniedNoLayer` is retired at 0**, like `rearmDispstat`. `chooseLayer()` cannot fail any more, so a
+  whole category of denial is gone; if that field ever moves again, something reintroduced a refusal.
+- **The "who writes last" race comes back, and may show as flicker.** Displacing an *enabled* layer means
+  the game is still writing that layer's `BGCNT` from its own code, while the overlay re-asserts it once
+  per frame from VBlank. Whoever writes later in the frame wins it. This is the same mechanism that made
+  the notification flash one frame in twelve on the old VCOUNT hook, and it is stated here as a prediction
+  so the next reading can confirm or kill it rather than have it explained afterwards.
+
+**Sprites remain the answer that costs nothing.** An OBJ at a given priority draws above every background
+at that priority, whatever the game is doing with its layers, and it disturbs no layer at all. It is the
+next piece of work — a new borrow-and-return over OAM entries and object VRAM — and this stays as the
+fallback for when no object slot is free.
 
 ## Known graphical limitations of the overlay (deferred)
 

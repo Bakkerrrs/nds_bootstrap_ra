@@ -8,15 +8,19 @@
     block meant overwriting the game's tiles and wrecking its graphics. Nothing here
     may assume a spot stays free.
 
-    The same applies to the layer. This game enables its own sub BG0 at times, with a
-    character base of its own, so treating BG0 as the overlay's by right displaced a
-    layer the game was using. The layer is chosen at show time too, from whichever is
-    currently switched off.
+    The layer is different, and the difference took five hypotheses to pin down. It is not
+    about VRAM at all but about ordering: the DS puts the lower-numbered background in front
+    when two share a priority, so on any layer above an enabled priority-0 one the overlay is
+    drawn perfectly and covered completely. Free and hidden looked exactly like
+    drawn-and-lost. See chooseLayer().
 
-    So the overlay negotiates rather than insists. It picks a layer and a block only
-    when about to show, from the live registers; it re-checks every frame while visible
-    and gives them back the moment the game wants them; and it restores what it
-    borrowed. A notification that corrupts the game is worse than no notification.
+    So the overlay negotiates over VRAM and *insists* on the layer. It picks a block only when
+    about to show, from the live registers; it re-checks every frame while visible and gives it
+    back the moment the game wants it. For the layer it takes the one it needs to be seen on,
+    even an enabled one -- but it never touches that layer's VRAM, and it restores every
+    register it took, so the layer's content is intact throughout and merely absent for three
+    seconds. A notification that corrupts the game is worse than no notification; one that is
+    correct and never appears is not a notification.
 
     This file is part of nds-bootstrap and is licensed under the GPL-3.0,
     the same terms as the rest of the project.
@@ -320,31 +324,43 @@ static int chooseLayer(void) {
 
 	for (i = 0; i < 4; i++) {
 		if (!(SUB_DISPCNT & (1u << (8 + i)))) {
+			/*
+			    Free, and reachable: every enabled layer before it holds priority 1 or worse, which the
+			    overlay's priority 0 beats. This is the ordinary case and it disturbs nothing.
+			*/
 			return i;
 		}
-		/*
-		    An enabled layer at priority 0 ends the search, and that is not an optimisation -- it is the
-		    answer to four hardware runs.
-
-		    The overlay takes priority 0, the strongest the DS has, so it beats any enabled layer at
-		    priority 1 or worse. What it cannot beat is a *lower-numbered* enabled layer that is also at
-		    priority 0, because the DS breaks priority ties by layer number and there is nothing below 0
-		    to reach for. So the moment one of those is passed, every layer after it is free-but-hidden.
-
-		    Measured, not reasoned: the pulse probe on Contra 4 got layer 0 during gameplay -- the game's
-		    BG0 was off, `overlayDispcnt` 0x00211E10 -- and was plainly visible. Both real unlocks got
-		    layer 1 and were not seen at all. Free but covered looked exactly like drawn-and-lost, and it
-		    accounted for every remaining sighting.
-
-		    Written as one loop rather than a nested search because this window has tens of bytes, and the
-		    two are equivalent: walking in order, the first free layer is usable if and only if no earlier
-		    enabled layer holds priority 0.
-		*/
 		if ((SUB_BGCNT(i) & 3) == 0) {
-			return -1;
+			/*
+			    Enabled, at priority 0, and therefore in front of every layer after it -- so no later
+			    layer can be seen and there is no priority left to outrank it with. **Take this one.**
+
+			    Which is a deliberate change of policy, and the reason is that the alternative delivers
+			    nothing. Refusing here is honest and was measured to be useless: at the start of stage 2
+			    on Contra 4 the game's BG0 is on at priority 0, and that is exactly when the stage-1
+			    achievement's notification is due. A notification that is correct and never appears is not
+			    a notification.
+
+			    What it costs is bounded and reversible, and both halves matter. **The layer's VRAM is
+			    never touched** -- the overlay points its character and screen bases at a block of its own,
+			    so the game's tiles and tilemap for this layer sit there untouched throughout. And every
+			    register taken is saved and put back by hide(): BGCNT, both scroll registers, and the
+			    enable bit. So the layer's content is intact the whole time and simply does not display
+			    for the three seconds the notification is up.
+
+			    Sprites are the answer that costs nothing at all -- an OBJ at a given priority draws above
+			    every background at that priority, whatever the game is doing with its layers -- and they
+			    are the next piece of work. This stays as the fallback for when no object slot is free.
+			*/
+			return i;
 		}
 	}
-	return -1;
+	/*
+	    All four enabled and none at priority 0, so the overlay outranks every one of them: any layer will
+	    be seen and the last is as good as any. Free to handle rather than deny -- `return -1` here would
+	    have been a refusal in a case where nothing was actually in the way.
+	*/
+	return 3;
 }
 
 static void draw(int b, const void* text) {
