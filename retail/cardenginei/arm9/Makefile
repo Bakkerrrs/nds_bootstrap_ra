@@ -41,18 +41,6 @@ CFLAGS	:=	-g -Wall -O2\
 # ADD -DDEBUG here for logging/debug
 CFLAGS	+=	$(INCLUDE) -DARM9 -DNO_CARDID
 
-# A diagnostic, off by default: RA_OVERLAY_DEMO=60 raises the achievement notification once a
-# second regardless of whether anything unlocked. That answers "is ra_tick still being called
-# during play" visually, with no RAM viewer -- which is exactly the question Contra 4 raised by
-# freezing raSnapshot.ticks at 19. See OVERLAY_DEMO_INTERVAL in source/ra_overlay.c.
-#
-# Needs a clean to take effect. make tracks file timestamps and not CFLAGS, so setting this on an
-# already-built tree relinks the old ra_overlay.o and the ROM is silently not a diagnostic at all --
-# which is exactly what happened the first time, and the snapshot said so with shows and denied both
-# at zero after 2,863 ticks. Use: rm -f cardenginei/arm9/build/ra_overlay.o (or make clean).
-ifneq ($(RA_OVERLAY_DEMO),)
-CFLAGS	+=	-DOVERLAY_DEMO_INTERVAL=$(RA_OVERLAY_DEMO)
-endif
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 
 ASFLAGS	:=	-g $(ARCH) $(INCLUDE)

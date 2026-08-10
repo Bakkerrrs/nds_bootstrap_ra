@@ -28,6 +28,7 @@
 */
 
 #include "ra.h"
+#include "ra_overlay.h"
 #include "locations.h"
 
 /*
@@ -45,6 +46,8 @@ extern u32 ra_sbrk_probe(void);
 
 /* retail/cardenginei/arm9_ra/source/ra_rcheevos.c -- the RetroAchievements runtime. */
 extern void ra_rc_tick(raSnapshot* snapshot);
+/* ...and where it left the rendered notification, or 0 before the first unlock. */
+extern const void* ra_rc_text(void);
 
 /* Placed by cardengine.ld: the .bss to clear, and the top of this binary's window. */
 extern char __bss_start[];
@@ -359,4 +362,31 @@ void ra_wram_tick(raSnapshot* snapshot) {
 
 	/* After rcheevos, so its allocations are included rather than measured a frame late. */
 	snapshot->heapUsed = ra_heap_used();
+
+	/*
+	    The overlay last, and *after* rcheevos rather than before it, which is a small improvement the
+	    move paid for. It used to run in the cardengine one call earlier in the frame, so it saw the
+	    previous frame's trigger count; from here it sees this frame's, and a notification is raised on
+	    the frame the achievement fires rather than the one after.
+
+	    ra_overlay_tick() is handed the count and the pixels and nothing else, so this file stays the only
+	    thing here that knows what a snapshot is -- the same arrangement the cardengine had. What has gone
+	    is the range check on the strip: it used to be a pointer crossing a binary boundary and now it is
+	    this binary's own address, so there is nothing left to distrust.
+	*/
+	ra_overlay_tick(snapshot->rcTriggered, ra_rc_text());
+	{
+		extern u32 raOverlayShows, raOverlayDenied, raOverlayEvicted, raOverlayDeniedNoLayer;
+		extern u32 raOverlayDispcnt, raOverlayWindow;
+		extern u8  raOverlayState;
+
+		snapshot->shows          = raOverlayShows;
+		snapshot->denied         = raOverlayDenied;
+		snapshot->evicted        = raOverlayEvicted;
+		snapshot->deniedNoLayer  = raOverlayDeniedNoLayer;
+		snapshot->overlayState   = raOverlayState;
+		snapshot->overlayDispcnt = raOverlayDispcnt;
+		snapshot->overlayWindow  = raOverlayWindow;
+		snapshot->overlayText    = (u32)ra_rc_text();
+	}
 }

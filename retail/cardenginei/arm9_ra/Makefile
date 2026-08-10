@@ -40,6 +40,24 @@ CFLAGS	:=	-g -Wall -Os -ffunction-sections -fdata-sections\
 
 # ADD -DDEBUG here for logging/debug
 CFLAGS	+=	$(INCLUDE) -DARM9
+
+# A diagnostic, off by default: RA_OVERLAY_DEMO=60 raises the achievement notification once a
+# second regardless of whether anything unlocked. That answers "can anything be seen on that screen
+# at all" in ten seconds instead of a three-minute session that ends with an achievement permanently
+# earned -- and it is what identified the layer ordering as the reason a real unlock was invisible.
+#
+# Needs the object removed to take effect. make tracks file timestamps and not CFLAGS, so setting
+# this on an already-built tree relinks the old ra_overlay.o and the ROM is silently not a
+# diagnostic at all -- which is exactly what happened the first time, and the snapshot said so with
+# shows and denied both at zero after 2,863 ticks.
+# Use: rm -f cardenginei/arm9_ra/build/ra_overlay.o (or make clean).
+#
+# It lives in *this* Makefile because the overlay does. It was in cardenginei/arm9's until the
+# overlay moved here, and leaving it there would have been a flag that quietly reached nothing.
+ifneq ($(RA_OVERLAY_DEMO),)
+CFLAGS	+=	-DOVERLAY_DEMO_INTERVAL=$(RA_OVERLAY_DEMO)
+endif
+
 CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions
 
 ASFLAGS	:=	-g $(ARCH) $(INCLUDE)

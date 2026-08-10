@@ -88,6 +88,7 @@ $CC -std=gnu99 -Wall -Wno-unused-function -Wno-pointer-to-int-cast -Wno-int-to-p
 	"$RC"/src/rhash/md5.c \
 	retail/arm9/source/ra_wifi_verdict.c \
 	retail/cardenginei/arm9_ra/source/ra_text.c \
+	retail/cardenginei/arm9_ra/source/ra_overlay.c \
 	-lm -o "$out/ra_reader_test"
 
 set +e

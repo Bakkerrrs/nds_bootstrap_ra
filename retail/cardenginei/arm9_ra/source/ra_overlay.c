@@ -1,5 +1,5 @@
 /*
-    RetroAchievements support for nds-bootstrap -- on-screen text overlay (ARM9).
+    RetroAchievements support for nds-bootstrap -- on-screen text overlay (DSi WRAM).
 
     Composites text over the running game on a spare sub-engine background layer.
 
@@ -21,6 +21,16 @@
     register it took, so the layer's content is intact throughout and merely absent for three
     seconds. A notification that corrupts the game is worse than no notification; one that is
     correct and never appears is not a notification.
+
+    It lived in the ARM9 cardengine until sprites needed writing, and the window that had already
+    refused a four-byte diagnostic field was never going to hold OAM negotiation. Moving it here
+    gave the cardengine **1,228 bytes free** where it had 60, and cost nothing: this binary is
+    called once a frame from the same VBlank hook, so the overlay runs exactly as often as before.
+
+    Two things came free with the move. The trigger count is now this frame's rather than last
+    frame's, so a notification is raised on the frame the achievement fires. And the rendered strip
+    is a neighbour's pointer instead of an address crossing a binary boundary, so the range check
+    that guarded it is gone -- there is nothing left to distrust.
 
     This file is part of nds-bootstrap and is licensed under the GPL-3.0,
     the same terms as the rest of the project.
@@ -182,8 +192,11 @@ static bool screenHidden(void) {
 
 
 /*
-    Guarded by a magic value rather than a bool: the cardengine's .bss is never
-    zeroed, so a plain flag starts as whatever happened to be in RAM.
+    Guarded by a magic value rather than a bool: the cardengine's .bss was never zeroed, so a plain flag
+    started as whatever happened to be in RAM.
+
+    Kept after the move even though this binary's .bss *is* cleared, by ra_startup(). It costs four bytes
+    of a 256K window and it is the only thing that would notice if that ever stopped being true.
 */
 #define STATE_MAGIC 0x5241564C  /* "RAVL" */
 

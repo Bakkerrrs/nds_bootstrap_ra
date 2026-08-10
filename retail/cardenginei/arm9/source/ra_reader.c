@@ -11,6 +11,10 @@
     linked into: at its tightest it had 28 bytes spare, and a single watch cost 24 of
     them. The other side has 256K.
 
+    The overlay went the same way, and later, for the same reason taken to its end: a font for
+    printable ASCII is 760 bytes and sprite code is more, against a window that was refusing
+    four-byte fields. It draws from over there now and this file does not know it exists.
+
     What could not move is the snapshot. It is the only debug channel this project has --
     there is no console inside an injected cardengine, so everything is read as hex
     through the in-game menu's RAM viewer -- and it is read at a fixed address in the
@@ -23,7 +27,6 @@
 */
 
 #include "ra_reader.h"
-#include "ra_overlay.h"
 #include "locations.h"
 
 #if RA_READER_ENABLED
@@ -109,21 +112,6 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 	    makes no assumption about what order anything here ran in.
 	*/
 	snapshot.shared = (u32)sharedAddr;
-	{
-		extern u32 raOverlayShows, raOverlayDenied, raOverlayEvicted;
-		extern u32 raOverlayDeniedNoLayer;
-		snapshot.shows         = raOverlayShows;
-		snapshot.denied        = raOverlayDenied;
-		snapshot.evicted       = raOverlayEvicted;
-		snapshot.deniedNoLayer = raOverlayDeniedNoLayer;
-		{
-			extern u8 raOverlayState;
-			extern u32 raOverlayDispcnt, raOverlayWindow;
-			snapshot.overlayState   = raOverlayState;
-			snapshot.overlayDispcnt = raOverlayDispcnt;
-			snapshot.overlayWindow  = raOverlayWindow;
-		}
-	}
 	/*
 	    From misc.c, where the re-arm lives. Published here rather than there for the same reason the
 	    overlay's counters are: this file owns the snapshot and the others stay leaves.
@@ -136,32 +124,6 @@ void ra_tick(u8 consoleModel, bool wramLoaded) {
 		snapshot.rearmTable    = raRearmTable;
 		snapshot.rearmIe       = raRearmIe;
 		snapshot.rearmDispstat = raRearmDispstat;
-	}
-
-	/*
-	    Last frame's count: the WRAM binary that increments it runs below. One frame of latency on a
-	    180-frame notification, and passing this frame's would mean calling the overlay after the work
-	    it is meant to be independent of.
-
-	    The strip is checked here rather than trusted there.
-
-	    The strip is rendered by cardenginei_arm9_ra and lives in DSi WRAM; the overlay copies
-	    RA_TEXT_BYTES from it into borrowed VRAM. A pointer outside that window would be two kilobytes
-	    of arbitrary memory painted over a running game, so the range test happens in the file that
-	    owns the snapshot -- the overlay is handed either a usable strip or nothing, and needs no
-	    opinion about where WRAM is.
-
-	    Zero is the normal state before the first unlock and is not a failure.
-	*/
-	{
-		const u32 text = snapshot.overlayText;
-		const void* strip = 0;
-
-		if (text >= CARDENGINEI_ARM9_RA_LOCATION
-		 && text + RA_TEXT_BYTES <= CARDENGINEI_ARM9_RA_LOCATION + CARDENGINEI_ARM9_RA_SIZE) {
-			strip = (const void*)text;
-		}
-		ra_overlay_tick(snapshot.rcTriggered, strip);
 	}
 
 	/*

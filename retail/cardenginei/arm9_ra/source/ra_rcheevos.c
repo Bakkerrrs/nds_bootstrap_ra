@@ -283,6 +283,15 @@ static const void* textStrip;
     phrase appearing over a game would read as part of the game.
 */
 #define RA_TEXT_HEADING "RA UNLOCKED"
+
+/*
+    Where the rendered notification is, for the overlay -- which lives beside this file now rather than
+    across the cardengine boundary, so this is a pointer handed to a neighbour instead of an address
+    published through the snapshot and range-checked on arrival.
+*/
+const void* ra_rc_text(void) {
+	return textStrip;
+}
 static u8    defCount;
 static u8    defIndex;
 static u8    activatedCount;
@@ -1057,11 +1066,6 @@ static u8 ra_rc_frame_step(raSnapshot* snapshot) {
 	    the two apart and costs one compare on a frame with nothing to send.
 	*/
 	ra_rc_offer_unlock(snapshot);
-	/*
-	    Where the overlay's text is, published for the ARM9 cardengine because that is the side that
-	    draws and this is the side that has room for a font. NULL until an unlock has rendered one.
-	*/
-	snapshot->overlayText  = (u32)textStrip;
 	snapshot->unlockSent   = unlockSent;
 	snapshot->unlockQueued = unlockQueued;
 	snapshot->unlockLost   = unlockLost;
