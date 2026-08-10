@@ -6215,13 +6215,43 @@ Three details that are decisions rather than mechanics:
   behaviour. The launcher log says which happened, because `o=` is the one number in the request that
   nothing downstream can check — the reply does not echo it back.
 
-### Not confirmed on hardware yet
+### Confirmed on hardware, first try
 
-The suite covers the conversions, the parser, the round trip and both signature forms. What it cannot
-cover is whether `time()` returns a real clock in the launcher. It should: the launcher's own ARM7 calls
-`initClockIRQ()`, which is what maintains the value the ARM9 reads. If it does not, the plausibility
-guard turns every unlock back into the old no-`o=` form and the log says so — which is the reason the
-guard is there rather than an assertion.
+*Contra 4*, achievement 302329, on a 3DS:
+
+```
+queue            1 to send
+  302329  earned 154 s ago
+  302329  awarded
+award reply:
+  {"Success":true,"AchievementID":302329,"AchievementsRemaining":44,"Score":1134,"SoftcoreScore":450}
+awarded 1, refused 0, still owed 0
+```
+
+Four separate things in six lines, and each was a way this could have failed:
+
+- **`time()` returns a real clock in the launcher.** The one thing the suite could not cover. The
+  launcher's own ARM7 calls `initClockIRQ()` and that turns out to be enough.
+- **The RTC stamp is right.** It passed `raQueueStampToUnix()`, which means the ARM7 read the clock,
+  normalised the PM flag and formatted six fields without corrupting any of them.
+- **Both ends read the *same* clock.** This is what 154 actually proves. Had the zone handling not
+  cancelled, the delta would have been off by whole hours — 154 + 3600·N — rather than being a small
+  plausible number. A tight value is the cancellation, observed.
+- **The five-field signature is accepted.** `Success:true` with `AchievementID`, `Score` and
+  `AchievementsRemaining` all present, which by this project's own earlier lesson is the part that says
+  something was *recorded* rather than merely acknowledged. Stage 14 on the same boot agrees from the
+  other end: `UserUnlocks:[302329,101000001]`, and the set came back 44 definitions instead of 45
+  because 302329 was filtered out of it.
+
+**The console's timezone never enters, and that is worth stating plainly.** `o=` is an offset, not an
+instant, so the server dates the unlock from *its* clock minus the seconds. Whatever zone the console is
+set to cancels out of the subtraction before it is ever sent. Treating local time as UTC at both ends is
+not an approximation that mostly works — it is exact, because only the difference leaves the console.
+
+**What this log still cannot show** is the time the server actually recorded. The award reply does not
+echo `o=` back, and the `r=unlocks` reply carries ids without timestamps. The place that can confirm it
+is the achievement's own unlock time on the RetroAchievements site, which should read 154 seconds before
+the submission rather than at it.
 
 ## Status
 
@@ -6258,12 +6288,12 @@ guard is there rather than an assertion.
       used to be taken for a text background. Host-tested rather than hardware-confirmed,
       and deliberately: *Contra 4* runs in BG mode 0, where the old reading is correct by
       accident and the bug cannot fire.
-- [x] **An unlock carries when it was earned.** The cardengine stamps the queue record from the
-      RTC and the launcher sends `o=`, so the server dates an achievement by the moment it fired
-      rather than by the boot that reported it. Includes the signature change `o=` requires —
-      the id twice and then the seconds. Host-tested; the one part still unconfirmed on hardware
-      is whether the launcher's `time()` reads a real clock, and if it does not the request falls
-      back to the old form and says so in the log.
+- [x] **An unlock carries when it was earned** — **confirmed on hardware**. The cardengine stamps
+      the queue record from the RTC and the launcher sends `o=`, so the server dates an achievement
+      by the moment it fired rather than by the boot that reported it. Includes the signature
+      change `o=` requires — the id twice and then the seconds. Read back on *Contra 4* as
+      `302329  earned 154 s ago` followed by `302329  awarded`, with the account holding it on the
+      same boot's `r=unlocks`.
 - [ ] **Hardcore.** Blocked on nothing technical: the server injects a
       *"Warning: Unknown Emulator"* notice for an unrecognised User-Agent and blocks
       hardcore only, by its own wording. What it needs is `nds-bootstrap-ra/0.1`
