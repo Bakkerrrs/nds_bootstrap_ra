@@ -654,7 +654,10 @@ int main(void) {
 	/* The sub engine as the game had it; see the note beside these in ra.h. */
 	CHECK(__builtin_offsetof(raSnapshot, overlayDispcnt) == 0xB8);
 	CHECK(__builtin_offsetof(raSnapshot, overlayWindow) == 0xBC);
-	CHECK(sizeof(raSnapshot) == 0xC0);
+	/* Which path drew, and what it took; see the note beside these in ra.h. */
+	CHECK(__builtin_offsetof(raSnapshot, overlaySpriteOam) == 0xC0);
+	CHECK(__builtin_offsetof(raSnapshot, overlaySpriteSlot) == 0xC1);
+	CHECK(sizeof(raSnapshot) == 0xC4);
 
 	/*
 	    The shared block's real size, pinned because overrunning it is silent: slot 13 is

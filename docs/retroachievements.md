@@ -5486,10 +5486,91 @@ The game keeps rendering that layer throughout; it simply is not displayed.
 But as a finished state it is not good enough. Eating a piece of the scenery you are dodging bullets in is
 not an acceptable toaster, and that is the honest reading of an otherwise working notification.
 
-**Sprites remain the answer that costs nothing.** An OBJ at a given priority draws above every background
-at that priority, whatever the game is doing with its layers, and it disturbs no layer at all. It is the
-next piece of work — a new borrow-and-return over OAM entries and object VRAM — and this stays as the
-fallback for when no object slot is free.
+## Sprites: the path that costs the game nothing
+
+An object at a given priority is drawn **above every background** at that priority, whatever the game is
+doing with its layers. So it does not have to take a layer at all — and what it does need, a disabled OAM
+entry and a range of object VRAM nobody references, it can *find* rather than borrow. The background path
+stays as the fallback for when neither can be found.
+
+### The move that had to come first
+
+The ARM9 cardengine had 60 bytes free and had already refused a four-byte diagnostic field twice. OAM
+negotiation, an object-VRAM survey and a gather blit were never going to fit, so the overlay moved to
+`cardenginei_arm9_ra` — the move this document has predicted since phase 1.
+
+The window went from 60 bytes free to **1,224**, and it cost nothing: that binary is called once a frame
+from the same VBlank hook, so the overlay runs exactly as often as it did. Three things came free:
+
+- The trigger count is **this** frame's rather than last frame's, so a notification is raised on the frame
+  the achievement fires instead of the one after.
+- The rendered strip is a neighbour's pointer instead of an address crossing a binary boundary, so the
+  range check that guarded it is gone.
+- **The snapshot address no longer moves between the normal and pulse builds** — 0x027FEA00 for both,
+  because the code the demo flag changes is not in the cardengine any more. That removes a class of
+  mistake this document records twice.
+
+`RA_OVERLAY_DEMO` moved to `arm9_ra`'s Makefile with it. Left where it was it would have been a flag
+reaching nothing, and the pulse probe would have stopped working silently — the exact failure its own
+comment warns about.
+
+### Eight objects of 32×16
+
+256×16 pixels is exactly the 32×2 tiles of the strip. Eight rather than four 64×32 ones because 64×16 is
+not a shape the DS has, and four of the larger size would reserve twice the object VRAM to leave half of
+it blank.
+
+Object VRAM is claimed in 2K units, one per notification, and **only the first 16K is ever considered**.
+That is a mapping question, not tidiness: how much VRAM sits behind 0x06600000 depends on the game's
+`VRAMCNT`, and a write past the end does not fail — it mirrors, onto tiles the game *is* using. 16K is the
+smallest allocation a game using sub objects realistically makes.
+
+OAM entries are taken from the **front**, because objects are ordered among themselves by OAM index and
+lower is in front. That is the same tie-break that made backgrounds invisible, one level down, and it is
+worth spending a scan direction on.
+
+### Three places this refuses to guess
+
+- **2D mapping** (`DISPCNT` bit 4 clear) addresses object tiles as a 32-wide matrix rather than
+  consecutively, so the arithmetic here is simply wrong for it. Falls back. Contra 4 uses 1D.
+- **Objects disabled** (bit 12 clear) would mean enabling them, and a game that keeps them off may have an
+  OAM full of entries it never intended to be seen. Falls back.
+- **`attr3` is never written.** The fourth halfword of every OAM entry is part of the interleaved affine
+  matrix table, so a disabled entry's may hold a live parameter for a sprite the game is rotating. Writing
+  it would corrupt that sprite's matrix.
+
+And "disabled" is exact rather than approximate: with the rotation flag clear, attribute 0 bit 9 is the
+disable bit, so `(attr0 & 0x0300) == 0x0200` and nothing else means off. With the rotation flag *set*, bit
+9 means double-size and the object is live — reading that pair as one field would treat every double-size
+affine sprite in the game as free.
+
+### The boundary, and insurance against reading it wrong
+
+In 1D mapping the tile number steps by the boundary in `DISPCNT` bits 20-21 (32/64/128/256 bytes); the
+classic reading, and the only one the GBA had, is a flat 32. Contra 4 sets 128.
+
+If that interpretation is wrong in the direction of *too large*, the game's tiles appear further out in
+VRAM than they are, the survey calls a slot free that is not, and the blit writes over somebody's sprite.
+So **the survey marks the union of both readings**. One extra range per entry, and it makes that
+impossible; it makes a free slot slightly rarer, which is a fallback rather than a fault.
+
+The overlay's own placement is not exposed to the same risk, and by construction rather than by luck:
+`spriteBlit()` writes to the byte address of the slot the survey approved, computed without reference to
+the boundary at all. A wrong boundary would make our objects *read* their tiles from the wrong place — a
+notification of visible nonsense — and could never make them write to it.
+
+### Held every frame, for the same reason the layer was
+
+The eight entries are rewritten on every frame the notification is up, because a game that keeps a shadow
+copy of OAM and DMAs the whole thing each frame — the ordinary way to do it — would otherwise wipe them on
+its next transfer. And the claimed slot is re-surveyed every frame and given back on eviction, because the
+survey is a sample of registers the game rewrites: a range that was free when the notification started can
+be the game's a frame later.
+
+`overlaySpriteOam` and `overlaySpriteSlot` say which path ran and what it took, with **0xFF meaning the
+background path**. A separate field rather than another bit of `overlayState`, because an object has no
+layer and no character block — reporting through those bits would make "objects" indistinguishable from
+"layer 0, block 0".
 
 ## Known graphical limitations of the overlay (deferred)
 

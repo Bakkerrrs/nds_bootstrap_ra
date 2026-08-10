@@ -605,7 +605,25 @@ typedef struct raSnapshot {
 	*/
 	u32 overlayDispcnt;   /* +0xB8  sub DISPCNT, 0x04001000 */
 	u32 overlayWindow;    /* +0xBC  WININ 0x04001048 low, WINOUT 0x0400104A high */
-} raSnapshot;            /*              0xC0 bytes */
+	/*
+	    Which path drew the last notification, and what it took.
+
+	    The object path is the one that costs the game nothing: an object at a given priority is drawn
+	    above every background at that priority, so it does not have to take a layer at all -- and what it
+	    does need, a disabled OAM entry and a range of object VRAM nobody references, it *finds* rather
+	    than borrows. The background path stays as the fallback for when neither can be found.
+
+	    0xFF in overlaySpriteOam means the background path ran, and that is why this is a separate field
+	    rather than another bit of overlayState: an object has no layer and no character block, so
+	    reporting through those bits would make "objects" indistinguishable from "layer 0, block 0".
+
+	    Otherwise it is the first of the eight OAM indices used, and overlaySpriteSlot is the 2K unit of
+	    object VRAM claimed. Both are worth having because both are negotiated with the game rather than
+	    fixed, so a failure to be seen has to be able to say which slot and which entries were in play.
+	*/
+	u8  overlaySpriteOam;  /* +0xC0  first OAM entry used, or 0xFF for the background path */
+	u8  overlaySpriteSlot; /* +0xC1  2K unit of object VRAM claimed, or 0xFF */
+} raSnapshot;            /*              0xC4 bytes */
 
 /*
     A note on what that pair settled, because it is the answer to four hardware runs and it lives here

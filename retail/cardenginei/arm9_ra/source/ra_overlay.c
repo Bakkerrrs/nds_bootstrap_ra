@@ -231,6 +231,16 @@ static u16  savedHofs;
 static u16  savedVofs;
 static u16  savedPaletteEntry;
 static bool savedDispcntBg;
+/*
+    The object path's state. `usingSprites` is what hide() and the per-frame hold branch on: the two
+    paths take different things and must give back exactly what they took.
+*/
+static u8   usingSprites;
+static u8   spriteOam[8];
+static u8   spriteSlot;
+static u32  spriteBase;
+static u32  spriteTile;
+static u16  savedObjPaletteEntry;
 
 /* Read into the snapshot, so the negotiation is observable rather than guessed at. */
 u32 raOverlayShows;
@@ -254,6 +264,13 @@ u8  raOverlayState;
 */
 u32 raOverlayDispcnt;
 u32 raOverlayWindow;
+/*
+    Which path drew, and what it took. 0xFF in raOverlaySpriteOam means the background path -- so the two
+    are never ambiguous the way "layer 0, block 0" would be if the object path reported through
+    overlayState's layer and block bits.
+*/
+u8  raOverlaySpriteOam = 0xFF;
+u8  raOverlaySpriteSlot = 0xFF;
 
 /*
     Which 16K blocks of sub BG VRAM the game is using, for tiles or for maps. Read
@@ -381,24 +398,33 @@ static int chooseLayer(void) {
 	return 3;
 }
 
+/*
+    The one byte that says what the overlay chose and what it chose it from.
+
+    Packed after the layer and block are settled and before anything is written, so the reading is what
+    the survey had to work from paired with what it decided. A function rather than inline in draw()
+    because there are two paths now and both have to report -- and the object path has no layer or block
+    to report, which is exactly why raSnapshot.overlaySpriteOam exists alongside it.
+
+    See raSnapshot.overlayState for the bit layout.
+*/
+static void overlayStateFor(int lay, int blk) {
+	raOverlayState = (u8)(((SUB_DISPCNT & (1u << 30)) ? 1 : 0)
+	                      | ((lay & 3) << 1)
+	                      | ((blk & 3) << 3)
+	                      /* bit 5: the screen was being faded when this was raised */
+	                      | (brightActive() ? 0x20 : 0)
+	                      /* bit 6: this one was held back until a fade ended */
+	                      | (pendingFrames ? 0x40 : 0));
+}
+
 static void draw(int b, const void* text) {
 	vu32* tiles = tilesOf(b);
 	vu16* map = mapOf(b);
 	const u32* src = (const u32*)text;
 	int i;
 
-	/*
-	    Packed here, after the block and layer are chosen and before a single tile is written, so the
-	    reading is what surveyBlocks() had to work from paired with what it decided. One byte, because
-	    the cardengine's window has none to spare. See raSnapshot.overlayState.
-	*/
-	raOverlayState = (u8)(((SUB_DISPCNT & (1u << 30)) ? 1 : 0)
-	                      | ((layer & 3) << 1)
-	                      | ((block & 3) << 3)
-	                      /* bit 5: the screen was being faded when this was raised */
-	                      | (brightActive() ? 0x20 : 0)
-	                      /* bit 6: this one was held back until a fade ended */
-	                      | (pendingFrames ? 0x40 : 0));
+	overlayStateFor(layer, block);
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 
@@ -426,6 +452,281 @@ static void draw(int b, const void* text) {
 	}
 }
 
+
+/*
+    ============================================================================================
+    The sprite path, which is the one that costs the game nothing.
+    ============================================================================================
+
+    An object at a given priority is drawn *above every background* at that priority, whatever the game
+    is doing with its layers. That is the whole reason for this: the background path works and was
+    measured to work, but it can only be seen by taking a layer the game may be using, and on Contra 4
+    that means a piece of the gameplay screen goes missing for three seconds.
+
+    An object costs nothing that is in use, because what it needs -- a disabled OAM entry and a range of
+    object VRAM nobody references -- can be *found* rather than borrowed. When it cannot be found, the
+    background path is still there.
+
+    Eight objects of 32x16 pixels, side by side, which is 256x16 -- exactly the 32x2 tiles of the strip.
+    Eight rather than four 64x32 ones because 64x16 is not a shape the DS has, and four of the larger
+    size would reserve twice the object VRAM to leave half of it blank.
+
+    What is deliberately *not* supported, and falls back instead of guessing:
+
+      2D mapping     (DISPCNT bit 4 clear) addresses object tiles as a 32-wide matrix rather than
+                     consecutively, so the arithmetic below is simply wrong for it. Contra 4 uses 1D.
+      OBJ disabled   (bit 12 clear) would mean enabling it, and a game that keeps it off may well have
+                     an OAM full of entries it never intended to be seen. Turning it on would show them.
+*/
+
+/* Sub engine OAM, and sub object tile VRAM. */
+#define SUB_OAM        ((vu16*)0x07000400)
+#define SUB_OBJ_VRAM   0x06600000
+/* Sub engine object palette: sixteen banks of sixteen, alongside the background one. */
+#define SUB_OBJ_PALETTE ((vu16*)0x05000600)
+#define OBJ_PAL_ENTRY   (OVERLAY_PAL_BANK * 16 + OVERLAY_PAL_INDEX)
+
+#define OAM_ENTRIES 128
+#define RA_SPRITES  8            /* 8 x 32px = 256px, the screen's width */
+#define RA_SPRITE_TILES 8        /* 4x2 tiles each */
+#define RA_SPRITE_BYTES (RA_SPRITE_TILES * 32)   /* 4bpp */
+
+/*
+    Object VRAM is claimed in 2K units, which is what one strip needs: 8 sprites x 256 bytes.
+
+    Only the first 16K is ever considered, and that is a mapping question rather than a tidiness one.
+    How much VRAM is actually behind 0x06600000 depends on the game's VRAMCNT assignment, and a write
+    past the end does not fail -- it mirrors, onto tiles the game *is* using. 16K is the smallest
+    allocation a game that uses sub objects realistically makes, so staying inside it means the survey's
+    answer and the hardware's agree.
+*/
+#define OBJ_SLOT_BYTES 2048
+#define OBJ_SLOTS      8
+
+/*
+    Which 2K units of object VRAM the game's own sprites reference.
+
+    Every enabled entry is measured from its own shape, size and colour depth, because a sprite's tile
+    footprint is not knowable any other way -- a 64x64 8bpp object is thirty-two times the VRAM of an
+    8x8 4bpp one.
+
+    A disabled entry is skipped, and "disabled" is exact rather than approximate: with the rotation flag
+    clear, attribute 0 bit 9 is the disable bit, so `(attr0 & 0x0300) == 0x0200` and nothing else means
+    off. With the rotation flag *set*, bit 9 means double-size and the object is live -- reading that
+    pair as one field would treat every double-size affine sprite in the game as free.
+*/
+static void surveyObjVram(bool* used, u32 boundary) {
+	int i;
+
+	for (i = 0; i < OBJ_SLOTS; i++) {
+		used[i] = false;
+	}
+
+	for (i = 0; i < OAM_ENTRIES; i++) {
+		const u16 attr0 = SUB_OAM[i * 4];
+		const u16 attr1 = SUB_OAM[i * 4 + 1];
+		const u16 attr2 = SUB_OAM[i * 4 + 2];
+		u32 start, end, k;
+		int wide, high;
+
+		if ((attr0 & 0x0300) == 0x0200) {
+			continue;   /* not rotation/scaling, and disabled */
+		}
+
+		/* Shape in attr0 bits 14-15, size in attr1 bits 14-15. */
+		switch (((attr0 >> 14) & 3) * 4 + ((attr1 >> 14) & 3)) {
+			case  0: wide = 1; high = 1; break;   /* square   8x8   */
+			case  1: wide = 2; high = 2; break;   /*         16x16  */
+			case  2: wide = 4; high = 4; break;   /*         32x32  */
+			case  3: wide = 8; high = 8; break;   /*         64x64  */
+			case  4: wide = 2; high = 1; break;   /* wide    16x8   */
+			case  5: wide = 4; high = 1; break;   /*         32x8   */
+			case  6: wide = 4; high = 2; break;   /*         32x16  */
+			case  7: wide = 8; high = 4; break;   /*         64x32  */
+			case  8: wide = 1; high = 2; break;   /* tall     8x16  */
+			case  9: wide = 1; high = 4; break;   /*          8x32  */
+			case 10: wide = 2; high = 4; break;   /*         16x32  */
+			case 11: wide = 4; high = 8; break;   /*         32x64  */
+			/*
+			    Shape 3 is prohibited, so this is a register the game should never have written. Taken as
+			    the largest object there is rather than the smallest: an invalid shape that under-states
+			    its footprint would let this survey call somebody's tiles free.
+			*/
+			default: wide = 8; high = 8; break;
+		}
+
+		/*
+		    attr0 bit 13 is the colour depth: 8bpp tiles are 64 bytes, 4bpp are 32.
+
+		    **Both readings of the tile number are marked used, and that is deliberate insurance.** In 1D
+		    mapping the number steps by the boundary from DISPCNT bits 20-21, which is what `boundary` is;
+		    the classic reading, and the only one the GBA had, is a flat 32 bytes. If the interpretation
+		    here is wrong in the direction of *too large*, the game's tiles appear further out in VRAM than
+		    they are and this survey calls a slot free that is not -- and then the blit writes over
+		    somebody's sprite.
+
+		    Marking the union costs one extra range per entry and makes that impossible. It makes a free
+		    slot slightly rarer, which is a fallback to the background path rather than a fault.
+
+		    The overlay's *own* placement is not exposed to the same risk, and by construction rather than
+		    by luck: spriteBlit() writes to the byte address of the slot the survey approved, computed
+		    without reference to the boundary at all. A wrong boundary would make our objects *read* their
+		    tiles from the wrong place -- a notification of visible nonsense -- and could never make them
+		    write to it.
+		*/
+		{
+			const u32 bytes = (u32)wide * (u32)high * ((attr0 & 0x2000) ? 64u : 32u);
+			const u32 tile  = (u32)(attr2 & 0x03FF);
+			int pass;
+
+			for (pass = 0; pass < 2; pass++) {
+				start = tile * (pass ? 32u : boundary);
+				end   = start + bytes;
+				for (k = start / OBJ_SLOT_BYTES;
+				     k <= (end - 1) / OBJ_SLOT_BYTES && k < OBJ_SLOTS; k++) {
+					used[k] = true;
+				}
+			}
+		}
+	}
+}
+
+/*
+    Eight disabled OAM entries, scanning from the front.
+
+    From the front because objects are ordered among themselves by OAM index -- lower is in front -- so
+    the earliest free slots are the ones least likely to be covered by one of the game's own sprites.
+    That is the same tie-break that made backgrounds invisible, one level down, and it is worth spending
+    a scan direction on.
+
+    Returns the count found, filling `out`. They do not have to be consecutive.
+*/
+static int chooseSprites(u8* out) {
+	int i;
+	int n = 0;
+
+	for (i = 0; i < OAM_ENTRIES && n < RA_SPRITES; i++) {
+		if ((SUB_OAM[i * 4] & 0x0300) == 0x0200) {
+			out[n++] = (u8)i;
+		}
+	}
+	return n;
+}
+
+/*
+    Copy the strip into object VRAM, rearranged.
+
+    The strip is laid out for a background: row 0 is 32 tiles, then row 1 is 32 tiles. An object with 1D
+    mapping wants its own tiles consecutive, so sprite k needs the four tiles of row 0 at columns 4k..4k+3
+    followed by the four of row 1 at the same columns. A gather rather than a copy, and the reason the
+    strip is not simply stored in this order is that the background path needs the other one -- and
+    keeping one layout with one rearrangement beats keeping two layouts that can disagree.
+*/
+static void spriteBlit(u32 base, const void* text) {
+	const u32* src = (const u32*)text;
+	vu32* dst = (vu32*)(SUB_OBJ_VRAM + base);
+	int k, row, col, w;
+
+	for (k = 0; k < RA_SPRITES; k++) {
+		for (row = 0; row < RA_TEXT_ROWS; row++) {
+			for (col = 0; col < 4; col++) {
+				const int srcTile = row * RA_TEXT_COLS + k * 4 + col;
+
+				for (w = 0; w < 8; w++) {
+					*dst++ = src[srcTile * 8 + w];
+				}
+			}
+		}
+	}
+}
+
+/* The three attributes of one of our objects, written fresh each frame while visible. */
+static void spriteWrite(int k, u32 tileNumber) {
+	const int i = spriteOam[k];
+
+	/*
+	    attr0: Y, rotation flag clear, not disabled, normal mode, 16-colour, shape 1 (wide).
+	    attr1: X, no flip, size 2 -- which with shape 1 is 32x16.
+	    attr2: tile number, priority 0, our palette bank.
+
+	    attr3 is **not** touched, and that is not an omission. The fourth halfword of every OAM entry is
+	    part of the interleaved affine matrix table, so a disabled entry's may hold a live parameter for a
+	    sprite the game is rotating. Writing it would corrupt that sprite's matrix.
+	*/
+	SUB_OAM[i * 4]     = (u16)((OVERLAY_ROW * 8) | (1 << 14));
+	SUB_OAM[i * 4 + 1] = (u16)((k * 32) | (2 << 14));
+	SUB_OAM[i * 4 + 2] = (u16)(tileNumber | (OVERLAY_PAL_BANK << 12));
+}
+
+/*
+    Try to show the notification on objects. Returns false to let the background path have it.
+*/
+static bool spriteShow(const void* text) {
+	bool used[OBJ_SLOTS];
+	const u32 d = SUB_DISPCNT;
+	u32 boundary;
+	int slot;
+	int k;
+
+	/* 1D mapping and objects already on, or this is not our path. See the note above. */
+	if (!(d & (1u << 4)) || !(d & (1u << 12))) {
+		return false;
+	}
+	/* DISPCNT bits 20-21: 32, 64, 128 or 256 bytes per tile-number step. */
+	boundary = 32u << ((d >> 20) & 3);
+
+	if (chooseSprites(spriteOam) < RA_SPRITES) {
+		return false;
+	}
+
+	surveyObjVram(used, boundary);
+	for (slot = 0; slot < OBJ_SLOTS; slot++) {
+		if (!used[slot]) {
+			break;
+		}
+	}
+	if (slot == OBJ_SLOTS) {
+		return false;
+	}
+
+	/*
+	    The slot has to land on a tile number the boundary can express. 2K is a multiple of every
+	    boundary the DS has, so this division is exact and the check is a statement of that rather than a
+	    guard against it.
+	*/
+	spriteTile = (u32)slot * OBJ_SLOT_BYTES / boundary;
+	spriteBase = (u32)slot * OBJ_SLOT_BYTES;
+	spriteSlot = (u8)slot;
+	raOverlaySpriteOam  = spriteOam[0];
+	raOverlaySpriteSlot = (u8)slot;
+
+	savedObjPaletteEntry = SUB_OBJ_PALETTE[OBJ_PAL_ENTRY];
+	SUB_OBJ_PALETTE[OBJ_PAL_ENTRY] = 0x7FFF;   /* white */
+
+	spriteBlit(spriteBase, text);
+	for (k = 0; k < RA_SPRITES; k++) {
+		spriteWrite(k, spriteTile + (u32)k * RA_SPRITE_BYTES / boundary);
+	}
+
+	usingSprites = 1;
+	return true;
+}
+
+/* Put every entry back the way it was found: disabled, with its own attributes. */
+static void spriteHide(void) {
+	int k;
+
+	for (k = 0; k < RA_SPRITES; k++) {
+		const int i = spriteOam[k];
+
+		SUB_OAM[i * 4]     = 0x0200;   /* rotation flag clear, disabled */
+		SUB_OAM[i * 4 + 1] = 0;
+		SUB_OAM[i * 4 + 2] = 0;
+	}
+	SUB_OBJ_PALETTE[OBJ_PAL_ENTRY] = savedObjPaletteEntry;
+	usingSprites = 0;
+}
+
 static void show(const void* text) {
 	bool used[CHAR_BLOCKS];
 	int b;
@@ -440,8 +741,6 @@ static void show(const void* text) {
 	raOverlayDispcnt = SUB_DISPCNT;
 	raOverlayWindow  = (u32)SUB_WININ | ((u32)SUB_WINOUT << 16);
 
-	l = chooseLayer();
-
 	/*
 	    Nothing to say, so nothing is drawn. The strip comes from cardenginei_arm9_ra, which is also
 	    where the unlock came from, so a trigger with no text means that binary rendered nothing -- a
@@ -454,6 +753,19 @@ static void show(const void* text) {
 		return;
 	}
 
+	/*
+	    Objects first, always. They cost the game nothing -- a disabled OAM entry and a range of object
+	    VRAM nobody references are *found*, not borrowed -- where the background path can only be seen by
+	    taking a layer the game may be using. It falls back rather than insisting; see spriteShow().
+	*/
+	if (spriteShow(text)) {
+		framesLeft = OVERLAY_SHOW_FRAMES;
+		raOverlayShows++;
+		overlayStateFor(0, 0);
+		return;
+	}
+
+	l = chooseLayer();
 	if (l < 0) {
 		raOverlayDenied++;
 		raOverlayDeniedNoLayer++;
@@ -471,6 +783,8 @@ static void show(const void* text) {
 		return;  /* no spare VRAM: stay quiet rather than corrupt the game */
 	}
 
+	raOverlaySpriteOam  = 0xFF;
+	raOverlaySpriteSlot = 0xFF;
 	layer = l;
 	block = b;
 	savedBgCnt = SUB_BGCNT(l);
@@ -491,6 +805,11 @@ static void show(const void* text) {
 
 static void hide(void) {
 	framesLeft = 0;
+
+	if (usingSprites) {
+		spriteHide();
+		return;
+	}
 
 	SUB_BGCNT(layer)  = savedBgCnt;
 	SUB_BGHOFS(layer) = savedHofs;
@@ -545,30 +864,67 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 	raOverlayState = (u8)((raOverlayState & 0x7F) | (pending ? 0x80 : 0));
 
 	if (framesLeft) {
-		bool used[CHAR_BLOCKS];
+		if (usingSprites) {
+			bool objUsed[OBJ_SLOTS];
+			const u32 boundary = 32u << ((SUB_DISPCNT >> 20) & 3);
+			int k;
 
-		/*
-		    Give the block back the moment the game wants it. Holding on is exactly
-		    what wrecked its graphics before: it moved a character base onto this
-		    block and the overlay kept rewriting the tiles underneath.
-		*/
-		surveyBlocks(used, layer);
-		if (used[block]) {
-			raOverlayEvicted++;
-			hide();
+			/*
+			    Give the object VRAM back the moment the game wants it, for the same reason the
+			    background path gives its block back: the survey is a sample of registers the game
+			    rewrites, and a range that was free when the notification started can be the game's a
+			    frame later. Our own eight entries are disabled while surveying, so they cannot make
+			    the slot look used to us.
+			*/
+			surveyObjVram(objUsed, boundary);
+			if (objUsed[spriteSlot]) {
+				raOverlayEvicted++;
+				hide();
+				return;
+			}
+
+			if (--framesLeft == 0) {
+				hide();
+				return;
+			}
+
+			/*
+			    Rewritten every frame rather than left in place, because a game that keeps a shadow copy
+			    of OAM and DMAs the whole thing each frame -- which is the ordinary way to do it -- would
+			    otherwise wipe these on its next transfer. Same reasoning as re-asserting BGCNT below.
+			*/
+			for (k = 0; k < RA_SPRITES; k++) {
+				spriteWrite(k, spriteTile + (u32)k * RA_SPRITE_BYTES / boundary);
+			}
 			return;
 		}
 
-		if (--framesLeft == 0) {
-			hide();
-			return;
-		}
+		{
+			bool used[CHAR_BLOCKS];
 
-		/* Hold the layer: the game rewrites these registers itself. */
-		SUB_BGCNT(layer)  = bgCntFor(block);
-		SUB_BGHOFS(layer) = 0;
-		SUB_BGVOFS(layer) = 0;
-		SUB_DISPCNT |= (1u << (8 + layer));
+			/*
+			    Give the block back the moment the game wants it. Holding on is exactly
+			    what wrecked its graphics before: it moved a character base onto this
+			    block and the overlay kept rewriting the tiles underneath.
+			*/
+			surveyBlocks(used, layer);
+			if (used[block]) {
+				raOverlayEvicted++;
+				hide();
+				return;
+			}
+
+			if (--framesLeft == 0) {
+				hide();
+				return;
+			}
+
+			/* Hold the layer: the game rewrites these registers itself. */
+			SUB_BGCNT(layer)  = bgCntFor(block);
+			SUB_BGHOFS(layer) = 0;
+			SUB_BGVOFS(layer) = 0;
+			SUB_DISPCNT |= (1u << (8 + layer));
+		}
 		return;
 	}
 

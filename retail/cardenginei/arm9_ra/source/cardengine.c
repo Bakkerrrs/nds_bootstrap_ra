@@ -379,6 +379,7 @@ void ra_wram_tick(raSnapshot* snapshot) {
 		extern u32 raOverlayShows, raOverlayDenied, raOverlayEvicted, raOverlayDeniedNoLayer;
 		extern u32 raOverlayDispcnt, raOverlayWindow;
 		extern u8  raOverlayState;
+		extern u8  raOverlaySpriteOam, raOverlaySpriteSlot;
 
 		snapshot->shows          = raOverlayShows;
 		snapshot->denied         = raOverlayDenied;
@@ -388,5 +389,7 @@ void ra_wram_tick(raSnapshot* snapshot) {
 		snapshot->overlayDispcnt = raOverlayDispcnt;
 		snapshot->overlayWindow  = raOverlayWindow;
 		snapshot->overlayText    = (u32)ra_rc_text();
+		snapshot->overlaySpriteOam  = raOverlaySpriteOam;
+		snapshot->overlaySpriteSlot = raOverlaySpriteSlot;
 	}
 }
