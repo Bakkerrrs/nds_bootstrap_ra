@@ -48,13 +48,19 @@
 #include "locations.h"
 
 /*
-    The arena: from the cardengine's __bss_end up to the definitions block reserved at the top of
-    its window. The runner reads the real __bss_end out of the built .elf when there is one, so
-    this fallback is only used before a first build -- and it is the value that binary actually
-    had, recorded rather than rounded.
+    The arena: from the cardengine's __bss_end up to the blocks reserved at the top of its window.
+    The runner reads the real __bss_end out of the built .elf when there is one, so this fallback is
+    only used before a first build -- and it is the value that binary actually had, recorded rather
+    than rounded.
+
+    **Keep it in step with the binary.** A stale fallback does not fail, it over-reports the arena by
+    however far it has drifted, and only on runs where no .elf exists yet. That is a reading which
+    looks like a measurement and is not: comparing one taken from the fallback against one taken from
+    a real build reads as a sudden 17 KB regression that never happened. It cost a wrong diagnosis
+    written into a commit message before the two were compared properly.
 */
 #ifndef RA_WRAM_BSS_END
-#define RA_WRAM_BSS_END 0x0375164CuL
+#define RA_WRAM_BSS_END 0x037559CCuL
 #endif
 
 /*
