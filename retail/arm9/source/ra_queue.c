@@ -160,6 +160,37 @@ void raQueueUnixToStamp(u32 when, char* out) {
 }
 
 /*
+    One tab-delimited field of a record, NUL-terminated into `out`, which holds `max` characters plus
+    the terminator. Returns where reading stopped -- at the delimiter, never past it.
+
+    The whole field is *consumed* even when it is longer than `max`; only the copy is clipped. Stopping
+    early would leave the tail of a title in front of the parser, and the tail of a title is very often
+    a digit that would then be read as an achievement id.
+
+    Anything outside printable ASCII is a terminator, so the record's NUL padding ends the last field
+    without needing to know how long the record is -- and a ROM header that is not text cannot put a
+    control character into a format whose fields are delimited by them. The cardengine copies those two
+    header fields out raw precisely because this end does the tidying; see raUnlockAppend().
+*/
+static int takeField(const char* text, int at, int length, char* out, int max) {
+	int n = 0;
+
+	while (at < length && text[at] != '\t'
+	    && (unsigned char)text[at] >= ' ' && (unsigned char)text[at] <= '~') {
+		if (n < max) {
+			out[n++] = text[at];
+		}
+		at++;
+	}
+	/* Trailing spaces: gameTitle is a fixed twelve bytes in the header and is padded with them. */
+	while (n > 0 && out[n - 1] == ' ') {
+		n--;
+	}
+	out[n] = 0;
+	return at;
+}
+
+/*
     Read the file.
 
     Deliberately the most forgiving parser in this project. Every non-digit is a separator, NUL
@@ -188,8 +219,10 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 	memset(q, 0, sizeof(*q));
 
 	while (i < length) {
-		u32 value;
-		u32 stamp;
+		u32  value;
+		u32  stamp;
+		char code[RA_QUEUE_CODE + 1];
+		char title[RA_QUEUE_TITLE + 1];
 		int overflow;
 		int digits;
 		int j;
@@ -245,6 +278,8 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 		    are not an unlock id and must not be read as one.
 		*/
 		stamp = 0;
+		code[0] = 0;
+		title[0] = 0;
 		if (i < length && text[i] == '\t') {
 			const int start = ++i;
 
@@ -263,6 +298,25 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 			*/
 			if (i - start == RA_QUEUE_STAMP) {
 				stamp = raQueueStampToUnix(text + start);
+			}
+
+			/*
+			    Then the game: its code, then its title, each running to the next tab or to the end of
+			    the record.
+
+			    **Consuming these correctly is not bookkeeping, it is the whole safety of the format.**
+			    A DS game title routinely ends in a digit -- `CONTRA4` does -- and a title left
+			    unconsumed would have that `4` read as an achievement id and submitted as an unlock the
+			    player never earned. So these run to their delimiter whatever they contain, which is
+			    also why the delimiter is a character no field can hold.
+			*/
+			if (i < length && text[i] == '\t') {
+				i++;
+				i = takeField(text, i, length, code, RA_QUEUE_CODE);
+				if (i < length && text[i] == '\t') {
+					i++;
+					i = takeField(text, i, length, title, RA_QUEUE_TITLE);
+				}
 			}
 		}
 
@@ -285,6 +339,11 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 		if (stamp) {
 			q->stamped++;
 		}
+		strcpy(q->codes[q->count], code);
+		strcpy(q->titles[q->count], title);
+		if (code[0]) {
+			q->named++;
+		}
 		q->ids[q->count++] = value;
 	}
 }
@@ -301,12 +360,9 @@ void raQueueScan(raQueue* q, const char* text, int length) {
     refuses rather than writing a partial file: half a queue is indistinguishable from a whole one on
     the next boot.
 */
-int raQueuePack(const raQueue* q, const u32* keep, const u32* keepTimes, int keepCount,
-                char* out, int outSize) {
+int raQueuePack(const raQueue* q, const int* keep, int keepCount, char* out, int outSize) {
 	int written = 0;
 	int i;
-
-	(void)q;
 
 	if (outSize < RA_QUEUE_RECORD || (outSize % RA_QUEUE_RECORD) != 0) {
 		return -1;
@@ -318,13 +374,19 @@ int raQueuePack(const raQueue* q, const u32* keep, const u32* keepTimes, int kee
 	memset(out, 0, (size_t)outSize);
 
 	for (i = 0; i < keepCount; i++) {
-		char* record = out + (i * RA_QUEUE_RECORD);
-		char  digits[11];
-		int   n = 0;
-		int   length;
-		u32   value = keep[i];
-		const u32 when = keepTimes ? keepTimes[i] : 0;
+		char*     record = out + (i * RA_QUEUE_RECORD);
+		const int from = keep[i];
+		char      digits[11];
+		int       n = 0;
+		int       at;
+		u32       value;
+		u32       when;
 
+		if (from < 0 || from >= q->count) {
+			return -1;
+		}
+		value = q->ids[from];
+		when  = q->times[from];
 		if (value == 0) {
 			continue;
 		}
@@ -332,29 +394,60 @@ int raQueuePack(const raQueue* q, const u32* keep, const u32* keepTimes, int kee
 			digits[n++] = (char)('0' + (value % 10u));
 			value /= 10u;
 		}
-		/*
-		    A u32 is at most 10 digits and a stamped record is 10 + 1 + 14 + 1 = 26 of the 32 a record
-		    holds, so this cannot fail -- but the check is here rather than in a comment, because the
-		    record size is a tunable and the failure it would cause is a silently mis-parsed id.
-		*/
-		length = n + 1 + (when ? 1 + RA_QUEUE_STAMP : 0);
-		if (length > RA_QUEUE_RECORD) {
-			return -1;
-		}
-		{
-			int k;
 
-			for (k = 0; k < n; k++) {
-				record[k] = digits[n - 1 - k];
-			}
+		/*
+		    Measured before a byte is written, not after. `record` points into a buffer the caller
+		    sized, so a record that did not fit would not fail a check -- it would run into the next
+		    record, and on the last one past the end of the buffer entirely.
+
+		    A u32 is at most 10 digits and the longest record is 10+1+14+1+4+1+12+1 = 44 of the 48 a
+		    record holds, so this cannot trigger. It is here because the record size is a tunable and
+		    the failure it would otherwise cause is silent memory corruption.
+		*/
+		{
+			int need = n + 1;  /* the id and its newline */
+
 			if (when) {
-				record[n] = '\t';
-				raQueueUnixToStamp(when, record + n + 1);
-				record[n + 1 + RA_QUEUE_STAMP] = '\n';
-			} else {
-				record[n] = '\n';
+				need += 1 + RA_QUEUE_STAMP;
+				if (q->codes[from][0]) {
+					need += 1 + (int)strlen(q->codes[from])
+					      + 1 + (int)strlen(q->titles[from]);
+				}
+			}
+			if (need > RA_QUEUE_RECORD) {
+				return -1;
 			}
 		}
+
+		for (at = 0; at < n; at++) {
+			record[at] = digits[n - 1 - at];
+		}
+
+		/*
+		    Each field only appears if the one before it does, because they are positional: a title
+		    with no code in front of it would be read as the code. A record that lost its stamp
+		    somewhere therefore also drops its game, which is the honest outcome -- the alternative is
+		    inventing a delimiter position that the writer never wrote.
+		*/
+		if (when) {
+			record[at++] = '\t';
+			raQueueUnixToStamp(when, record + at);
+			at += RA_QUEUE_STAMP;
+
+			if (q->codes[from][0]) {
+				int k;
+
+				record[at++] = '\t';
+				for (k = 0; q->codes[from][k]; k++) {
+					record[at++] = q->codes[from][k];
+				}
+				record[at++] = '\t';
+				for (k = 0; q->titles[from][k]; k++) {
+					record[at++] = q->titles[from][k];
+				}
+			}
+		}
+		record[at++] = '\n';
 		written++;
 	}
 	return written;

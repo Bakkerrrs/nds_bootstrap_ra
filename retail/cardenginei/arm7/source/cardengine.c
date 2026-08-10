@@ -993,15 +993,18 @@ static u8  raUnlockDropped;   /* fired with the queue already full */
     it -- that section is already the most expensive thing this file does per unlock, and there is no
     reason to make it longer for a value that does not depend on anything inside it.
 
-    Refused rather than written wrong: a console whose clock was never set reads as year 0 with a month
-    of 0, and no stamp is better than a wrong one. The launcher applies its own floor as well; see
-    raQueueStampToUnix().
+    **Not validated here, on purpose.** raQueueStampToUnix() already refuses any date it will not vouch
+    for -- a console whose clock was never set reads as year 0 and comes out as `2000...`, below its
+    floor -- and it is the copy with a host test behind it. Checking the same ranges twice cost this
+    binary bytes it does not have: cardenginei_arm7 for TWL-SDK games links into 33K. A garbage clock
+    now writes a well-formed stamp that the launcher rejects, which lands on exactly the same outcome
+    as refusing it here -- the unlock goes without `o=` -- and the record still names its game.
 
     Only the digits are written here and none of the arithmetic. Turning them into seconds is the
     launcher's job, which keeps the calendar -- leap years, month lengths, the epoch -- on the side
     that has a host test, and keeps this side to a copy loop.
 */
-static bool raUnlockStamp(char* out) {
+static void raUnlockStamp(char* out) {
 	RTCtime now;
 	u8      field[5];
 	u8      hours;
@@ -1012,11 +1015,6 @@ static bool raUnlockStamp(char* out) {
 	hours = now.hours;
 	if (hours >= 40) {
 		hours -= 40;
-	}
-
-	if (now.year > 99 || now.month < 1 || now.month > 12 || now.day < 1 || now.day > 31
-	 || hours > 23 || now.minutes > 59 || now.seconds > 59) {
-		return false;
 	}
 
 	field[0] = now.month;
@@ -1033,7 +1031,6 @@ static bool raUnlockStamp(char* out) {
 		out[at++] = (char)('0' + (field[f] / 10));
 		out[at++] = (char)('0' + (field[f] % 10));
 	}
-	return true;
 }
 
 static void raUnlockAppend(u32 id, const char* stamp) {
@@ -1092,11 +1089,54 @@ static void raUnlockAppend(u32 id, const char* stamp) {
 	    exactly what every unlock did before this existed.
 	*/
 	if (stamp) {
-		record[n] = '\t';
+		int at = n;
+
+		record[at++] = '\t';
 		for (i = 0; i < RA_QUEUE_STAMP; i++) {
-			record[n + 1 + i] = stamp[i];
+			record[at++] = stamp[i];
 		}
-		record[n + 1 + RA_QUEUE_STAMP] = '\n';
+
+		/*
+		    And which game it came from, out of the running ROM's own header -- `gameCode` identifies
+		    the release and `gameTitle` is what a human reads. No network, nothing passed down from the
+		    launcher, and available on the frame the achievement fires, which is what the case this
+		    exists for demands: a queue full of one game's unlocks while another is running and there
+		    is no WiFi to drain it.
+
+		    Both are fixed-width fields that are *not* NUL-terminated and are padded with spaces, and
+		    neither is guaranteed to be text at all -- a homebrew ROM can put anything there. So
+		    anything outside printable ASCII stops the copy, which also keeps a stray tab or newline
+		    from inventing a field boundary in a record that is delimited by them.
+		*/
+		/*
+		    And which game it came from, out of the running ROM's own header -- `gameCode` identifies
+		    the release and `gameTitle` is what a human reads. No network, nothing passed down from the
+		    launcher, and available on the frame the achievement fires, which is what the case this
+		    exists for demands: a queue full of one game's unlocks while another is running and there
+		    is no WiFi to drain it.
+
+		    **Copied raw, and the tidying happens in the launcher.** Both fields are fixed width, are
+		    not NUL-terminated, are padded with spaces or NULs, and are not guaranteed to be text at
+		    all. Trimming and range-checking them here cost more than this binary has: cardenginei_arm7
+		    for TWL-SDK games links into 33K and had **76 bytes** spare before this field existed. So
+		    the bytes go out as they are and raQueueScan() stops at the first one that is not printable
+		    and drops trailing padding -- which it already did.
+
+		    Copied with tonccpy() rather than a loop, and that is a size decision measured rather than
+		    guessed: a loop with a constant bound of twelve is one gcc unrolls into twelve load/store
+		    pairs, which cost this binary 264 bytes it does not have.
+
+		    It is the same split as the stamp, for the same reason: this side writes bytes, the side
+		    with a host test interprets them. The worst a hostile header can do is garble its own
+		    display name -- the id and the stamp are written before it and are not reachable from here.
+		*/
+		record[at++] = '\t';
+		tonccpy(record + at, ndsHeader->gameCode, RA_QUEUE_CODE);
+		at += RA_QUEUE_CODE;
+		record[at++] = '\t';
+		tonccpy(record + at, ndsHeader->gameTitle, RA_QUEUE_TITLE);
+		at += RA_QUEUE_TITLE;
+		record[at] = '\n';
 	}
 
 	fileWrite(record, &raUnlocksFile, raUnlockSlot * RA_QUEUE_RECORD, RA_QUEUE_RECORD);
@@ -2179,14 +2219,13 @@ void myIrqHandlerVBlank(void) {
 	*/
 	if (sharedAddr[RA_SHARED_UNLOCK_REQ] == RA_SHARED_UNLOCK_MAGIC) {
 		char stamp[RA_QUEUE_STAMP];
-		bool timed;
 		int  oldIME;
 
 		/* Before the section, not inside it: two SPI transactions the section does not need. */
-		timed  = raUnlockStamp(stamp);
+		raUnlockStamp(stamp);
 		oldIME = enterCriticalSection();
 
-		raUnlockAppend(sharedAddr[RA_SHARED_UNLOCK_ID], timed ? stamp : NULL);
+		raUnlockAppend(sharedAddr[RA_SHARED_UNLOCK_ID], stamp);
 		leaveCriticalSection(oldIME);
 		sharedAddr[RA_SHARED_UNLOCK_REQ] = 0;
 	}

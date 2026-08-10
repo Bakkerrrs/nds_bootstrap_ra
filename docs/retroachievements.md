@@ -6173,12 +6173,12 @@ suite pins the result against `printf '93119Bakke0931193600' | md5sum` rather th
 
 ### What the record looks like now
 
-    <id>\t<YYYYMMDDhhmmss>\n
+    <id>\t<YYYYMMDDhhmmss>\t<gamecode>\t<gametitle>\n
 
-The tab delimits for the same reason it delimits the staged definitions block: neither field can
-contain one. The record grew from 16 bytes to 32 to make room, so the file grew from 1,024 to 2,048 —
-and it migrates itself, because the launcher reads whatever length it finds and always writes
-`RA_QUEUE_BYTES` back.
+The tab delimits for the same reason it delimits the staged definitions block: no field can contain
+one. The record grew from 16 bytes to 32 for the stamp and then to 48 for the game, and the file with
+it — and it migrates itself, because the launcher reads whatever length it finds and always writes
+`RA_QUEUE_BYTES` back. See "A queued unlock names its own game" for the last field.
 
 **The stamp is optional, and that is what makes the upgrade a non-event.** A bare id — one typed by
 hand, or queued by a build from before this existed — parses exactly as it always did and is sent
@@ -6252,6 +6252,83 @@ not an approximation that mostly works — it is exact, because only the differe
 echo `o=` back, and the `r=unlocks` reply carries ids without timestamps. The place that can confirm it
 is the achievement's own unlock time on the RetroAchievements site, which should read 154 seconds before
 the submission rather than at it.
+
+## A queued unlock names its own game
+
+Groundwork for showing pending unlocks in the in-game menu, and it started as a question rather than a
+plan: *what happens if the queue holds more than one game?*
+
+### What was actually broken, and what was not
+
+**Submission was never broken.** `a=` is a globally unique achievement id and this client sends no
+`m=`, so an unlock from game A submitted while booting game B goes to the right achievement. The
+evidence is in the project's own files: `101000001` — the *Unknown Emulator* notice — appears in the
+set for GameID 14856 and again in a boot of GameID 12917. One global id space.
+
+**Two things were broken.**
+
+The first is that the feature this is groundwork for could not exist. A pending list has to say which
+game an unlock belongs to, and the record did not know.
+
+The second is a silent-loss path. The launcher's rule is *"an answer clears the record; silence keeps
+it"*, because a refusal is assumed permanent and legitimate. If the server ever refuses an award for
+being outside the current game's session — not measured either way — that record is cleared and the
+unlock is gone with nothing said. Naming the game does not fix that on its own, but it is what makes
+the case visible instead of invisible.
+
+### The game comes from the cartridge, not from the server
+
+`gameCode` and `gameTitle` are the first sixteen bytes of every DS header, and the ARM7 cardengine
+already holds a pointer to the running game's. So a record can name its game at the moment the
+achievement fires — with the radio down, which is exactly the case that needs it: a queue full of game
+A's unlocks while game B is running and there is no WiFi to drain it.
+
+Two things fell out of that, and both were the question's doing rather than the plan's:
+
+- **RetroAchievements' GameID is not in the record and does not need to be.** Submission never wanted
+  it, and for naming the game the cartridge header is better — offline, and a name instead of a number.
+- **The risky change disappeared.** Passing a GameID down to the cardengine would have meant a new
+  field in the cardengine header and its two hand-mirrored copies — the `.align` trap that has already
+  cost this project a run. The header pointer was already there, so none of that is needed.
+
+The cost is that `gameTitle` is the ROM's internal title: twelve characters, upper case, `CONTRA4`
+rather than `Contra 4`. Recognisable, free, and available offline.
+
+### Where the tidying happens, and why it had to move
+
+The cardengine copies both fields **raw** and the launcher sanitises them — stops at the first byte
+that is not printable ASCII, drops trailing padding. That is not a preference, it is a budget:
+
+```
+cardenginei_arm7 (TWL-SDK)  33K region
+  free before this change :  76 bytes
+```
+
+**Seventy-six bytes.** That binary is the tightest in the project — tighter than the ARM9 cardengine's
+12K window, which has 1,224 spare — and it shares `cardengine.c` with the roomy one. Trimming and
+range-checking two header fields there did not fit, and it belongs on the side with a host test anyway.
+Same split as the stamp: this side writes bytes, the other interprets them.
+
+Two measurements came out of making it fit, and both are the kind that are invisible until the linker
+refuses:
+
+- **A copy loop with a constant bound is not free.** `for (i = 0; i < 12; i++)` is one gcc unrolls into
+  twelve load/store pairs — 264 bytes for two fields. `tonccpy()` is a call, and it fits.
+- **The date was being validated twice.** `raQueueStampToUnix()` already refuses anything it will not
+  vouch for and has the host tests behind it, so the cardengine's copy of those range checks was pure
+  duplication on the side that could least afford it. Dropping it took the margin from **12 bytes to
+  140**. A garbage clock now writes a well-formed stamp the launcher rejects, which is the same outcome
+  by a shorter road.
+
+### The parser's new sharp edge
+
+`CONTRA4` ends in a digit. The queue parser's founding rule is that every non-digit is a separator, so
+a title left unconsumed would have that `4` read as an achievement id and submitted as an unlock the
+player never earned. Fields are therefore consumed to their delimiter whatever they contain — clipped
+in the copy, never in the consumption — and the host suite pins that specific case.
+
+Everything after the id stays optional and positional. A bare id, typed by hand or queued by an older
+build, parses as it always did. A record that has a stamp but no game keeps its stamp.
 
 ## Status
 

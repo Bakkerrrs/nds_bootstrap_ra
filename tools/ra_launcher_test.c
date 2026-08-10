@@ -1185,14 +1185,14 @@ static void test_queue(void) {
 	{
 		raQueue q;
 		char    out[RA_QUEUE_BYTES];
-		u32     keep[2];
+		int     keep[2];
 		int     written;
 
 		memset(&q, 0, sizeof(q));
 
 		/* The clearing case, which is the common one: everything went, nothing is owed. */
 		memset(out, 'x', sizeof(out));
-		written = raQueuePack(&q, NULL, NULL, 0, out, sizeof(out));
+		written = raQueuePack(&q, NULL, 0, out, sizeof(out));
 		CHECK(written == 0);
 		{
 			size_t i;
@@ -1207,9 +1207,10 @@ static void test_queue(void) {
 		}
 
 		/* Two owed: they land at record boundaries the cardengine can compute without reading. */
-		keep[0] = 93119;
-		keep[1] = 4294967295u;
-		written = raQueuePack(&q, keep, NULL, 2, out, sizeof(out));
+		raQueueScan(&q, "93119\n4294967295\n", 17);
+		keep[0] = 0;
+		keep[1] = 1;
+		written = raQueuePack(&q, keep, 2, out, sizeof(out));
 		CHECK(written == 2);
 		CHECK(memcmp(out + 0 * RA_QUEUE_RECORD, "93119\n", 6) == 0);
 		CHECK(memcmp(out + 1 * RA_QUEUE_RECORD, "4294967295\n", 11) == 0);
@@ -1223,10 +1224,10 @@ static void test_queue(void) {
 		    Refused rather than half-written. A partial queue is indistinguishable from a whole one
 		    on the next boot, so a buffer that is not a whole number of records is an error.
 		*/
-		CHECK(raQueuePack(&q, keep, NULL, 2, out, RA_QUEUE_RECORD - 1) == -1);
-		CHECK(raQueuePack(&q, keep, NULL, 2, out, RA_QUEUE_RECORD * 2 + 1) == -1);
+		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD - 1) == -1);
+		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD * 2 + 1) == -1);
 		/* More to keep than the file can hold is also an error rather than a truncation. */
-		CHECK(raQueuePack(&q, keep, NULL, 2, out, RA_QUEUE_RECORD) == -1);
+		CHECK(raQueuePack(&q, keep, 2, out, RA_QUEUE_RECORD) == -1);
 
 		/* A record has to hold the longest u32 plus its newline, or ids get mis-parsed. */
 		CHECK(RA_QUEUE_RECORD >= 11);
@@ -1351,8 +1352,7 @@ static void test_queue(void) {
 	{
 		raQueue q;
 		char    out[RA_QUEUE_RECORD * 4];
-		u32     keep[2];
-		u32     keepTimes[2];
+		int     keepIdx[2];
 
 		/* A stamped record: the fourteen digits after the tab are a date, not a second id. */
 		raQueueScan(&q, "93119\t20260810142345\n", 21);
@@ -1401,24 +1401,101 @@ static void test_queue(void) {
 		    whose request got no answer is retried on a later boot, and that is precisely when the
 		    difference between "earned then" and "submitted now" is largest.
 		*/
-		memset(&q, 0, sizeof(q));
-		keep[0]      = 93119;
-		keepTimes[0] = 1786371825u;
-		keep[1]      = 93121;
-		keepTimes[1] = 0;
-		CHECK(raQueuePack(&q, keep, keepTimes, 2, out, sizeof(out)) == 2);
-		CHECK(memcmp(out + 0 * RA_QUEUE_RECORD, "93119\t20260810142345\n", 21) == 0);
-		/* The unstamped one is written the old way, not with a bogus date. */
+		raQueueScan(&q, "93119\t20260810142345\tYZ4E\tCONTRA4\n93121\n", 43);
+		CHECK(q.count == 2);
+		keepIdx[0] = 0;
+		keepIdx[1] = 1;
+		CHECK(raQueuePack(&q, keepIdx, 2, out, sizeof(out)) == 2);
+		CHECK(memcmp(out + 0 * RA_QUEUE_RECORD,
+		             "93119\t20260810142345\tYZ4E\tCONTRA4\n", 34) == 0);
+		/* The unstamped one is written the old way, not with a bogus date or an invented game. */
 		CHECK(memcmp(out + 1 * RA_QUEUE_RECORD, "93121\n", 6) == 0);
 
 		/* And read back: the round trip, through the file format rather than around it. */
 		raQueueScan(&q, out, sizeof(out));
 		CHECK(q.count == 2);
 		CHECK(q.ids[0] == 93119 && q.times[0] == 1786371825u);
+		CHECK(strcmp(q.codes[0], "YZ4E") == 0);
+		CHECK(strcmp(q.titles[0], "CONTRA4") == 0);
 		CHECK(q.ids[1] == 93121 && q.times[1] == 0);
+		CHECK(q.codes[1][0] == 0);
 
-		/* A record must hold the longest id, a tab, a stamp and a newline: 10+1+14+1. */
-		CHECK(RA_QUEUE_RECORD >= 26);
+		/* A record must hold id, stamp, code and title with their delimiters: 10+1+14+1+4+1+12+1. */
+		CHECK(RA_QUEUE_RECORD >= 44);
+	}
+
+	printf("\na record names the game it came from, straight out of the ROM header\n");
+	{
+		raQueue q;
+		char    out[RA_QUEUE_RECORD * 4];
+		int     keep[2];
+
+		raQueueScan(&q, "302329\t20260810142345\tYZ4E\tCONTRA4\n", 35);
+		CHECK(q.count == 1);
+		CHECK(q.ids[0] == 302329);
+		CHECK(q.times[0] == 1786371825u);
+		CHECK(strcmp(q.codes[0], "YZ4E") == 0);
+		CHECK(strcmp(q.titles[0], "CONTRA4") == 0);
+		CHECK(q.named == 1);
+
+		/*
+		    **The reason the title is consumed as a field rather than skipped over.** A DS game title
+		    routinely ends in a digit -- CONTRA4 does -- and left unconsumed that `4` parses as an
+		    achievement id and gets submitted as an unlock the player never earned. One record in, one
+		    id out, and the id is the one the cardengine wrote.
+		*/
+		CHECK(q.count == 1);
+
+		/* Two games in one file, which is the whole case: play A offline, then boot B. */
+		raQueueScan(&q,
+		            "302329\t20260810142345\tYZ4E\tCONTRA4\n"
+		            "118842\t20260809090200\tAMCE\tMARIOKART\n", 71);
+		CHECK(q.count == 2);
+		CHECK(q.ids[0] == 302329 && strcmp(q.titles[0], "CONTRA4") == 0);
+		CHECK(q.ids[1] == 118842 && strcmp(q.titles[1], "MARIOKART") == 0);
+		CHECK(strcmp(q.codes[1], "AMCE") == 0);
+		CHECK(q.named == 2);
+
+		/* Titles are padded with spaces in the header; the padding is not part of the name. */
+		raQueueScan(&q, "302329\t20260810142345\tYZ4E\tCONTRA4     \n", 40);
+		CHECK(strcmp(q.titles[0], "CONTRA4") == 0);
+
+		/* A title with a space inside it keeps it -- only the trailing padding goes. */
+		raQueueScan(&q, "302329\t20260810142345\tAMCE\tMARIO KART\n", 38);
+		CHECK(strcmp(q.titles[0], "MARIO KART") == 0);
+
+		/* An over-long title is clipped in the copy but still consumed whole. */
+		raQueueScan(&q, "302329\t20260810142345\tYZ4E\tABCDEFGHIJKLMNOP\n", 44);
+		CHECK(q.count == 1);
+		CHECK(strcmp(q.titles[0], "ABCDEFGHIJKL") == 0);
+
+		/* A stamp with no game after it is still a stamp -- every field is optional in order. */
+		raQueueScan(&q, "302329\t20260810142345\n", 22);
+		CHECK(q.count == 1 && q.times[0] == 1786371825u);
+		CHECK(q.codes[0][0] == 0 && q.named == 0);
+
+		/*
+		    And the round trip through the file, which is what the launcher actually does to whatever
+		    it could not send: a kept record has to come back naming the same game, or the menu would
+		    lose track of which unlocks belong where after a single failed boot.
+		*/
+		raQueueScan(&q,
+		            "302329\t20260810142345\tYZ4E\tCONTRA4\n"
+		            "118842\t20260809090200\tAMCE\tMARIO KART\n", 72);
+		keep[0] = 1;   /* only the second one is still owed */
+		CHECK(raQueuePack(&q, keep, 1, out, sizeof(out)) == 1);
+		raQueueScan(&q, out, sizeof(out));
+		CHECK(q.count == 1);
+		CHECK(q.ids[0] == 118842);
+		CHECK(q.times[0] == raQueueStampToUnix("20260809090200"));
+		CHECK(strcmp(q.codes[0], "AMCE") == 0);
+		CHECK(strcmp(q.titles[0], "MARIO KART") == 0);
+
+		/* An index outside the queue is refused rather than read. */
+		keep[0] = 5;
+		CHECK(raQueuePack(&q, keep, 1, out, sizeof(out)) == -1);
+		keep[0] = -1;
+		CHECK(raQueuePack(&q, keep, 1, out, sizeof(out)) == -1);
 	}
 
 	printf("\nand o= changes the signature as well as the URL\n");

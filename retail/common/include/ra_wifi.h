@@ -143,9 +143,9 @@
     Clearing is done in place, zeros over the same length, for the first reason: truncating the file
     could hand its clusters back and break the allocation the cardengine depends on.
 
-    **A record carries when it was earned, not only what.** The layout is
+    **A record carries when it was earned and which game it came from, not only what.** The layout is
 
-        <id>\t<YYYYMMDDhhmmss>\n
+        <id>\t<YYYYMMDDhhmmss>\t<gamecode>\t<gametitle>\n
 
     NUL-padded to RA_QUEUE_RECORD, and the stamp is local time straight off the console's RTC. It is
     there so `r=awardachievement` can send `o=` -- seconds since the unlock -- instead of letting the
@@ -153,21 +153,38 @@
     See raQueueStampToUnix() for the conversion and raQueueSign() for what `o=` does to the signature.
 
     The tab is the delimiter for the same reason it delimits the staged definitions block: it cannot
-    occur inside either field, so no field needs escaping.
+    occur inside any of these fields, so none of them needs escaping.
 
-    **The stamp is optional, and that is load-bearing.** A record that is a bare id -- one a human
-    typed, or one written by a build from before this existed -- parses exactly as it always did and
-    is sent without `o=`. That is what keeps the file hand-writable and what makes the upgrade a
-    non-event: an old queue drains normally, it just cannot say when.
+    **The game comes from the ROM's own header, not from the server.** `gameCode` and `gameTitle` are
+    the first sixteen bytes of every DS cartridge header, and the cardengine already holds a pointer to
+    the running game's. So the record can name its game at the moment the achievement fires, with no
+    network and nothing passed down from the launcher -- which is the whole point, because the case
+    that needs it is a queue full of game A's unlocks while game B is running and there is no WiFi.
 
-    Growing the record from 16 bytes to 32 is what made room for the stamp. The file grows with it,
-    from 1,024 bytes to 2,048, and it migrates itself: the launcher reads whatever length it finds,
-    and always writes RA_QUEUE_BYTES back, so the first boot on a new build extends the file in place.
+    It also means RetroAchievements' own GameID is *not* here, and does not need to be. `a=` is a
+    globally unique achievement id, so submission never needed the game; the only thing that needed it
+    was being able to say which game an unlock came from, and the cartridge header says that better --
+    offline, and as a name rather than a number.
+
+    The cost is that `gameTitle` is the ROM's internal title: twelve characters, upper case, `CONTRA4`
+    rather than `Contra 4`. Recognisable, free, and available with the radio down.
+
+    **Every field after the id is optional, and that is load-bearing.** A record that is a bare id --
+    one a human typed, or one written by a build from before any of this existed -- parses exactly as
+    it always did and is sent without `o=`. That is what keeps the file hand-writable and what makes
+    each upgrade a non-event: an old queue drains normally, it just cannot say when or from where.
+
+    The record has grown twice for this, 16 -> 32 for the stamp and 32 -> 48 for the game, and the file
+    with it. It migrates itself: the launcher reads whatever length it finds and always writes
+    RA_QUEUE_BYTES back, so the first boot on a new build extends the file in place.
 */
 #define RA_QUEUE_PATH          "sd:/ra_unlocks.txt"
 #define RA_QUEUE_PATH_FAT      "fat:/ra_unlocks.txt"
-#define RA_QUEUE_RECORD        32                              /* <id>\t<stamp>\n, ASCII, NUL-padded */
+/* <id>\t<stamp>\t<code>\t<title>\n is 10+1+14+1+4+1+12+1 = 44 at its longest. ASCII, NUL-padded. */
+#define RA_QUEUE_RECORD        48
 #define RA_QUEUE_STAMP         14                              /* YYYYMMDDhhmmss */
+#define RA_QUEUE_CODE          4                               /* tNDSHeader.gameCode */
+#define RA_QUEUE_TITLE         12                              /* tNDSHeader.gameTitle */
 #define RA_QUEUE_MAX           64                              /* a session earning more is not a thing */
 #define RA_QUEUE_BYTES         (RA_QUEUE_RECORD * RA_QUEUE_MAX)
 
@@ -186,7 +203,15 @@ typedef struct raQueue {
 	    a struct, because `ids` is passed on its own to the sender and this is only ever read beside it.
 	*/
 	u32  times[RA_QUEUE_MAX];
+	/*
+	    Which game each came from, straight out of that ROM's header and NUL-terminated here. Empty
+	    when the record did not say. `codes` is what identifies a game -- it is unique per release --
+	    and `titles` is what a human reads.
+	*/
+	char codes[RA_QUEUE_MAX][RA_QUEUE_CODE + 1];
+	char titles[RA_QUEUE_MAX][RA_QUEUE_TITLE + 1];
 	int  stamped;            /* how many of those carried a usable stamp */
+	int  named;              /* how many of those named their game */
 	int  count;              /* how many of those */
 	int  dropped;            /* unparseable or out of range, so the file said something we ignored */
 	int  truncated;          /* the file held more than RA_QUEUE_MAX */
@@ -744,8 +769,11 @@ void raPatchFinish(raPatch* p);
     computed by coreutils rather than by this code.
 */
 void raQueueScan(raQueue* q, const char* text, int length);
-int  raQueuePack(const raQueue* q, const u32* keep, const u32* keepTimes, int keepCount,
-                 char* out, int outSize);
+/*
+    `keep` is indices into `q`, not ids, so a record keeps everything it arrived with -- its stamp and
+    the game it came from -- rather than only the parts the caller thought to carry across.
+*/
+int  raQueuePack(const raQueue* q, const int* keep, int keepCount, char* out, int outSize);
 
 /*
     A record's `YYYYMMDDhhmmss` and Unix seconds, each way. `raQueueStampToUnix()` reads 14 bytes and

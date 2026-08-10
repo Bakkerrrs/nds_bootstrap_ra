@@ -951,8 +951,7 @@ static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
 	const char* const path = sdFound ? RA_QUEUE_PATH : RA_QUEUE_PATH_FAT;
 	static char       file[RA_QUEUE_BYTES];
 	static raQueue    q;
-	u32               keep[RA_QUEUE_MAX];
-	u32               keepTimes[RA_QUEUE_MAX];
+	int               keep[RA_QUEUE_MAX];
 	int               keepCount = 0;
 	int               i;
 	FILE*             f;
@@ -1039,8 +1038,7 @@ static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
 
 		raWifiSubmitOne(cfg, q.ids[i], q.times[i], &q);
 		if (q.kept > before) {
-			keepTimes[keepCount] = q.times[i];
-			keep[keepCount++]    = q.ids[i];
+			keep[keepCount++] = i;
 		}
 	}
 
@@ -1055,7 +1053,7 @@ static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
 	    Rewrite whatever is still owed, over the same length. Done even when keepCount is 0 -- that is
 	    the clearing case and it is the common one.
 	*/
-	if (raQueuePack(&q, keep, keepTimes, keepCount, file, sizeof(file)) < 0) {
+	if (raQueuePack(&q, keep, keepCount, file, sizeof(file)) < 0) {
 		raWifiLog("\x1b[31mthe queue could not be packed; %s left alone\x1b[37m\n", path);
 		return;
 	}
