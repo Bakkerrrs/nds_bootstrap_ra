@@ -5389,6 +5389,62 @@ And this time it *was* the cause, confirmed before it was written down as one. S
 blank exactly at the transition and came back with the achievement's own name. Five hypotheses were spent
 on this bug; the two that held were the two that were measured before anything was built on them.
 
+### It is only ever visible on BG0, and that is measured
+
+`overlayDispcnt` finally came back, from a pulse during stage 1 gameplay: **0x00211E10**.
+
+| Bits | Value | Meaning |
+|---|---|---|
+| 0-2 | 0 | BG mode 0 |
+| 7 | 0 | no forced blank |
+| 8 | **0** | **the game's BG0 is off** |
+| 9, 10, 11, 12 | 1 | BG1, BG2, BG3 and OBJ all on |
+| 13-15 | 0 | no window active |
+| 16-17 | **1** | display mode is graphics |
+| 30 | 0 | extended palettes off |
+
+And `overlayState` for that pulse was **0x08** — layer **0** — visible and legible. Both real unlocks
+read **0x4A** — layer **1** — and were never seen.
+
+That is the answer, and it had been sitting in a hypothesis I killed on an assumption. The DS orders
+backgrounds by `BGCNT` bits 0-1, lower value in front, and **breaks ties by layer number**. The overlay
+takes priority 0, the strongest there is, so it beats any enabled layer at priority 1 or worse — and loses
+to any *lower-numbered* enabled layer at priority 0, with nothing below 0 to reach for.
+
+`chooseLayer()` was returning the first layer the game had switched off. On BG0 that is unbeatable. On BG1
+it is behind the game's BG0. Free and hidden looked exactly like drawn-and-lost.
+
+The same reading closes the other two doors it was added to test: no window is active, so `overlayWindow`
+reading 0 is a fact rather than an accident; display mode is graphics; no forced blank. The gate conditions
+were fine at that moment — they were only ever wrong during the transition, which is a separate and now
+fixed problem.
+
+**What changed.** `chooseLayer()` refuses a layer it knows would be covered:
+
+```c
+for (i = 0; i < 4; i++) {
+    if (!(SUB_DISPCNT & (1u << (8 + i)))) return i;   /* free, nothing in front of it */
+    if ((SUB_BGCNT(i) & 3) == 0) return -1;           /* enabled at priority 0: it and all after are hidden */
+}
+```
+
+One loop rather than a nested search, and equivalent: walking in order, the first free layer is usable if
+and only if no earlier enabled layer holds priority 0.
+
+**What that buys, and what it does not.** It turns an invisible notification into a counted denial, which
+is the trade this file makes everywhere else — `denied` and `deniedNoLayer` both move, and
+`overlayDispcnt` says which layer blocked it. It does **not** make the notification appear at the moment
+that matters, because at the start of stage 2 the game's BG0 is on.
+
+Making it appear needs one of two things, and both have a visible cost:
+
+- **Borrow BG0 anyway**, saving and restoring its control and scroll registers and its enable bit, and never
+  touching its VRAM. The layer's content is intact throughout; it simply does not display for three
+  seconds. Cheap — about fifteen bytes.
+- **Use sprites.** An OBJ at a given priority draws above every background at that priority, so this works
+  regardless of what the game is doing with its layers. It is the correct answer and it is real work: a new
+  borrow-and-return over OAM entries and object VRAM.
+
 ## Known graphical limitations of the overlay (deferred)
 
 These are all in `ra_overlay.c`, all found by playing real games, and all deliberately

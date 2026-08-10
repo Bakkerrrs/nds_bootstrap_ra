@@ -603,6 +603,28 @@ typedef struct raSnapshot {
 } raSnapshot;            /*              0xC0 bytes */
 
 /*
+    A note on what that pair settled, because it is the answer to four hardware runs and it lives here
+    rather than in the overlay: **the notification is only ever visible on BG0.**
+
+    The DS orders backgrounds by BGCNT bits 0-1, lower value in front, and **breaks ties by layer number**.
+    The overlay takes priority 0, the strongest there is, so it beats any enabled layer at priority 1 or
+    worse and loses to any *lower-numbered* enabled layer at priority 0 -- with nothing below 0 to reach
+    for.
+
+    Measured: during stage 1 gameplay on Contra 4 the pulse probe read `overlayState` 0x08 -- layer **0** --
+    and was plainly visible, with `overlayDispcnt` 0x00211E10 showing the game's BG0 *off* and BG1, BG2, BG3
+    and OBJ on. Both real unlocks read 0x4A -- layer **1** -- and were not seen at all.
+
+    The same reading closed the other two doors it was taken to test: bits 13-15 clear, so no window is
+    active and `overlayWindow` is 0 for a reason rather than by accident; bits 16-17 = 1, so the display
+    mode is graphics; bit 7 clear, so no forced blank.
+
+    The priorities themselves are not published, and do not need to be: chooseLayer() only refuses at layer
+    N when layer N is enabled *and* at priority 0, so a denial together with that layer's enable bit in
+    overlayDispcnt says the priority was 0 by construction.
+*/
+
+/*
     The shape of that strip, and it is here rather than with the code that fills it because **both
     binaries compile from it**. cardenginei_arm9_ra renders RA_TEXT_BYTES and the ARM9 cardengine
     copies RA_TEXT_BYTES; two constants that had to agree would eventually not.

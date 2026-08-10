@@ -317,9 +317,31 @@ static u16   bgCntFor(int b)  { return (u16)((b << 2) | (((b * 8) + 2) << 8)); }
 */
 static int chooseLayer(void) {
 	int i;
+
 	for (i = 0; i < 4; i++) {
 		if (!(SUB_DISPCNT & (1u << (8 + i)))) {
 			return i;
+		}
+		/*
+		    An enabled layer at priority 0 ends the search, and that is not an optimisation -- it is the
+		    answer to four hardware runs.
+
+		    The overlay takes priority 0, the strongest the DS has, so it beats any enabled layer at
+		    priority 1 or worse. What it cannot beat is a *lower-numbered* enabled layer that is also at
+		    priority 0, because the DS breaks priority ties by layer number and there is nothing below 0
+		    to reach for. So the moment one of those is passed, every layer after it is free-but-hidden.
+
+		    Measured, not reasoned: the pulse probe on Contra 4 got layer 0 during gameplay -- the game's
+		    BG0 was off, `overlayDispcnt` 0x00211E10 -- and was plainly visible. Both real unlocks got
+		    layer 1 and were not seen at all. Free but covered looked exactly like drawn-and-lost, and it
+		    accounted for every remaining sighting.
+
+		    Written as one loop rather than a nested search because this window has tens of bytes, and the
+		    two are equivalent: walking in order, the first free layer is usable if and only if no earlier
+		    enabled layer holds priority 0.
+		*/
+		if ((SUB_BGCNT(i) & 3) == 0) {
+			return -1;
 		}
 	}
 	return -1;
@@ -343,14 +365,6 @@ static void draw(int b, const void* text) {
 	                      | (brightActive() ? 0x20 : 0)
 	                      /* bit 6: this one was held back until a fade ended */
 	                      | (pendingFrames ? 0x40 : 0));
-	/*
-	    Captured before a single register of the game's is disturbed, which is the only order that makes
-	    them mean anything: the layer-enable bit the overlay is about to set would otherwise show up here
-	    as the game's own.
-	*/
-	raOverlayDispcnt = SUB_DISPCNT;
-	raOverlayWindow  = (u32)SUB_WININ | ((u32)SUB_WINOUT << 16);
-
 	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
 	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
 
@@ -381,7 +395,18 @@ static void draw(int b, const void* text) {
 static void show(const void* text) {
 	bool used[CHAR_BLOCKS];
 	int b;
-	const int l = chooseLayer();
+	int l;
+
+	/*
+	    Captured before a single register of the game's is disturbed, and before the layer is even chosen.
+	    Both orderings matter: the layer-enable bit the overlay is about to set would otherwise show up
+	    here as the game's own, and a *denial* has to record the state that caused it -- which it could
+	    not when this lived in draw(), because a denial never reaches draw().
+	*/
+	raOverlayDispcnt = SUB_DISPCNT;
+	raOverlayWindow  = (u32)SUB_WININ | ((u32)SUB_WINOUT << 16);
+
+	l = chooseLayer();
 
 	/*
 	    Nothing to say, so nothing is drawn. The strip comes from cardenginei_arm9_ra, which is also
