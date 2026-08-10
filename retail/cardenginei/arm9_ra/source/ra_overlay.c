@@ -592,12 +592,29 @@ static void surveyObjVram(bool* used, u32 boundary) {
 }
 
 /*
-    Eight disabled OAM entries, scanning from the front.
+    Eight disabled OAM entries, scanning from the **back**.
 
-    From the front because objects are ordered among themselves by OAM index -- lower is in front -- so
-    the earliest free slots are the ones least likely to be covered by one of the game's own sprites.
-    That is the same tie-break that made backgrounds invisible, one level down, and it is worth spending
-    a scan direction on.
+    This scanned from the front, on the reasoning that objects are ordered among themselves by OAM index
+    -- lower is in front -- so the earliest free entries are the ones least likely to be covered by one of
+    the game's own sprites. Hardware outweighed that reasoning immediately, and the way it did is worth
+    keeping: on Contra 4 the notification appeared and the game started losing *sprites* -- bullets, and
+    sometimes the player -- erratically, for exactly as long as it was up.
+
+    The mistake was believing "disabled right now" meant "not wanted". A game builds its object list from
+    index 0 upward each frame, writes as many entries as it has sprites, and leaves the rest disabled --
+    then DMAs the whole thing in its own VBlank handler. Ours is chained *after* that, so whatever the game
+    had just put in the eight entries we hold is overwritten before the screen is drawn, every frame. The
+    entries were not free. They were the next ones the game was going to need.
+
+    Nothing avoids that except choosing entries the game does not reach, and the back is where those are:
+    stealing from 127 downward only costs the game a sprite when it is already using more than 120, where
+    stealing from 0 upward cost it one almost immediately.
+
+    What it gives up is being in front of the game's own sprites -- at index 120 we are behind nearly all
+    of them, so a bullet crossing the text wins that pixel. That is a fair trade twice over: text with a
+    bullet through it is still legible, and a deleted bullet is a bug. And it gives up nothing that
+    matters, because an object still beats **every background** at the same priority, which is the entire
+    reason for this path.
 
     Returns the count found, filling `out`. They do not have to be consecutive.
 */
@@ -605,7 +622,7 @@ static int chooseSprites(u8* out) {
 	int i;
 	int n = 0;
 
-	for (i = 0; i < OAM_ENTRIES && n < RA_SPRITES; i++) {
+	for (i = OAM_ENTRIES - 1; i >= 0 && n < RA_SPRITES; i--) {
 		if ((SUB_OAM[i * 4] & 0x0300) == 0x0200) {
 			out[n++] = (u8)i;
 		}

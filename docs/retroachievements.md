@@ -5525,9 +5525,28 @@ That is a mapping question, not tidiness: how much VRAM sits behind 0x06600000 d
 `VRAMCNT`, and a write past the end does not fail — it mirrors, onto tiles the game *is* using. 16K is the
 smallest allocation a game using sub objects realistically makes.
 
-OAM entries are taken from the **front**, because objects are ordered among themselves by OAM index and
-lower is in front. That is the same tie-break that made backgrounds invisible, one level down, and it is
-worth spending a scan direction on.
+OAM entries are taken from the **back**, and that is a correction hardware made within one run.
+
+They were taken from the front, on the reasoning that objects are ordered among themselves by OAM index —
+lower is in front — so the earliest free entries are the ones least likely to be covered by one of the
+game's own sprites. The result on Contra 4: the notification appeared, no scenery was lost, and the game
+started **losing sprites** — bullets, and sometimes the player — erratically, for exactly as long as it was
+up.
+
+The mistake was believing "disabled right now" meant "not wanted". A game builds its object list from index
+0 upward each frame, writes as many entries as it has sprites, leaves the rest disabled, and DMAs the whole
+thing in its own VBlank handler. Ours is chained *after* that, so whatever the game had just put in the
+eight entries we hold is overwritten before the screen is drawn, every frame. The entries were not free.
+They were the next ones the game was going to need.
+
+Nothing avoids that except choosing entries the game does not reach, and the back is where those are:
+stealing from 127 downward only costs the game a sprite when it is already using more than 120, where
+stealing from 0 upward cost it one almost immediately.
+
+What that gives up is being in front of the game's *own* sprites — at index 120 the overlay is behind
+nearly all of them, so a bullet crossing the text wins that pixel. A fair trade twice over: text with a
+bullet through it is legible, and a deleted bullet is a bug. And it gives up nothing that matters, because
+an object still beats **every background** at the same priority, which is the entire reason for this path.
 
 ### Three places this refuses to guess
 
