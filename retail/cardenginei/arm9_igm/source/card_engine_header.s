@@ -23,8 +23,19 @@
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 #Text is placed here
+@
+@ !!! MIRROR OF sizeof(struct IgmText) IN retail/common/include/igm_text.h !!!
+@
+@ Nothing checks this. Growing IgmText in C without growing this reserves too little here, so every
+@ symbol after it -- sharedAddr, the palette, and the entry point the cardengine jumps to -- lands
+@ short of where the C side computes it, and opening the in-game menu jumps into the middle of the
+@ text block. That is exactly what happened when the RetroAchievements entry was added: 0xF40 became
+@ 0xF68 in the header and stayed 0xF40 here, and Contra 4 died on the frame the menu opened.
+@
+@ The .align 4 below is a power of two -- 16 bytes -- and matches IGM_TEXT_SIZE_ALIGNED's & ~0xF.
+@
 igmText:
-.space 0xF40
+.space 0xF68
 .align 4
 
 sharedAddr:
