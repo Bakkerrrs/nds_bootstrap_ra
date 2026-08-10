@@ -57,7 +57,13 @@
 #define RA_WRAM_BSS_END 0x0375164CuL
 #endif
 
-#define RA_WRAM_ARENA ((long)(CARDENGINEI_ARM9_RA_DEFS_LOCATION - RA_WRAM_BSS_END))
+/*
+    Follows CARDENGINEI_ARM9_RA_PENDING_LOCATION rather than the definitions block, because that is
+    where the arena actually stops -- the pending tally is reserved underneath the definitions and the
+    heap is shortened below both. Pointed at the wrong one of the two, this measured an arena 512 bytes
+    larger than the target's and would have missed exactly the overflow it exists to catch.
+*/
+#define RA_WRAM_ARENA ((long)(CARDENGINEI_ARM9_RA_PENDING_LOCATION - RA_WRAM_BSS_END))
 
 /* The cardengine's allocator puts an 8-byte header on every block. See raBlock in ra_alloc.c. */
 #define RA_WRAM_BLOCK_HEADER 8
@@ -233,7 +239,7 @@ int main(void) {
 
 		printf("        arena          %ld bytes (0x%08lX to 0x%08X)\n",
 		       RA_WRAM_ARENA, (unsigned long)RA_WRAM_BSS_END,
-		       CARDENGINEI_ARM9_RA_DEFS_LOCATION);
+		       CARDENGINEI_ARM9_RA_PENDING_LOCATION);
 		printf("        rc_runtime_init %ld bytes\n", afterInit);
 		printf("        peak            %ld bytes in %ld blocks, +%ld of headers\n",
 		       peak, peakBlocks, peakBlocks * RA_WRAM_BLOCK_HEADER);

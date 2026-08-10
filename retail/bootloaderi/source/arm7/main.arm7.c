@@ -2390,6 +2390,19 @@ int arm7_main(void) {
 				*(u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION = 0;
 			}
 
+			/*
+			    And the pending-unlock tally, on the same terms: its own magic, checked
+			    separately, because a boot that staged no queue must leave the menu showing
+			    nothing rather than reading whatever the window happened to contain.
+			*/
+			if (*(u32*)CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION == CARDENGINEI_ARM9_RA_PENDING_MAGIC) {
+				tonccpy((u32*)CARDENGINEI_ARM9_RA_PENDING_LOCATION,
+				        (u32*)CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION,
+				        CARDENGINEI_ARM9_RA_PENDING_MAX);
+			} else {
+				*(u32*)CARDENGINEI_ARM9_RA_PENDING_LOCATION = 0;
+			}
+
 			if (ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed) {
 				arm9_stateFlag = ARM9_WRAMONARM9;
 				while (arm9_stateFlag != ARM9_READY);
@@ -2397,6 +2410,7 @@ int arm7_main(void) {
 		}
 		*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = 0;
 		*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
+		*(u32*)CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION = 0;
 
 		toncset((u32*)CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION, 0, 0x1800);
 		*(u32*)(COLOR_LUT_BUFFERED_LOCATION-4) = 0;

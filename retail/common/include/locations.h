@@ -149,6 +149,27 @@
 #define CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION   (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x30000)
 #define CARDENGINEI_ARM9_RA_DEFS_LOCATION            (CARDENGINEI_ARM9_RA_LOCATION + CARDENGINEI_ARM9_RA_SIZE - CARDENGINEI_ARM9_RA_DEFS_MAX)
 
+/*
+    What is earned and not yet sent, grouped by game, for the in-game menu's Sync Pending page.
+
+    Staged and copied exactly like the definitions block above and for the same reason: it has to
+    survive into the game, and the only memory that does is this window. It sits directly *below* the
+    definitions, and the heap is shortened to stop below both -- see the ra_startup() call in
+    cardenginei_arm9_ra, which is where that reservation is made rather than in the linker script.
+
+    Half a kilobyte for a structure that is about 180 bytes, because the whole point of the round number
+    is that the next thing to want a reservation here does not have to move two other constants to get
+    one. Against a 156K arena it is not a trade.
+
+    The magic is the same value as RA_PENDING_MAGIC in ra_wifi.h and must stay that way: the bootloader
+    checks it from here without knowing what a raPendingBlock is, and the launcher writes it from there.
+    The host suite pins the two together, because nothing else would notice them drifting apart.
+*/
+#define CARDENGINEI_ARM9_RA_PENDING_MAGIC            0x31504152   /* 'RAP1' */
+#define CARDENGINEI_ARM9_RA_PENDING_MAX              0x200
+#define CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x38000)
+#define CARDENGINEI_ARM9_RA_PENDING_LOCATION         (CARDENGINEI_ARM9_RA_DEFS_LOCATION - CARDENGINEI_ARM9_RA_PENDING_MAX)
+
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
 #define COLOR_LUT_BUFFERED_LOCATION                  0x027D0000
 #define CARDENGINEI_ARM9_SDK5_BUFFERED_LOCATION      0x027E0000

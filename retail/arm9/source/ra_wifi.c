@@ -947,7 +947,7 @@ static void raWifiSubmitOne(const raConfig* cfg, u32 id, u32 when, raQueue* q) {
 	}
 }
 
-static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
+static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
 	const char* const path = sdFound ? RA_QUEUE_PATH : RA_QUEUE_PATH_FAT;
 	static char       file[RA_QUEUE_BYTES];
 	static raQueue    q;
@@ -1066,6 +1066,43 @@ static void raWifiSubmit(const raConfig* cfg, bool sdFound) {
 	fclose(f);
 	if (got != sizeof(file)) {
 		raWifiLog("\x1b[33m%s is short -- ids may be sent twice\x1b[37m\n", path);
+	}
+}
+
+/*
+    Stage the pending tally for the in-game menu, and then hand the radio back.
+
+    Written by re-reading the queue file rather than from the raQueue that was just sent, and that is
+    the point: this has to describe what the file *ends up* holding, and raWifiSubmitQueue() leaves it
+    by half a dozen different routes -- nothing owed, submit=0, no token, everything sent, some kept.
+    Reading the result once is correct on all of them, where staging at each exit would be six chances
+    to describe a state that did not happen. One file read at boot buys that.
+
+    Staged even when there is nothing pending, because an empty block and a missing one mean different
+    things to the menu: "nothing is waiting" against "this boot never looked".
+*/
+static void raWifiStagePending(bool sdFound) {
+	const char* const path = sdFound ? RA_QUEUE_PATH : RA_QUEUE_PATH_FAT;
+	static char       file[RA_QUEUE_BYTES];
+	static raQueue    q;
+	raPendingBlock*   block = (raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION;
+	size_t            got = 0;
+	FILE*             f;
+
+	memset(&q, 0, sizeof(q));
+	memset(file, 0, sizeof(file));
+
+	f = fopen(path, "rb");
+	if (f) {
+		got = fread(file, 1, sizeof(file), f);
+		fclose(f);
+	}
+	raQueueScan(&q, file, (int)got);
+	raQueueTally(&q, (u32)time(NULL), block);
+
+	if (block->total) {
+		raWifiLog("pending          %d unlock(s) across %d game(s)\n",
+		          block->total, block->games);
 	}
 }
 
@@ -1902,7 +1939,8 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 	raWifiReportHeap("after session");
 
 	raWifiLog("\n-- stage 13: report what the last session earned --\n");
-	raWifiSubmit(&config, sdFound);
+	raWifiSubmitQueue(&config, sdFound);
+	raWifiStagePending(sdFound);
 	raWifiReportHeap("after award");
 
 	raWifiLog("\n-- stage 14: what has this account already earned --\n");

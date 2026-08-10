@@ -293,13 +293,13 @@ void ra_wram_tick(raSnapshot* snapshot) {
 	    watchlist installs itself exactly once.
 	*/
 	/*
-	    The arena stops below the definitions block at the top of the window. Shortened here
-	    rather than in the linker script because __vram_top is the window, and the block is
-	    a runtime reservation out of it -- the linker has no business knowing about something
-	    the bootloader writes.
+	    The arena stops below the two blocks at the top of the window -- the definitions, and the
+	    pending-unlock tally under them. Shortened here rather than in the linker script because
+	    __vram_top is the window, and both blocks are runtime reservations out of it: the linker
+	    has no business knowing about something the bootloader writes.
 	*/
 	stage = ra_startup(__bss_start, __bss_end,
-	                   (char*)(CARDENGINEI_ARM9_RA_DEFS_LOCATION));
+	                   (char*)(CARDENGINEI_ARM9_RA_PENDING_LOCATION));
 	snapshot->wramStage = stage;
 	snapshot->heapSize  = ra_heap_size();
 	snapshot->heapUsed  = ra_heap_used();

@@ -1575,6 +1575,19 @@ static void test_queue(void) {
 		}
 	}
 
+	printf("\nand the block the bootloader copies is the one the launcher wrote\n");
+	{
+		/*
+		    Two constants for one value, in two headers that never include each other: the bootloader
+		    checks the magic from locations.h without knowing what a raPendingBlock is, and the
+		    launcher writes it from ra_wifi.h. Nothing else would notice them drifting apart, and the
+		    failure would be a page that silently never appears.
+		*/
+		CHECK(RA_PENDING_MAGIC == CARDENGINEI_ARM9_RA_PENDING_MAGIC);
+		/* And the block has to fit the reservation the heap was shortened to make room for. */
+		CHECK(sizeof(raPendingBlock) <= CARDENGINEI_ARM9_RA_PENDING_MAX);
+	}
+
 	printf("\nand o= changes the signature as well as the URL\n");
 	{
 		char with[33];
