@@ -38,6 +38,7 @@
 
 #include "ra.h"
 #include "locations.h"
+#include "ra_wifi.h"   /* raPendingBlock -- the menu's Sync Pending tally */
 #include "ra_text.h"
 
 #include "rc_runtime.h"
@@ -1067,6 +1068,14 @@ static u8 ra_rc_frame_step(raSnapshot* snapshot) {
 	*/
 	ra_rc_offer_unlock(snapshot);
 	snapshot->unlockSent   = unlockSent;
+	/*
+	    And into the menu's pending block, so Sync Pending counts what this session earned rather than
+	    only what was owed at boot. A store into the window this binary owns; the magic is the
+	    launcher's, so a boot that staged nothing is left alone rather than given a header it never wrote.
+	*/
+	if (((raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_LOCATION)->magic == RA_PENDING_MAGIC) {
+		((raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_LOCATION)->session = unlockSent;
+	}
 	snapshot->unlockQueued = unlockQueued;
 	snapshot->unlockLost   = unlockLost;
 

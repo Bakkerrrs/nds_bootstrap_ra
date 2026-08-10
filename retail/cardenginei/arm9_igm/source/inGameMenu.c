@@ -534,6 +534,21 @@ static void drawMainMenu(MenuItem *menuItems, int menuItemCount) {
 	#endif
 }
 
+/* Two game codes, compared without pulling string.h into a cardengine. Both are NUL-terminated. */
+static bool sameCode(const char* a, const char* b) {
+	int i;
+
+	for (i = 0; i <= RA_QUEUE_CODE; i++) {
+		if (a[i] != b[i]) {
+			return false;
+		}
+		if (a[i] == 0) {
+			return true;
+		}
+	}
+	return true;
+}
+
 /*
     RetroAchievements: what is earned and not yet sent.
 
@@ -551,22 +566,34 @@ static void drawMainMenu(MenuItem *menuItems, int menuItemCount) {
 static void raPendingPage(void) {
 	const raPendingBlock* b = (const raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_LOCATION;
 	int line;
+	int shown = 0;
 
 	clearScreen(false);
 	print(0, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
 
 	if (b->magic != RA_PENDING_MAGIC) {
 		print(0, 2, (unsigned char*)"No queue was read this boot", FONT_LIGHT_GRAY, false);
-	} else if (b->total == 0) {
+	} else if (b->total + b->session == 0) {
 		print(0, 2, (unsigned char*)"Nothing waiting to sync", FONT_LIME, false);
 	} else {
-		printDec(0, 2, b->total, 1, FONT_WHITE, false);
+		printDec(0, 2, b->total + b->session, 1, FONT_WHITE, false);
 		print(2, 2, (unsigned char*)"waiting to sync", FONT_WHITE, false);
 
 		line = 4;
 		for (int i = 0; i < b->games && line < 19; i++, line++) {
+			/*
+			    This session's unlocks belong to the running game, and they are not in the block's
+			    counts: the launcher tallied the queue as it stood at boot, and everything earned
+			    since then was written by the ARM7 afterwards. Folded in here rather than staged,
+			    because the number changes while the menu is closed.
+			*/
+			const int mine  = (b->thisCode[0] && sameCode(b->game[i].code, b->thisCode));
+			const int count = b->game[i].count + (mine ? b->session : 0);
+
 			print(1, line, (unsigned char*)b->game[i].title, FONT_WHITE, false);
-			printDec(15, line, b->game[i].count, 2, FONT_LIGHT_BLUE, false);
+			printDec(15, line, count, 2, FONT_LIGHT_BLUE, false);
+			if (mine)
+				shown = 1;
 
 			/*
 			    Days, not a date. Five characters cannot tell 08/09 the ninth of August from the
@@ -582,6 +609,18 @@ static void raPendingPage(void) {
 				printDec(24, line, b->game[i].waitDays, 3, FONT_LIGHT_GRAY, false);
 				print(28, line, (unsigned char*)"days", FONT_LIGHT_GRAY, false);
 			}
+		}
+
+		/*
+		    The running game earned its first unlocks this session, so the queue had no row for it at
+		    boot and the loop above drew none. Without this the most common case of all -- a fresh
+		    game, one achievement, open the menu to check -- would show an empty page.
+		*/
+		if (!shown && b->session && b->thisTitle[0] && line < 19) {
+			print(1, line, (unsigned char*)b->thisTitle, FONT_WHITE, false);
+			printDec(15, line, b->session, 2, FONT_LIGHT_BLUE, false);
+			printRight(31, line, (unsigned char*)"today", FONT_LIGHT_GRAY, false);
+			line++;
 		}
 
 		/* Said rather than folded away: a screen that under-reports what is owed is worse. */

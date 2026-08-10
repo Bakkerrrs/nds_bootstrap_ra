@@ -204,6 +204,18 @@ typedef struct raPendingBlock {
 	u16 total;                       /* unlocks across all of them, including any dropped games */
 	u16 dropped;                     /* games past RA_PENDING_GAMES_MAX, so the menu can say so */
 	u16 unnamed;                     /* records with no game -- hand-typed, or from an older build */
+	/*
+	    The game this boot is about to start, from its own header, and how many unlocks it has earned
+	    since. `session` is written by cardenginei_arm9_ra as it hands ids to the ARM7 -- the block is
+	    in the window that binary owns, so it is a store rather than a message.
+
+	    Without it the page would show what was owed *at boot* and nothing since, so earning an
+	    achievement and opening the menu to check would show it missing until the next boot -- which is
+	    the one question the page most obviously has to answer.
+	*/
+	char thisCode[RA_QUEUE_CODE + 1];
+	char thisTitle[RA_QUEUE_TITLE + 1];
+	u16  session;
 	raPendingGame game[RA_PENDING_GAMES_MAX];
 } raPendingBlock;
 

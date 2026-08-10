@@ -1081,7 +1081,7 @@ static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
     Staged even when there is nothing pending, because an empty block and a missing one mean different
     things to the menu: "nothing is waiting" against "this boot never looked".
 */
-static void raWifiStagePending(bool sdFound) {
+static void raWifiStagePending(bool sdFound, const char* ndsPath) {
 	const char* const path = sdFound ? RA_QUEUE_PATH : RA_QUEUE_PATH_FAT;
 	static char       file[RA_QUEUE_BYTES];
 	static raQueue    q;
@@ -1099,6 +1099,48 @@ static void raWifiStagePending(bool sdFound) {
 	}
 	raQueueScan(&q, file, (int)got);
 	raQueueTally(&q, (u32)time(NULL), block);
+
+	/*
+	    Which game is about to start, read from the first sixteen bytes of its own header -- the same
+	    two fields the cardengine stamps into a record. Read here rather than in the menu because the
+	    launcher has the file open path and the menu has neither a filesystem nor a reliable way to
+	    know which of the two header addresses this game uses.
+	*/
+	if (ndsPath) {
+		FILE* rom = fopen(ndsPath, "rb");
+
+		if (rom) {
+			char head[RA_QUEUE_TITLE + RA_QUEUE_CODE];
+
+			if (fread(head, 1, sizeof(head), rom) == sizeof(head)) {
+				int n;
+
+				for (n = 0; n < RA_QUEUE_TITLE; n++) {
+					const unsigned char c = (unsigned char)head[n];
+
+					if (c < ' ' || c > '~') {
+						break;
+					}
+					block->thisTitle[n] = head[n];
+				}
+				while (n > 0 && block->thisTitle[n - 1] == ' ') {
+					n--;
+				}
+				block->thisTitle[n] = 0;
+
+				for (n = 0; n < RA_QUEUE_CODE; n++) {
+					const unsigned char c = (unsigned char)head[RA_QUEUE_TITLE + n];
+
+					if (c < ' ' || c > '~') {
+						break;
+					}
+					block->thisCode[n] = head[RA_QUEUE_TITLE + n];
+				}
+				block->thisCode[n] = 0;
+			}
+			fclose(rom);
+		}
+	}
 
 	if (block->total) {
 		raWifiLog("pending          %d unlock(s) across %d game(s)\n",
@@ -1940,7 +1982,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 
 	raWifiLog("\n-- stage 13: report what the last session earned --\n");
 	raWifiSubmitQueue(&config, sdFound);
-	raWifiStagePending(sdFound);
+	raWifiStagePending(sdFound, ndsPath);
 	raWifiReportHeap("after award");
 
 	raWifiLog("\n-- stage 14: what has this account already earned --\n");
