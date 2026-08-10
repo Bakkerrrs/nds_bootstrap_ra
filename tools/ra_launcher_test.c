@@ -1498,6 +1498,83 @@ static void test_queue(void) {
 		CHECK(raQueuePack(&q, keep, 1, out, sizeof(out)) == -1);
 	}
 
+	printf("\ngroups the queue by game, which is what the menu shows\n");
+	{
+		raQueue        q;
+		raPendingBlock b;
+		const u32      now = raQueueStampToUnix("20260810142345");
+
+		raQueueScan(&q,
+		            "302329\t20260810120000\tYZ4E\tCONTRA4\n"
+		            "302330\t20260810130000\tYZ4E\tCONTRA4\n"
+		            "118842\t20260809090200\tAMCE\tMARIO KART\n", 108);
+		CHECK(q.count == 3);
+
+		raQueueTally(&q, now, &b);
+		CHECK(b.magic == RA_PENDING_MAGIC);
+		CHECK(b.games == 2);
+		CHECK(b.total == 3);
+		CHECK(strcmp(b.game[0].title, "CONTRA4") == 0 && b.game[0].count == 2);
+		CHECK(strcmp(b.game[1].title, "MARIO KART") == 0 && b.game[1].count == 1);
+
+		/*
+		    Both of Contra 4's are from today, so the column reads "today"; Mario Kart's is from
+		    yesterday. This is the case that made a date column wrong in the first place -- written
+		    08/09 it is the ninth of August to one reader and the eighth of September to another,
+		    and what the column is actually for is "how long has this been stuck".
+		*/
+		CHECK(b.game[0].waitDays == 0);
+		CHECK(b.game[1].waitDays == 1);
+
+		/* The oldest of a game's unlocks sets the number, not the newest and not the last read. */
+		raQueueScan(&q,
+		            "302329\t20260801120000\tYZ4E\tCONTRA4\n"
+		            "302330\t20260810130000\tYZ4E\tCONTRA4\n", 71);
+		raQueueTally(&q, now, &b);
+		CHECK(b.games == 1 && b.game[0].count == 2);
+		CHECK(b.game[0].waitDays == 9);
+
+		printf("\nand refuses to report an age it does not have\n");
+		{
+			/*
+			    A record whose stamp is fourteen digits but not a real date -- month 13 here -- still
+			    names its game and is still owed, so it counts. It contributes no age: reporting it as
+			    zero days would print "today", which is a claim about when it was earned made from a
+			    record that does not say.
+
+			    Note this is the only shape that case can take. The fields are positional, so a record
+			    cannot carry a game without a stamp in front of it; one with neither is a bare id and
+			    lands in `unnamed` instead.
+			*/
+			raQueueScan(&q,
+			            "302329\t20001301000000\tYZ4E\tCONTRA4\n"
+			            "302330\t20260809090200\tYZ4E\tCONTRA4\n", 70);
+			raQueueTally(&q, now, &b);
+			CHECK(b.total == 2);
+			CHECK(b.games == 1 && b.game[0].count == 2);
+			CHECK(b.game[0].waitDays == 1);
+
+			/* A clock that moved backwards wraps the subtraction, so it contributes nothing. */
+			raQueueScan(&q, "302329\t20260812120000\tYZ4E\tCONTRA4\n", 35);
+			raQueueTally(&q, now, &b);
+			CHECK(b.games == 1 && b.game[0].count == 1);
+			CHECK(b.game[0].waitDays == 0);
+		}
+
+		printf("\nand counts what it had no room to show rather than hiding it\n");
+		{
+			/*
+			    A bare id has no game to be grouped under. Counted apart rather than filed beneath a
+			    blank title, so the menu can admit it instead of drawing an empty row.
+			*/
+			raQueueScan(&q, "302329\n302330\t20260809090200\tYZ4E\tCONTRA4\n", 42);
+			raQueueTally(&q, now, &b);
+			CHECK(b.total == 2);
+			CHECK(b.unnamed == 1);
+			CHECK(b.games == 1 && b.game[0].count == 1);
+		}
+	}
+
 	printf("\nand o= changes the signature as well as the URL\n");
 	{
 		char with[33];

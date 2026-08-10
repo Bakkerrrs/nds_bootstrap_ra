@@ -453,6 +453,70 @@ int raQueuePack(const raQueue* q, const int* keep, int keepCount, char* out, int
 	return written;
 }
 
+void raQueueTally(const raQueue* q, u32 now, raPendingBlock* out) {
+	int i;
+
+	memset(out, 0, sizeof(*out));
+	out->magic = RA_PENDING_MAGIC;
+
+	for (i = 0; i < q->count; i++) {
+		raPendingGame* g = 0;
+		int            k;
+
+		out->total++;
+
+		/*
+		    A record with no game cannot be grouped with anything -- it is a bare id from a
+		    hand-edited file or from a build older than the game field. Counted separately rather
+		    than filed under an empty name, so the menu can say "1 unlock of unknown origin" instead
+		    of inventing a row with a blank title.
+		*/
+		if (q->codes[i][0] == 0) {
+			out->unnamed++;
+			continue;
+		}
+
+		for (k = 0; k < out->games; k++) {
+			if (strcmp(out->game[k].code, q->codes[i]) == 0) {
+				g = &out->game[k];
+				break;
+			}
+		}
+		if (!g) {
+			if (out->games >= RA_PENDING_GAMES_MAX) {
+				/*
+				    Said rather than silently folded away. A queue spanning more than eight games
+				    is not a real scenario, but a screen that quietly under-reports what is owed
+				    would be worse than one that admits it ran out of rows.
+				*/
+				out->dropped++;
+				continue;
+			}
+			g = &out->game[out->games++];
+			strcpy(g->code, q->codes[i]);
+			strcpy(g->title, q->titles[i]);
+		}
+
+		g->count++;
+
+		/*
+		    The oldest of this game's unlocks, in whole days. Guarded both ways: a record with no
+		    stamp has no age to contribute, and a clock that has moved backwards since the unlock
+		    would make the subtraction wrap. Neither may report as zero days -- the menu prints that
+		    as "today", which is a claim rather than an absence.
+		*/
+		if (q->times[i] && now >= q->times[i]) {
+			const u32 days = (now - q->times[i]) / 86400u;
+
+			if (days > 0xFFFFu) {
+				g->waitDays = 0xFFFF;
+			} else if ((u16)days > g->waitDays) {
+				g->waitDays = (u16)days;
+			}
+		}
+	}
+}
+
 /*
     v=<md5>, the parameter that turns "here is an id" into "here is an id from this account".
 

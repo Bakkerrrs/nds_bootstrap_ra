@@ -776,6 +776,60 @@ void raQueueScan(raQueue* q, const char* text, int length);
 int  raQueuePack(const raQueue* q, const int* keep, int keepCount, char* out, int outSize);
 
 /*
+    What the in-game menu shows: one line per game, three fields.
+
+        CONTRA4          2      today
+        MARIOKART        2  yesterday
+
+    **Counts rather than a list of achievements**, and that is what makes it cheap. Achievement titles
+    only exist in the staged definitions of the game that is *running*, so a list could name the current
+    game's unlocks and could only ever print bare ids for every other game -- rows of two classes, and
+    the ugly class is exactly the one this feature exists for. A count reads the same for every game.
+    The player was already told which achievement by the notification, with its name, when it fired;
+    what the menu answers is whether it is safe and how much is waiting.
+
+    **`waitDays` rather than a date**, because a date cannot say what this column is for without also
+    picking a convention. Five characters cannot distinguish 08/09 the ninth of August from the eighth
+    of September, and the column's whole job is "how long has this been stuck". A count of days is
+    unambiguous in any locale and needs no month table.
+
+    It is also the only form the menu can afford: the in-game menu has no date. sharedAddr[7]/[8] carry
+    hours and minutes, and only while the menu is open. The launcher has a real clock -- it already
+    reads it for `o=` -- so the subtraction happens there, at boot, and the menu prints an integer. A
+    session lasts hours, so a number computed at boot is still right when the menu opens.
+*/
+#define RA_PENDING_MAGIC       0x31504152u   /* 'RAP1' */
+#define RA_PENDING_GAMES_MAX   8
+
+typedef struct raPendingGame {
+	char code[RA_QUEUE_CODE + 1];    /* the ROM's gameCode, NUL-terminated */
+	char title[RA_QUEUE_TITLE + 1];  /* its gameTitle, trimmed */
+	u16  count;                      /* unlocks of this game still owed */
+	u16  waitDays;                   /* how long the oldest of them has waited */
+} raPendingGame;
+
+typedef struct raPendingBlock {
+	u32 magic;                       /* RA_PENDING_MAGIC, so an uninitialised block is not read */
+	u16 games;                       /* entries below that are filled */
+	u16 total;                       /* unlocks across all of them, including any dropped games */
+	u16 dropped;                     /* games past RA_PENDING_GAMES_MAX, so the menu can say so */
+	u16 unnamed;                     /* records with no game -- hand-typed, or from an older build */
+	raPendingGame game[RA_PENDING_GAMES_MAX];
+} raPendingBlock;
+
+/*
+    Group a queue by game. Pure, and the reason it is its own function rather than part of the staging
+    code: the grouping, the day arithmetic and the overflow behaviour are all things a host test can
+    pin, and none of them can be checked on a console without earning achievements in several games.
+
+    `now` is Unix seconds. A record whose stamp is unusable still counts -- it is owed -- but never
+    contributes to `waitDays`: an unknown age must not be reported as zero days, which the menu prints
+    as "today" and which is a claim the record never made. A record with no stamp at all has no game
+    either, the fields being positional, so it lands in `unnamed` rather than under a blank title.
+*/
+void raQueueTally(const raQueue* q, u32 now, raPendingBlock* out);
+
+/*
     A record's `YYYYMMDDhhmmss` and Unix seconds, each way. `raQueueStampToUnix()` reads 14 bytes and
     returns 0 for any date it will not vouch for; `raQueueUnixToStamp()` writes exactly 14 bytes and
     appends no terminator. Local time is treated as UTC at both ends, which cancels out of the
