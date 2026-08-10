@@ -513,6 +513,248 @@ static void test_wifi_verdict(void) {
 	}
 }
 
+/*
+    raOverlaySurvey() -- which 16K blocks of sub BG VRAM a BG configuration is using.
+
+    Tested here rather than on hardware because the bug it fixes is unreachable there with the game the
+    project has. Contra 4 runs in BG mode 0, where every layer is text and the old text-only reading is
+    correct by accident; seeing the mode-blindness fire would mean finding a game that puts an affine
+    or bitmap background on the *sub* engine and then earning an achievement inside it. The registers
+    are just numbers, so the whole table can be checked here for nothing.
+
+    Each case names the blocks it expects and every other block is asserted clear, because both
+    directions are failures with different consequences: a block wrongly left clear is one the overlay
+    may take and corrupt, and a block wrongly marked is a notification denied for no reason.
+*/
+#define SURVEY_TEXT_BG(charBase, screenBase, size) \
+	((u16)(((charBase) << 2) | ((screenBase) << 8) | ((u32)(size) << 14)))
+
+static void expect_blocks(const char* what, u32 dispcnt, const u16* bgcnt,
+                          int skipLayer, u32 wantMask) {
+	bool used[8];
+	u32 got = 0;
+	int b;
+
+	raOverlaySurvey(dispcnt, bgcnt, skipLayer, used);
+	for (b = 0; b < 8; b++) {
+		if (used[b]) {
+			got |= 1u << b;
+		}
+	}
+	if (got == wantMask) {
+		printf("  ok    %s -> blocks 0x%02X\n", what, got);
+	} else {
+		printf("  FAIL  %s -> blocks 0x%02X, wanted 0x%02X\n", what, got, wantMask);
+		failures++;
+	}
+}
+
+static void test_overlay_survey(void) {
+	u16 bg[4];
+	int i;
+
+	/*
+	    A layer that references nothing but block 0 in every slot, so a case can set one layer and
+	    leave the other three saying the same harmless thing. Size 0 text: tiles in block 0, a 2K map
+	    at screen base 0, which is also block 0.
+	*/
+	for (i = 0; i < 4; i++) {
+		bg[i] = SURVEY_TEXT_BG(0, 0, 0);
+	}
+
+	printf("\ntext backgrounds read exactly as they did before\n");
+	{
+		/* Mode 0: all four layers text, which is the case hardware has confirmed. */
+		expect_blocks("mode 0, everything in block 0", 0, bg, -1, 1u << 0);
+
+		bg[1] = SURVEY_TEXT_BG(2, 8, 0);   /* tiles block 2, map at 8*2K = block 1 */
+		expect_blocks("tiles and map in different blocks", 0, bg, -1,
+		              (1u << 0) | (1u << 1) | (1u << 2));
+
+		/* The borrowed layer is not surveyed: it is the one being taken. */
+		expect_blocks("the skipped layer contributes nothing", 0, bg, 1, 1u << 0);
+
+		/*
+		    64x64 tiles is 4096 entries of two bytes -- 8K, four 2K units. Placed at screen base 6 it
+		    starts at 12K, inside block 0, and runs to 20K, which is inside block 1.
+		*/
+		bg[1] = SURVEY_TEXT_BG(0, 6, 3);
+		expect_blocks("a 64x64 text map spans the block boundary", 0, bg, -1,
+		              (1u << 0) | (1u << 1));
+
+		bg[1] = SURVEY_TEXT_BG(0, 0, 0);
+	}
+
+	printf("\nan affine map is one byte per entry, not two\n");
+	{
+		/*
+		    Mode 2 makes BG2 and BG3 affine. Size 3 is 128x128 tiles = 16,384 one-byte entries = 16K,
+		    a whole block. Read as text it would have been taken for 8K, and the second half of the
+		    map -- eight kilobytes of it -- would have looked free.
+		*/
+		bg[3] = SURVEY_TEXT_BG(0, 8, 3);   /* screen base 8 = 16K = block 1 */
+		expect_blocks("128x128 affine fills a whole block", 2, bg, -1,
+		              (1u << 0) | (1u << 1));
+
+		/* The same register in mode 0, where BG3 is text: 8K, so only half as far. */
+		expect_blocks("the same bits as text reach half as far", 0, bg, -1,
+		              (1u << 0) | (1u << 1));
+
+		/*
+		    Placed so the difference shows. Screen base 12 = 24K, mid-block-1. Affine 16K runs to
+		    40K, into block 2. Text 8K stops at 32K, exactly on the boundary and never entering it.
+		*/
+		bg[3] = SURVEY_TEXT_BG(0, 12, 3);
+		expect_blocks("affine 128x128 at 24K reaches block 2", 2, bg, -1,
+		              (1u << 0) | (1u << 1) | (1u << 2));
+		expect_blocks("text 64x64 at 24K stops at the boundary", 0, bg, -1,
+		              (1u << 0) | (1u << 1));
+
+		/* A small affine map is smaller than a text one, so the survey must not over-mark either. */
+		bg[3] = SURVEY_TEXT_BG(0, 8, 0);   /* 16x16 tiles = 256 bytes */
+		expect_blocks("16x16 affine is 256 bytes", 2, bg, -1, (1u << 0) | (1u << 1));
+
+		bg[3] = SURVEY_TEXT_BG(0, 0, 0);
+	}
+
+	printf("\nthe BG mode decides which layers are affine at all\n");
+	{
+		/*
+		    The same 128x128 register on BG2, which is text in modes 0, 1 and 3 and affine in 2 and
+		    4. Screen base 12 = 24K: text stops at 32K, affine runs to 40K and into block 2.
+		*/
+		bg[2] = SURVEY_TEXT_BG(0, 12, 3);
+		expect_blocks("mode 1 leaves BG2 text", 1, bg, -1, (1u << 0) | (1u << 1));
+		expect_blocks("mode 3 leaves BG2 text", 3, bg, -1, (1u << 0) | (1u << 1));
+		expect_blocks("mode 2 makes BG2 affine", 2, bg, -1,
+		              (1u << 0) | (1u << 1) | (1u << 2));
+		expect_blocks("mode 4 makes BG2 affine", 4, bg, -1,
+		              (1u << 0) | (1u << 1) | (1u << 2));
+
+		/* BG1 is text in every mode, so the mode must change nothing about it. */
+		bg[2] = SURVEY_TEXT_BG(0, 0, 0);
+		bg[1] = SURVEY_TEXT_BG(0, 12, 3);
+		for (i = 0; i <= 5; i++) {
+			expect_blocks("BG1 is text whatever the mode", (u32)i, bg, -1,
+			              (1u << 0) | (1u << 1));
+		}
+		bg[1] = SURVEY_TEXT_BG(0, 0, 0);
+	}
+
+	printf("\nan extended-affine map is affine-shaped with two-byte entries\n");
+	{
+		/*
+		    Mode 5 makes BG2 and BG3 extended. With bit 7 clear that is an affine background with
+		    16-bit tile indices, so a 128x128 map is 32K -- two whole blocks, twice the affine one
+		    and four times what the old reading allowed.
+		*/
+		bg[3] = SURVEY_TEXT_BG(0, 8, 3);
+		expect_blocks("128x128 extended affine is 32K", 5, bg, -1,
+		              (1u << 0) | (1u << 1) | (1u << 2));
+		expect_blocks("the same bits as plain affine are 16K", 2, bg, -1,
+		              (1u << 0) | (1u << 1));
+
+		bg[3] = SURVEY_TEXT_BG(0, 0, 0);
+	}
+
+	printf("\na bitmap's base is in 16K units, and it has no tiles\n");
+	{
+		/*
+		    Bit 7 set in an extended slot is a bitmap. The base is the screen-base field in 16K units
+		    rather than 2K, which is the field the old survey got wrong by a factor of eight, and bit
+		    2 is the colour depth rather than the low bit of a character base.
+
+		    Screen base 2, 8-bit, 256x256 = 64K: blocks 2 through 5. Read the old way that base meant
+		    4K -- block 0 -- so every one of those four blocks looked free.
+		*/
+		bg[3] = (u16)(SURVEY_TEXT_BG(0, 2, 1) | 0x0080);
+		expect_blocks("8-bit 256x256 at base 2 covers four blocks", 5, bg, -1,
+		              (1u << 0) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5));
+
+		/* 16-bit doubles it, and bit 2 is what says so. */
+		bg[3] = (u16)(SURVEY_TEXT_BG(0, 2, 1) | 0x0080 | 0x0004);
+		expect_blocks("16-bit 256x256 covers eight", 5, bg, -1,
+		              (1u << 0) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5)
+		              | (1u << 6) | (1u << 7));
+
+		/* The smallest: 128x128 8-bit is 16K, exactly one block, and no character block with it. */
+		bg[3] = (u16)(SURVEY_TEXT_BG(0, 3, 0) | 0x0080);
+		expect_blocks("8-bit 128x128 is one block and no tiles", 5, bg, -1,
+		              (1u << 0) | (1u << 3));
+
+		/*
+		    Bit 2 set with bit 7 set is depth, not a character base of 1 -- so block 1 must stay
+		    clear here. That is the misreading in its purest form.
+		*/
+		bg[3] = (u16)(SURVEY_TEXT_BG(0, 3, 0) | 0x0080 | 0x0004);
+		expect_blocks("bit 2 is depth, not a character base", 5, bg, -1,
+		              (1u << 0) | (1u << 3) | (1u << 4));
+
+		/* But with bit 7 clear it *is* a character base, in the very same slot. */
+		bg[3] = (u16)(SURVEY_TEXT_BG(1, 3, 0) & ~0x0080);
+		expect_blocks("with bit 7 clear the same bit 2 is a character base", 5, bg, -1,
+		              (1u << 0) | (1u << 1));
+
+		/*
+		    Bit 7 in a *text* slot is the 256-colour flag and must not be read as a bitmap. Mode 0
+		    makes BG3 text, so this is an ordinary 8-bit-tile background: tiles in block 0, a 2K map
+		    at screen base 3.
+		*/
+		bg[3] = (u16)(SURVEY_TEXT_BG(0, 3, 0) | 0x0080);
+		expect_blocks("bit 7 on a text layer is colour depth, not a bitmap", 0, bg, -1,
+		              1u << 0);
+
+		bg[3] = SURVEY_TEXT_BG(0, 0, 0);
+	}
+
+	printf("\na base outside the 128K window matches nothing rather than folding\n");
+	{
+		/* Character base 15 is 240K, past the end of sub BG VRAM. */
+		bg[3] = SURVEY_TEXT_BG(15, 0, 0);
+		expect_blocks("a character base past the window marks nothing", 0, bg, -1, 1u << 0);
+
+		/* A bitmap at base 31 is 496K. Its 64K would land at blocks 31-34 if they existed. */
+		bg[3] = (u16)(SURVEY_TEXT_BG(0, 31, 1) | 0x0080);
+		expect_blocks("a bitmap base past the window marks nothing", 5, bg, -1, 1u << 0);
+
+		/* One that starts inside and runs past the end marks what it reaches and no more. */
+		bg[3] = (u16)(SURVEY_TEXT_BG(0, 7, 1) | 0x0080 | 0x0004);  /* 112K, 128K of pixels */
+		expect_blocks("a bitmap running off the end marks only what it reaches", 5, bg, -1,
+		              (1u << 0) | (1u << 7));
+
+		bg[3] = SURVEY_TEXT_BG(0, 0, 0);
+	}
+
+	printf("\na mode this engine does not have denies rather than guesses\n");
+	{
+		/*
+		    6 is the main engine's large bitmap -- libnds refuses it on the sub display outright --
+		    and 7 is not a mode. Neither can be read, so every block is called used and the overlay
+		    stays quiet. A missing notification is a missing feature; a corrupted game is a bug.
+		*/
+		expect_blocks("mode 6 marks everything used", 6, bg, -1, 0xFFu);
+		expect_blocks("mode 7 marks everything used", 7, bg, -1, 0xFFu);
+
+		/* Even the borrowed layer does not open a hole in that answer. */
+		expect_blocks("and the skipped layer does not open a hole", 6, bg, 0, 0xFFu);
+	}
+
+	printf("\nonly the low three bits of DISPCNT choose the mode\n");
+	{
+		/*
+		    The rest of the register is the game's -- enable bits, display mode, extended palettes --
+		    and the survey must not be perturbed by any of it. 0x00211E10 is the real value read off
+		    Contra 4 during stage 1, whose low bits are mode 0.
+		*/
+		bg[3] = SURVEY_TEXT_BG(0, 12, 3);
+		expect_blocks("Contra 4's own DISPCNT reads as mode 0", 0x00211E10, bg, -1,
+		              (1u << 0) | (1u << 1));
+		expect_blocks("the same mode with every other bit set", 0xFFFFFFF8u | 2u, bg, -1,
+		              (1u << 0) | (1u << 1) | (1u << 2));
+		bg[3] = SURVEY_TEXT_BG(0, 0, 0);
+	}
+}
+
 int main(void) {
 	u32 offsets[RA_CHAIN_MAX];
 	int i;
@@ -1732,6 +1974,8 @@ int main(void) {
 		CHECK(ra_take_id(&at) == 1);
 		CHECK(strcmp(at, "0xH1=1") == 0);
 	}
+
+	test_overlay_survey();
 
 	test_wifi_verdict();
 

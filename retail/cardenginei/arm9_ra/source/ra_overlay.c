@@ -283,20 +283,121 @@ u8  raOverlaySpriteOam = 0xFF;
 u8  raOverlaySpriteSlot = 0xFF;
 
 /*
-    Which 16K blocks of sub BG VRAM the game is using, for tiles or for maps. Read
-    from the live registers every time, because it changes as the game switches
-    scenes -- which is the whole reason a block chosen at boot is not safe to keep.
+    The three shapes a background can have, which is the distinction this survey used to be blind to.
+    Text was the only one it knew, and the other two put different meanings on the very same BGCNT
+    fields -- so reading them as text did not make the answer imprecise, it made it wrong.
 */
-static void surveyBlocks(bool* used, int skipLayer) {
-	int i, k;
+#define LAYER_TEXT     0
+#define LAYER_AFFINE   1
+#define LAYER_EXTENDED 2
 
+/*
+    What the BG mode makes of each layer.
+
+    BG0 and BG1 are always text here. Only BG2 and BG3 change shape with the mode:
+
+    | mode | BG2      | BG3      |
+    |------|----------|----------|
+    | 0    | text     | text     |
+    | 1    | text     | affine   |
+    | 2    | affine   | affine   |
+    | 3    | text     | extended |
+    | 4    | affine   | extended |
+    | 5    | extended | extended |
+
+    Modes 6 and 7 do not exist on this engine -- libnds refuses the large bitmap on the sub display
+    outright ("Sub Display has no large Bitmaps") and 7 is not a mode at all -- and they are handled
+    before this is ever called. See raOverlaySurvey().
+*/
+static int layerKind(u32 mode, int layer) {
+	if (layer < 2) {
+		return LAYER_TEXT;
+	}
+	if (layer == 2) {
+		switch (mode) {
+			case 2: case 4: return LAYER_AFFINE;
+			case 5:         return LAYER_EXTENDED;
+			default:        return LAYER_TEXT;
+		}
+	}
+	switch (mode) {
+		case 0:         return LAYER_TEXT;
+		case 1: case 2: return LAYER_AFFINE;
+		default:        return LAYER_EXTENDED;
+	}
+}
+
+/*
+    Mark every 16K block the byte range [start, start + bytes) touches.
+
+    Written as an intersection rather than as arithmetic on a start block so that a base pointing
+    outside the sub engine's 128K simply matches nothing. Both base fields can express that: the
+    character base is four bits of 16K units, which reaches 240K, and a bitmap's base is five bits of
+    16K units, which reaches 496K. There is no block of ours to protect out there, and guessing how the
+    hardware folds such an address back would be exactly the kind of unmeasured assumption that has
+    cost this project runs before.
+*/
+static void markRange(bool* used, u32 start, u32 bytes) {
+	const u32 end = start + bytes;
+	int b;
+
+	if (bytes == 0) {
+		return;
+	}
+	for (b = 0; b < CHAR_BLOCKS; b++) {
+		const u32 lo = (u32)b * 0x4000;
+
+		if (start < lo + 0x4000 && end > lo) {
+			used[b] = true;
+		}
+	}
+}
+
+/*
+    Which 16K blocks of sub BG VRAM the game is using, for tiles, maps or bitmaps.
+
+    Split from the registers it used to read so that the host suite can put a whole BG configuration in
+    front of it and check the answer -- which is the only way the mode handling below gets tested at
+    all, because reaching it on hardware means finding a game that uses a non-text background on the
+    sub engine and then earning an achievement in it.
+
+    `dispcnt` and the four `bgcnt` entries are the sub engine's, and `used` has CHAR_BLOCKS entries.
+*/
+void raOverlaySurvey(u32 dispcnt, const u16* bgcnt, int skipLayer, bool* used) {
+	/*
+	    Text map entries are two bytes, affine map entries are one, and an extended-affine map is
+	    affine-shaped with two-byte entries. Sizes 0-3 are 32x32/64x32/32x64/64x64 tiles for text and
+	    16x16/32x32/64x64/128x128 tiles for both affine kinds.
+
+	    A bitmap is measured in pixels instead -- 128x128/256x256/512x256/512x512 -- and its depth
+	    comes from bit 2, which for every tiled kind is part of the character base.
+	*/
+	static const u32 textMap[4]      = {  2048,  4096,  4096,  8192 };
+	static const u32 affineMap[4]    = {   256,  1024,  4096, 16384 };
+	static const u32 extAffineMap[4] = {   512,  2048,  8192, 32768 };
+	static const u32 bitmapPixels[4] = { 128*128, 256*256, 512*256, 512*512 };
+
+	const u32 mode = dispcnt & 7;
+	int i;
+
+	/*
+	    A mode this engine does not have says nothing that can be acted on, so the survey answers the
+	    only safe way it can: everything is spoken for, and the notification is denied. That is the same
+	    trade the rest of this function makes -- a notification that does not appear is a missing
+	    feature, a corrupted game is a bug.
+	*/
 	for (i = 0; i < CHAR_BLOCKS; i++) {
-		used[i] = false;
+		used[i] = (mode > 5);
+	}
+	if (mode > 5) {
+		return;
 	}
 
 	for (i = 0; i < 4; i++) {
-		const u16 cnt = SUB_BGCNT(i);
-		int charBase, screenBase, mapBlocks;
+		const u16 cnt = bgcnt[i];
+		const u32 size = (u32)(cnt >> 14) & 3;
+		const u32 screenBase = (u32)(cnt >> 8) & 0x1F;
+		int kind;
 
 		if (i == skipLayer) {
 			continue;  /* the layer being borrowed */
@@ -321,25 +422,50 @@ static void surveyBlocks(bool* used, int skipLayer) {
 		    corrupted game is a bug.
 		*/
 
-		charBase = (cnt >> 2) & 0xF;
-		if (charBase < CHAR_BLOCKS) {
-			used[charBase] = true;
+		kind = layerKind(mode, i);
+
+		if (kind == LAYER_EXTENDED && (cnt & 0x0080)) {
+			/*
+			    A bitmap, and three fields change meaning at once. The base is the screen-base field
+			    in **16K** units rather than 2K -- libnds says so in as many words, offering the
+			    bitmap's offset as `mapBase * 16KB` while asserting the tile base is unused. Bit 2
+			    selects 16-bit direct colour over 8-bit paletted instead of carrying the low bit of a
+			    character base. And there is no character base to mark at all, because there are no
+			    tiles: reading one here is how the old survey could mark a block nobody was using
+			    while missing the several the bitmap actually covers.
+			*/
+			markRange(used, screenBase * 0x4000,
+			          bitmapPixels[size] * ((cnt & 0x0004) ? 2u : 1u));
+			continue;
 		}
 
-		/* Maps are in 2K units, and screen size decides how many. */
-		screenBase = (cnt >> 8) & 0x1F;
-		switch ((cnt >> 14) & 3) {
-			case 0:  mapBlocks = 1; break;
-			case 3:  mapBlocks = 4; break;
-			default: mapBlocks = 2; break;
-		}
-		for (k = 0; k < mapBlocks; k++) {
-			const int unit = screenBase + k;
-			if (unit / 8 < CHAR_BLOCKS) {
-				used[unit / 8] = true;
-			}
-		}
+		/*
+		    Tiled: character base in 16K units, map at the screen base in 2K units.
+
+		    Only one block is marked for the tiles, which is unchanged and remains a heuristic rather
+		    than a reading. How far tile data actually reaches is not in any register -- it depends on
+		    how many distinct tiles the map references -- and the worst case is 64K of 256-colour
+		    tiles, which would deny almost every notification. See the note in docs.
+		*/
+		markRange(used, (u32)((cnt >> 2) & 0xF) * 0x4000, 0x4000);
+		markRange(used, screenBase * 0x800,
+		          kind == LAYER_TEXT   ? textMap[size] :
+		          kind == LAYER_AFFINE ? affineMap[size] : extAffineMap[size]);
 	}
+}
+
+/*
+    Read from the live registers every time, because what they hold changes as the game switches
+    scenes -- which is the whole reason a block chosen at boot is not safe to keep.
+*/
+static void surveyBlocks(bool* used, int skipLayer) {
+	u16 cnt[4];
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		cnt[i] = SUB_BGCNT(i);
+	}
+	raOverlaySurvey(SUB_DISPCNT, cnt, skipLayer, used);
 }
 
 /*

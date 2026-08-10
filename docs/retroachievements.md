@@ -2676,6 +2676,10 @@ background. This was not the cause of the fault above, but it is a real way for 
 overlay to pick a block that is in use, and it belongs with the overlay rewrite in the
 separate ARM9 binary rather than with a patch here.
 
+> **Fixed since.** It did move to the separate binary with the rewrite, and it is fixed there now.
+> `raOverlaySurvey()` consults the BG mode, tells text from affine from extended, and reads a bitmap's
+> base in 16K units with its depth from bit 2. See "The survey learns to read the BG mode" below.
+
 ### What to look for on hardware
 
 Build, run `tools/ra_snapshot_addr.sh` — it now lists three variants, not eight, and
@@ -5642,9 +5646,10 @@ decision is on the record rather than implicit in what nobody got around to fixi
 - **Item 5 is closed.** Skipped notifications were a "no free layer" condition; there is no layer to be
   free now, and the deferral holds a notification until the screen is worth drawing on rather than
   dropping it.
-- **Item 3's exposure collapsed.** `surveyBlocks()` is still mode-blind — it reads every `BGCNT` as a
-  text background — but it now only runs on the fallback path, so a game that takes the object path never
-  reaches it. The bug is unchanged; the odds of meeting it are not.
+- **Item 3's exposure collapsed, and it has since been fixed.** `surveyBlocks()` was mode-blind — it
+  read every `BGCNT` as a text background — and the object path already reduced that to the fallback
+  path only, so a game taking the object path never reached it. It is no longer a bug at all: see "The
+  survey learns to read the BG mode" below.
 - **Item 2 moved rather than closed.** The object path borrows one entry of the *object* palette instead
   of one of the background palette. One entry either way, and for the same unavoidable reason: the text
   has to be some colour.
@@ -5664,7 +5669,7 @@ None of them can crash a game or corrupt a save.
 | --- | --- | --- | --- |
 | 1 | Collides with the in-game menu on the frame it opens | cosmetic, transient | yes, once |
 | 2 | Borrows one palette entry the game may be using | cosmetic, transient | not since the fix |
-| 3 | `surveyBlocks()` mis-reads non-text backgrounds | **could corrupt graphics** | no |
+| 3 | `surveyBlocks()` mis-reads non-text backgrounds | ~~**could corrupt graphics**~~ **fixed** | no |
 | 4 | Cannot choose which physical screen it appears on | design decision | yes, by design |
 | 5 | Silently skips notifications when no layer is free | design decision | yes, 5 of 18 attempts |
 
@@ -5701,6 +5706,10 @@ consequence. The first build that raised notifications on ordinary frames glitch
 whole of stage 2 of *Contra 4*. See "The deferral worked, and it exposed the bug item 3
 predicted" above; the enable-bit half of the survey is now fixed, and the mode-blindness
 described here is not.
+
+> **The mode-blindness is fixed too, as of the survey rewrite.** The paragraph above stands as written
+> — it was true when written — but the second half of it is no longer the state of the code. See "The
+> survey learns to read the BG mode" below.
 
 **4 — no control over the screen.** The overlay draws on the sub engine; which physical
 panel that feeds is `POWCNT1` bit 15, which belongs to the game. *Final Fantasy III*
@@ -6051,6 +6060,96 @@ are independent readers of the same memory: the watchlist is the part that can b
 by eye, and keeping both means a disagreement between them is visible rather than a
 question of which one to believe.
 
+## The survey learns to read the BG mode
+
+This is item 4 of "What is left", and item 3 of the deferred graphical limitations: the last of the
+overlay's known ways to corrupt a game rather than merely fail to draw on it.
+
+### What was wrong
+
+`surveyBlocks()` decided which 16K blocks of sub BG VRAM the game was using by reading all four
+`BGCNT` registers as though every one of them described a **text** background — character base in 16K
+units, screen base in 2K units, map size from bits 14-15. It never consulted the BG mode in `DISPCNT`,
+and it never looked at the colour-depth bit.
+
+Three separate misreadings came out of that, and they fail in both directions:
+
+- **An affine map is one byte per entry, not two.** At size 3 that is 128×128 entries — 16K, a whole
+  block — where the text reading says 8K. The survey would call the second half of somebody's tilemap
+  free and hand it to the overlay.
+- **An extended-affine map is affine-shaped with two-byte entries**, so size 3 is 32K: two blocks, four
+  times what the text reading allowed.
+- **A bitmap's base is the screen-base field in 16K units, not 2K** — a factor of eight — and bit 2,
+  which is the low bit of the character base everywhere else, is its colour depth instead. So the
+  survey looked for a bitmap's pixels in the wrong block entirely, marked a character block that does
+  not exist, and missed the four or eight blocks the bitmap actually covers.
+
+### Why it was never seen
+
+*Contra 4* runs in **BG mode 0**, where all four layers are text and the old reading is correct by
+accident. That is measured, not assumed: `overlayDispcnt` came back `0x00211E10` from a pulse during
+stage 1 gameplay, and its low three bits are 0. Every hardware run this project has ever done was in
+the one mode where the bug cannot fire.
+
+Which is also why this was fixed with tests rather than with a photograph. Reaching it on hardware
+would mean finding a game that puts an affine or bitmap background on the **sub** engine and then
+earning an achievement inside it. The registers are just numbers; the whole table costs nothing to
+check on the host, and 35 assertions now do.
+
+### What it reads now
+
+`raOverlaySurvey()` takes `DISPCNT` and the four `BGCNT` values and returns the block map. It is pure —
+it touches no hardware — which is the only reason it can be tested at all; `surveyBlocks()` is now a
+four-line wrapper that samples the registers and calls it.
+
+The layer-shape table it works from, which is the sub engine's and not the main engine's:
+
+| mode | BG0 | BG1 | BG2 | BG3 |
+|---|---|---|---|---|
+| 0 | text | text | text | text |
+| 1 | text | text | text | affine |
+| 2 | text | text | affine | affine |
+| 3 | text | text | text | extended |
+| 4 | text | text | affine | extended |
+| 5 | text | text | extended | extended |
+
+An *extended* layer is a bitmap when `BGCNT` bit 7 is set and an affine background with 16-bit tile
+indices when it is clear. Sizes, in bytes:
+
+| size bits | text map | affine map | extended-affine map | bitmap, 8bpp | bitmap, 16bpp |
+|---|---|---|---|---|---|
+| 0 | 2,048 | 256 | 512 | 16,384 | 32,768 |
+| 1 | 4,096 | 1,024 | 2,048 | 65,536 | 131,072 |
+| 2 | 4,096 | 4,096 | 8,192 | 131,072 | 262,144 |
+| 3 | 8,192 | 16,384 | 32,768 | 262,144 | 524,288 |
+
+**The authority for all of this is libnds' own headers**, which are on disk next to the compiler rather
+than remembered: `BgSize`/`BackgroundControl` in `nds/arm9/background.h` carry the size tables and the
+bit patterns, `bgInit()` asserts *"Tile base is unused for bitmaps. Can be offset using mapBase *
+16KB"* — which is the 16K-unit bitmap base in as many words — and `bgInitSub()` asserts *"Sub Display
+has no large Bitmaps"*, which is what rules out mode 6 here.
+
+Two deliberate choices in the new code:
+
+- **A mode this engine does not have marks every block used**, so the notification is denied. Modes 6
+  and 7 cannot be read, and this is the same trade the rest of the survey makes: a notification that
+  does not appear is a missing feature, a corrupted game is a bug.
+- **A base pointing outside the 128K window matches nothing** rather than being folded back into it.
+  Both fields can express such an address — a character base reaches 240K and a bitmap base 496K — and
+  there is no block of ours out there to protect. Guessing how the hardware wraps it would be exactly
+  the kind of unmeasured assumption that has cost this project runs before.
+
+### What is still a heuristic, and is not fixed
+
+**Tile data is still marked as one 16K block, and it can be more than that.** How far a character base
+actually reaches is not in any register: it depends on how many distinct tiles the map references. The
+worst case is 1,024 tiles of 256 colours — 64K, four blocks — and marking that would deny nearly every
+notification on a game that never uses it.
+
+So this stays as it was, and it stays a known limitation rather than a fixed one. It is a much smaller
+hole than the mode-blindness was: it is only ever an *undercount* of one specific kind, and it applies
+equally to the text backgrounds the survey always handled, so nothing about it is new or worse.
+
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
@@ -6080,6 +6179,12 @@ question of which one to believe.
       the overlay draws on **its own sprites**, so no background layer, no game sprite and
       no tile of the game's is taken. Read back on hardware as *"Welcome to the jungle"*,
       stable, with nothing missing from the screen.
+- [x] **The VRAM survey reads the BG mode.** The last of the overlay's known ways to
+      corrupt a game rather than merely fail to draw on it. Affine and extended-affine map
+      sizes and a bitmap's 16K-unit base are all read correctly now, where every `BGCNT`
+      used to be taken for a text background. Host-tested rather than hardware-confirmed,
+      and deliberately: *Contra 4* runs in BG mode 0, where the old reading is correct by
+      accident and the bug cannot fire.
 - [ ] **Hardcore.** Blocked on nothing technical: the server injects a
       *"Warning: Unknown Emulator"* notice for an unrecognised User-Agent and blocks
       hardcore only, by its own wording. What it needs is `nds-bootstrap-ra/0.1`
@@ -6116,14 +6221,19 @@ route already built for `ra_unlocks.txt`: hand the menu the log file's cluster. 
 stashed the log in memory and shared the definitions block, which was reverted — the clean route is the
 cluster.
 
-### 4. `surveyBlocks()` is still mode-blind
+### 4. ~~`surveyBlocks()` is still mode-blind~~ — done
 
-It reads every `BGCNT` as though it were a text background, ignoring the BG mode and the colour-depth
-bit, so for an affine or bitmap background the character and screen bases mean different things. It can
-both miss a block the game is using and mark one it is not.
+It read every `BGCNT` as though it were a text background, ignoring the BG mode and the colour-depth
+bit, so for an affine or bitmap background the character and screen bases meant different things. It
+could both miss a block the game was using and mark one it was not.
 
-Much less urgent than it was: this only runs on the **fallback** path now, so a game that takes the
-sprite path never reaches it. The bug is unchanged; the odds of meeting it are not.
+**Fixed.** `raOverlaySurvey()` reads the BG mode, distinguishes text from affine from extended, and
+takes a bitmap's base in 16K units with its depth from bit 2. Tested on the host rather than on
+hardware, because *Contra 4* runs in BG mode 0 where the old reading is correct by accident and the bug
+cannot fire. See "The survey learns to read the BG mode".
+
+What remains is smaller and is written down there: **tile data is still marked as a single 16K block**,
+which is a heuristic and not a reading, because how far a character base reaches is not in any register.
 
 ### 5. The deferred graphical limitations
 

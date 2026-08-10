@@ -38,6 +38,23 @@
 */
 void ra_overlay_tick(u32 unlocks, const void* text);
 
+/*
+    Which 16K blocks of sub BG VRAM a given BG configuration is using.
+
+    Exposed for one reason: it is the part of the overlay that can be got wrong silently, and this is
+    the only way to test it. The mistake it used to make -- reading every BGCNT as a text background,
+    so that an affine map's size and a bitmap's base were both misread -- could not corrupt anything on
+    Contra 4, which runs in BG mode 0 where the old reading happens to be correct. Catching it on
+    hardware would mean finding a game that puts a non-text background on the sub engine and then
+    earning an achievement inside it. A table of configurations checked on the host costs nothing and
+    covers all of them.
+
+    Pure: it takes the registers rather than reading them, and touches no hardware. `dispcnt` and the
+    four `bgcnt` entries are the sub engine's, `skipLayer` is the layer being borrowed (or -1 for
+    none), and `used` is written with eight entries -- one per 16K block of the sub engine's 128K.
+*/
+void raOverlaySurvey(u32 dispcnt, const u16* bgcnt, int skipLayer, bool* used);
+
 #endif /* RA_READER_ENABLED */
 
 #endif /* RA_OVERLAY_H */
