@@ -731,8 +731,8 @@ void getIgmStrings(configuration* conf, bool b4ds) {
 	    A folder rather than a page, so the things RetroAchievements will want next -- forcing a sync,
 	    reading the launcher's log, showing the session -- have somewhere to go that is not the root.
 	*/
-	setIgmString(lang.fetch("MENU", "RETROACHIEVEMENTS", "RetroAchievements...").c_str(), igmText->menu[8]);
-	setIgmString(lang.fetch("MENU", "RA_SYNC_PENDING", "Sync Pending...").c_str(), igmText->raMenu[0]);
+	setIgmString(lang.fetch("MENU", "RETROACHIEVEMENTS", "Achievements...").c_str(), igmText->menu[8]);
+	setIgmString(lang.fetch("MENU", "RA_SYNC_PENDING", "Sync Pending").c_str(), igmText->raMenu[0]);
 
 	setIgmString(lang.fetch("OPTIONS", "MAIN_SCREEN", "Main Screen").c_str(), igmText->optionsLabels[0]);
 	setIgmString(lang.fetch("OPTIONS", "BRIGHTNESS", "Brightness").c_str(), igmText->optionsLabels[1]);

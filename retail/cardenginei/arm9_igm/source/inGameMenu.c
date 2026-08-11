@@ -650,7 +650,11 @@ static void raMenu(void) {
 
 	clearScreen(false);
 	print(2, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
-	print(1, 0x18 - 3, igmText.ndsBootstrap, FONT_LIGHT_GRAY, false);
+	/*
+	    The folder names itself down here, where the main menu names the program, rather than as a
+	    header above its own only item -- which read as the same page twice on the way to it.
+	*/
+	print(1, 0x18 - 3, (unsigned char*)"RetroAchievements", FONT_LIGHT_GRAY, false);
 	print(0, 23, igmText.bNo, FONT_WHITE, false);
 	drawCursor(0);
 
@@ -662,7 +666,7 @@ static void raMenu(void) {
 			raPendingPage();
 			clearScreen(false);
 			print(2, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
-			print(1, 0x18 - 3, igmText.ndsBootstrap, FONT_LIGHT_GRAY, false);
+			print(1, 0x18 - 3, (unsigned char*)"RetroAchievements", FONT_LIGHT_GRAY, false);
 			print(0, 23, igmText.bNo, FONT_WHITE, false);
 			drawCursor(cursor);
 		}
