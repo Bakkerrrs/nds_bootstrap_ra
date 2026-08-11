@@ -947,10 +947,28 @@ static void raWifiSubmitOne(const raConfig* cfg, u32 id, u32 when, raQueue* q) {
 	}
 }
 
+/*
+    The queue's scratch, at file scope so the two functions that touch it share one copy.
+
+    That is a measurement, not tidiness. When raWifiStagePending() below had statics of its own -- a
+    second RA_QUEUE_BYTES buffer and a second raQueue, which carries a game code and title per entry
+    now -- it cost this launcher **8,192 bytes of its safe heap**, read straight off two hardware logs
+    from the same console, same game, same boot:
+
+        with two copies    heap after hash 20480 safe + 9984 free
+        with one           heap after hash 28672 safe + 10912 free
+
+    Nothing in the ladder failed for it, which is exactly why it went unnoticed for two builds: stage
+    15 still staged all 45 definitions and the run still reached 15 of 15. The number was sitting
+    beside the success the whole time.
+
+    Sharing is safe because raWifiStagePending() runs only after raWifiSubmitQueue() has returned.
+*/
+static char    file[RA_QUEUE_BYTES];
+static raQueue q;
+
 static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
 	const char* const path = sdFound ? RA_QUEUE_PATH : RA_QUEUE_PATH_FAT;
-	static char       file[RA_QUEUE_BYTES];
-	static raQueue    q;
 	int               keep[RA_QUEUE_MAX];
 	int               keepCount = 0;
 	int               i;
@@ -1083,8 +1101,6 @@ static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
 */
 static void raWifiStagePending(bool sdFound, const char* ndsPath) {
 	const char* const path = sdFound ? RA_QUEUE_PATH : RA_QUEUE_PATH_FAT;
-	static char       file[RA_QUEUE_BYTES];
-	static raQueue    q;
 	raPendingBlock*   block = (raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION;
 	size_t            got = 0;
 	FILE*             f;
