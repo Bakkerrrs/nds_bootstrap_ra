@@ -630,7 +630,32 @@ typedef struct raSnapshot {
 	*/
 	u8  overlaySpriteOam;  /* +0xC0  first OAM entry used, or 0xFF for the background path */
 	u8  overlaySpriteSlot; /* +0xC1  2K unit of object VRAM claimed, or 0xFF */
-} raSnapshot;            /*              0xC4 bytes */
+	u8  pad0[2];           /* +0xC2  to word-align what follows */
+	/*
+	    What ra_definition() actually found where the bootloader was supposed to leave the staged
+	    definitions, published raw instead of collapsed into rcFromFile's single bit.
+
+	    This exists because six builds were spent inferring the answer from code. The launcher's log
+	    says it staged 45 definitions and reached stage 15 of 15; the game says rcFromFile is 0 and
+	    runs its built-in self-test. Both readings are certain and they cannot both be describing a
+	    working copy, so the block is lost between them -- and nothing in the snapshot could say
+	    *how*, which is why the search went to inspection instead of measurement.
+
+	    Read them together:
+
+	      defsMagic 0x31414452 ('RDA1') with a bad defsLength  -- copied, header wrong
+	      defsMagic 0                                          -- the bootloader took its else branch:
+	                                                              it looked, found no magic staged,
+	                                                              and cleared the destination
+	      defsMagic anything else                              -- nothing was copied at all and this
+	                                                              is whatever the window held
+
+	    The third case is the one no amount of reading the copy would have found, because the copy is
+	    correct: it would mean the branch containing it never ran.
+	*/
+	u32 defsMagic;         /* +0xC4  first word at CARDENGINEI_ARM9_RA_DEFS_LOCATION */
+	u32 defsLength;        /* +0xC8  second word, the length the launcher wrote */
+} raSnapshot;            /*              0xCC bytes */
 
 /*
     A note on what that pair settled, because it is the answer to four hardware runs and it lives here

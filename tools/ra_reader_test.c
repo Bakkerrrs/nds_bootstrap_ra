@@ -899,7 +899,9 @@ int main(void) {
 	/* Which path drew, and what it took; see the note beside these in ra.h. */
 	CHECK(__builtin_offsetof(raSnapshot, overlaySpriteOam) == 0xC0);
 	CHECK(__builtin_offsetof(raSnapshot, overlaySpriteSlot) == 0xC1);
-	CHECK(sizeof(raSnapshot) == 0xC4);
+	CHECK(sizeof(raSnapshot) == 0xCC);
+		CHECK(__builtin_offsetof(raSnapshot, defsMagic) == 0xC4);
+		CHECK(__builtin_offsetof(raSnapshot, defsLength) == 0xC8);
 
 	/*
 	    The shared block's real size, pinned because overrunning it is silent: slot 13 is

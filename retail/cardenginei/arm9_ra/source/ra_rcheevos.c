@@ -697,6 +697,13 @@ static bool ra_add_watch_line(const char* line, u8 flags) {
 static const char* ra_definition(raSnapshot* snapshot) {
 	const u32* block = (const u32*)CARDENGINEI_ARM9_RA_DEFS_LOCATION;
 
+	/*
+	    Published before anything is decided from them, so a photograph says what was actually there
+	    rather than what the code concluded. See raSnapshot.defsMagic.
+	*/
+	snapshot->defsMagic  = block[0];
+	snapshot->defsLength = block[1];
+
 	if (block[0] != CARDENGINEI_ARM9_RA_DEFS_MAGIC) {
 		snapshot->rcFromFile = 0;
 		return RA_TEST_DEFINITION;
