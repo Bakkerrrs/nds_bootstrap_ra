@@ -169,20 +169,23 @@
 #define CARDENGINEI_ARM9_RA_PENDING_MAX              0x200
 #define CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x38000)
 /*
-    **Inside the definitions' reservation, not below it.** It used to sit under the block with the
-    arena shortened to stop below both, and that broke the binary: rcheevos stopped triggering and an
-    invented id, 0xF0000000, came out of the unlock ring. Measured by isolation on hardware -- reverting
-    only this brought achievements back, and restoring only this took them away again.
+    **Back where the one build that worked had it, and that is all this is.**
 
-    Why 512 bytes off a heap with 11 KB of margin does that is *not* explained, and the fix does not
-    depend on knowing: the arena goes back to exactly where it was and nothing is carved out of it.
-    The definitions reserve 32 KB and the largest real set measured uses 8,306 of it, so the top of
-    that reservation is free space nobody was using.
+    The story so far, measured on hardware rather than argued: with the block here and the arena left
+    at the definitions block, achievements fire normally. Moving the block to the top of the window --
+    0x0377FE00, the last 512 bytes of the 256K -- breaks the binary: 0xF0000000 comes out of the unlock
+    ring seconds into the game and nothing real triggers after it.
 
-    The launcher's cap comes down by the same amount so a set can never grow into it.
+    Note what that rules out. arm9_ra is *code-identical* between those two builds, verified by diffing
+    it, so the fault is not in that binary at all -- it is where the bootloader puts these 512 bytes.
+    An earlier commit blamed shortening the arena and was wrong.
+
+    The cost of having it here is known and accepted for now: it sits inside the heap, so the allocator
+    can hand out the memory the menu reads and Sync Pending may show nonsense. Correctness of the game
+    comes first; the page can move somewhere safe once it is understood what the top of the window is
+    for.
 */
 #define CARDENGINEI_ARM9_RA_PENDING_LOCATION         (CARDENGINEI_ARM9_RA_DEFS_LOCATION \
-                                                     + CARDENGINEI_ARM9_RA_DEFS_MAX \
                                                      - CARDENGINEI_ARM9_RA_PENDING_MAX)
 
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
