@@ -293,13 +293,16 @@ void ra_wram_tick(raSnapshot* snapshot) {
 	    watchlist installs itself exactly once.
 	*/
 	/*
-	    The arena stops below the two blocks at the top of the window -- the definitions, and the
-	    pending-unlock tally under them. Shortened here rather than in the linker script because
-	    __vram_top is the window, and both blocks are runtime reservations out of it: the linker
-	    has no business knowing about something the bootloader writes.
+	    The arena stops below the definitions block at the top of the window.
+
+	    **Diagnostic build: this is deliberately back where cb14541 had it.** The pending-unlock
+	    tally sits below the definitions and the arena should stop below *both*; leaving it here
+	    means the allocator can hand out the block the menu reads, so Sync Pending may show
+	    nonsense in this build. That is accepted for the experiment -- what is being tested is
+	    whether shortening the arena is what corrupted rcheevos' state.
 	*/
 	stage = ra_startup(__bss_start, __bss_end,
-	                   (char*)(CARDENGINEI_ARM9_RA_PENDING_LOCATION));
+	                   (char*)(CARDENGINEI_ARM9_RA_DEFS_LOCATION));
 	snapshot->wramStage = stage;
 	snapshot->heapSize  = ra_heap_size();
 	snapshot->heapUsed  = ra_heap_used();
