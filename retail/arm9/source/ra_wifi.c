@@ -1358,6 +1358,7 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	char           path[384];
 	char* const    block = (char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
 	                               + CARDENGINEI_ARM9_RA_DEFS_HEADER);
+	/* Minus the pending tally, which now lives in the top of this same reservation. */
 	const u32      blockMax = CARDENGINEI_ARM9_RA_DEFS_MAX
 	                          - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1;
 	raNetProgress  p;

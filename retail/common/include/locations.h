@@ -168,7 +168,22 @@
 #define CARDENGINEI_ARM9_RA_PENDING_MAGIC            0x31504152   /* 'RAP1' */
 #define CARDENGINEI_ARM9_RA_PENDING_MAX              0x200
 #define CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x38000)
-#define CARDENGINEI_ARM9_RA_PENDING_LOCATION         (CARDENGINEI_ARM9_RA_DEFS_LOCATION - CARDENGINEI_ARM9_RA_PENDING_MAX)
+/*
+    **Inside the definitions' reservation, not below it.** It used to sit under the block with the
+    arena shortened to stop below both, and that broke the binary: rcheevos stopped triggering and an
+    invented id, 0xF0000000, came out of the unlock ring. Measured by isolation on hardware -- reverting
+    only this brought achievements back, and restoring only this took them away again.
+
+    Why 512 bytes off a heap with 11 KB of margin does that is *not* explained, and the fix does not
+    depend on knowing: the arena goes back to exactly where it was and nothing is carved out of it.
+    The definitions reserve 32 KB and the largest real set measured uses 8,306 of it, so the top of
+    that reservation is free space nobody was using.
+
+    The launcher's cap comes down by the same amount so a set can never grow into it.
+*/
+#define CARDENGINEI_ARM9_RA_PENDING_LOCATION         (CARDENGINEI_ARM9_RA_DEFS_LOCATION \
+                                                     + CARDENGINEI_ARM9_RA_DEFS_MAX \
+                                                     - CARDENGINEI_ARM9_RA_PENDING_MAX)
 
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
 #define COLOR_LUT_BUFFERED_LOCATION                  0x027D0000

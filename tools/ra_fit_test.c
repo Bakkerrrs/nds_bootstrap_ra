@@ -64,12 +64,17 @@
 #endif
 
 /*
-    Follows CARDENGINEI_ARM9_RA_PENDING_LOCATION rather than the definitions block, because that is
-    where the arena actually stops -- the pending tally is reserved underneath the definitions and the
-    heap is shortened below both. Pointed at the wrong one of the two, this measured an arena 512 bytes
-    larger than the target's and would have missed exactly the overflow it exists to catch.
+    **This must be whatever ra_startup() is passed as its window top, and nothing else.** It has been
+    wrong in both directions already. Pointed below the real top it under-reported by 512 bytes, which
+    was merely conservative; pointed above it, after the pending tally moved into the definitions'
+    reservation, it over-reported by 32 KB -- which is the dangerous direction, since the check it
+    exists to perform is "does the set still fit".
+
+    The definitions block is that top. The pending tally lives inside the definitions' own 32 KB now
+    rather than underneath it, precisely so this number does not have to move again: shortening the
+    arena is what broke rcheevos on hardware.
 */
-#define RA_WRAM_ARENA ((long)(CARDENGINEI_ARM9_RA_PENDING_LOCATION - RA_WRAM_BSS_END))
+#define RA_WRAM_ARENA ((long)(CARDENGINEI_ARM9_RA_DEFS_LOCATION - RA_WRAM_BSS_END))
 
 /* The cardengine's allocator puts an 8-byte header on every block. See raBlock in ra_alloc.c. */
 #define RA_WRAM_BLOCK_HEADER 8
@@ -245,7 +250,7 @@ int main(void) {
 
 		printf("        arena          %ld bytes (0x%08lX to 0x%08X)\n",
 		       RA_WRAM_ARENA, (unsigned long)RA_WRAM_BSS_END,
-		       CARDENGINEI_ARM9_RA_PENDING_LOCATION);
+		       CARDENGINEI_ARM9_RA_DEFS_LOCATION);
 		printf("        rc_runtime_init %ld bytes\n", afterInit);
 		printf("        peak            %ld bytes in %ld blocks, +%ld of headers\n",
 		       peak, peakBlocks, peakBlocks * RA_WRAM_BLOCK_HEADER);

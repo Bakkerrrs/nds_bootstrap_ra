@@ -293,17 +293,16 @@ void ra_wram_tick(raSnapshot* snapshot) {
 	    watchlist installs itself exactly once.
 	*/
 	/*
-	    The arena stops below the two blocks at the top of the window -- the definitions, and the
-	    pending-unlock tally under them.
+	    The arena stops below the definitions block at the top of the window.
 
-	    **Diagnostic build: this half is restored and the per-tick store into that block is not.**
-	    Between them these were the only two changes to this binary between a build that worked and
-	    one that wrote an invented unlock id and stopped triggering real achievements. Reverting both
-	    fixed it; this puts back the one that is the likelier culprit, since moving the top of the
-	    heap is the only thing here that can reach rcheevos' own state.
+	    **Do not shorten this further.** Taking 512 bytes off it to reserve room underneath broke this
+	    binary on hardware -- rcheevos stopped triggering and the unlock ring produced 0xF0000000 --
+	    with 11 KB of margin still reported by the fit test, so scarcity was not the reason and the
+	    real one is not understood. Anything needing a reservation in this window goes inside the
+	    definitions' 32 KB instead; see CARDENGINEI_ARM9_RA_PENDING_LOCATION.
 	*/
 	stage = ra_startup(__bss_start, __bss_end,
-	                   (char*)(CARDENGINEI_ARM9_RA_PENDING_LOCATION));
+	                   (char*)(CARDENGINEI_ARM9_RA_DEFS_LOCATION));
 	snapshot->wramStage = stage;
 	snapshot->heapSize  = ra_heap_size();
 	snapshot->heapUsed  = ra_heap_used();
