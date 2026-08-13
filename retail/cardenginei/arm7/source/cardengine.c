@@ -175,6 +175,12 @@ static aFile patchOffsetCacheFile;
 static aFile ramDumpFile;
 static aFile srParamsFile;
 static aFile raUnlocksFile;
+/*
+    The running game's identity, captured at init because the header it comes from does not survive
+    play. See where these are filled.
+*/
+static char raGameTitle[RA_QUEUE_TITLE];
+static char raGameCode[RA_QUEUE_CODE];
 static aFile screenshotFile;
 static aFile pageFile;
 static aFile manualFile;
@@ -302,6 +308,20 @@ static void driveInitialize(void) {
 	    the queue lives beside the game rather than beside nds-bootstrap.
 	*/
 	getFileFromCluster(&raUnlocksFile, raUnlocksCluster, (valueBits & gameOnFlashcard));
+	/*
+	    And which game this is, taken *now* rather than when an achievement fires.
+
+	    ndsHeader points at the header the loader left in main RAM, and the game reuses that memory
+	    once it is running. Reading it at unlock time therefore works for an achievement earned in the
+	    first seconds and returns nothing for one earned at a stage end minutes later -- which is
+	    exactly what hardware showed: an early unlock carried YCTE and CONTRA 4, a late one carried
+	    neither, from the same build.
+
+	    Copied raw, with the tidying left to raQueueScan() on the launcher side; see raUnlockAppend()
+	    for why this binary does no trimming of its own.
+	*/
+	tonccpy(raGameTitle, ndsHeader->gameTitle, RA_QUEUE_TITLE);
+	tonccpy(raGameCode, ndsHeader->gameCode, RA_QUEUE_CODE);
 	getFileFromCluster(&screenshotFile, screenshotCluster, (valueBits & bootstrapOnFlashcard));
 	getFileFromCluster(&pageFile, pageFileCluster, (valueBits & bootstrapOnFlashcard));
 	getFileFromCluster(&manualFile, manualCluster, (valueBits & bootstrapOnFlashcard));
@@ -1097,11 +1117,14 @@ static void raUnlockAppend(u32 id, const char* stamp) {
 		}
 
 		/*
-		    And which game it came from, out of the running ROM's own header -- `gameCode` identifies
-		    the release and `gameTitle` is what a human reads. No network, nothing passed down from the
-		    launcher, and available on the frame the achievement fires, which is what the case this
-		    exists for demands: a queue full of one game's unlocks while another is running and there
-		    is no WiFi to drain it.
+		    And which game it came from -- `gameCode` identifies the release and `gameTitle` is what a
+		    human reads. No network and nothing passed down from the launcher, which is what the case
+		    this exists for demands: a queue full of one game's unlocks while another is running and
+		    there is no WiFi to drain it.
+
+		    Read from the copies taken at init, **not** from ndsHeader here. That header is the
+		    loader's and the game reuses its memory once running, so reading it on the frame an
+		    achievement fires works early in a session and returns nothing later in one.
 
 		    Both are fixed-width fields that are *not* NUL-terminated and are padded with spaces, and
 		    neither is guaranteed to be text at all -- a homebrew ROM can put anything there. So
@@ -1131,10 +1154,10 @@ static void raUnlockAppend(u32 id, const char* stamp) {
 		    display name -- the id and the stamp are written before it and are not reachable from here.
 		*/
 		record[at++] = '\t';
-		tonccpy(record + at, ndsHeader->gameCode, RA_QUEUE_CODE);
+		tonccpy(record + at, raGameCode, RA_QUEUE_CODE);
 		at += RA_QUEUE_CODE;
 		record[at++] = '\t';
-		tonccpy(record + at, ndsHeader->gameTitle, RA_QUEUE_TITLE);
+		tonccpy(record + at, raGameTitle, RA_QUEUE_TITLE);
 		at += RA_QUEUE_TITLE;
 		record[at] = '\n';
 	}

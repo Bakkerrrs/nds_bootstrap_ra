@@ -1016,6 +1016,32 @@ static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
 		if (q.dropped) {
 			raWifiLog("\x1b[33m%d unusable value(s) in the file\x1b[37m\n", q.dropped);
 		}
+		/*
+		    A file that is not RA_QUEUE_BYTES long is brought up to length before returning, and an
+		    empty queue is the only path that could ever leave it short: every other exit rewrites the
+		    whole thing.
+
+		    This is not tidiness. The cardengine computes a record's offset as slot * RA_QUEUE_RECORD
+		    and can reach slot RA_QUEUE_MAX - 1, but it cannot allocate -- it writes into clusters that
+		    already exist. Against a file left at an older, smaller RA_QUEUE_RECORD, a high enough slot
+		    writes past the end of it and into whatever cluster follows, which belongs to another file.
+		    Raising RA_QUEUE_RECORD from 16 to 32 and then to 48 each left every existing card in that
+		    state, and nothing else would ever have fixed it: the file only grows on a boot that had
+		    something to send, and a card that cannot sync is exactly the one accumulating unlocks.
+		*/
+		if (got != sizeof(file)) {
+			FILE* resize = fopen(path, "wb");
+
+			if (resize) {
+				memset(file, 0, sizeof(file));
+				got = fwrite(file, 1, sizeof(file), resize);
+				fclose(resize);
+				raWifiLog("queue            resized to %d bytes\n", (int)got);
+			} else {
+				raWifiLog("\x1b[33mqueue is %d bytes, not %d, and could not be resized\x1b[37m\n",
+				          (int)got, (int)sizeof(file));
+			}
+		}
 		return;
 	}
 
