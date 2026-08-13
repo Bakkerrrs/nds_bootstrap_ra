@@ -169,23 +169,24 @@
 #define CARDENGINEI_ARM9_RA_PENDING_MAX              0x200
 #define CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x38000)
 /*
-    **Back where the one build that worked had it, and that is all this is.**
+    Inside the definitions' own reservation, at the top of it, and *not* carved out of the heap.
 
-    The story so far, measured on hardware rather than argued: with the block here and the arena left
-    at the definitions block, achievements fire normally. Moving the block to the top of the window --
-    0x0377FE00, the last 512 bytes of the 256K -- breaks the binary: 0xF0000000 comes out of the unlock
-    ring seconds into the game and nothing real triggers after it.
+    This is where it belongs and it took a detour to get back here. An earlier build put it below the
+    definitions with the arena shortened to stop under both; that build failed on hardware and so did
+    the one that moved it here, so both placements were blamed in turn. Neither was the cause: the
+    failure is intermittent, and it has since been seen and not seen with the same binary. Every
+    conclusion drawn by comparing those builds -- including "it is the arena" and "it is this address"
+    -- was reading noise.
 
-    Note what that rules out. arm9_ra is *code-identical* between those two builds, verified by diffing
-    it, so the fault is not in that binary at all -- it is where the bootloader puts these 512 bytes.
-    An earlier commit blamed shortening the arena and was wrong.
+    What settles the placement is not that evidence but the design: the definitions reserve 32 KB, the
+    heap already stops below them, and the largest real set measured uses 8,306 of it. Putting the
+    tally in the top of that costs nothing and takes nothing from rcheevos. The launcher's cap comes
+    down by the same amount so a set can never grow into it.
 
-    The cost of having it here is known and accepted for now: it sits inside the heap, so the allocator
-    can hand out the memory the menu reads and Sync Pending may show nonsense. Correctness of the game
-    comes first; the page can move somewhere safe once it is understood what the top of the window is
-    for.
+    The intermittent fault is a separate open question, and raSnapshot.defsMagic exists to catch it.
 */
 #define CARDENGINEI_ARM9_RA_PENDING_LOCATION         (CARDENGINEI_ARM9_RA_DEFS_LOCATION \
+                                                     + CARDENGINEI_ARM9_RA_DEFS_MAX \
                                                      - CARDENGINEI_ARM9_RA_PENDING_MAX)
 
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
