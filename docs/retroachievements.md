@@ -1698,6 +1698,45 @@ Three things that are easy to trip over:
 
 Output is `retail/bin/nds-bootstrap.nds` and `hb/bin/nds-bootstrap.nds`.
 
+### Build the deliverable with `tools/ra_release.sh`, not by hand
+
+**`retail/bin/nds-bootstrap.nds` holds whichever `RA_LAUNCHER_WIFI` mode built last.** The
+pre-delivery checklist above says to compile at `=0` and `=2`; doing both and then copying that file
+hands over whichever one happened to run second. Copy it after a `=0` build and the launcher has no
+network at all.
+
+This cost about a week, and the reason it did is that the symptom does not look like a build problem:
+
+- No ladder runs, so nothing is staged for the cardengine.
+- The bootloader finds no magic where the definitions should be, and clears the destination.
+- `cardenginei_arm9_ra` falls back to its built-in self-test — **one** definition, carrying no id, so
+  it is numbered `RA_SYNTHETIC_ID_BASE + 0` = `0xF0000000`.
+- That fires seconds into the game and gets written to the queue. On screen it is the notification's
+  heading with no achievement name under it.
+
+So a wrong build reads as an in-game memory fault. The arena's top, the pending block's address and
+the launcher's statics were each blamed and each exonerated, on evidence that was really *"did the
+`=2` build happen to run last this time"*. Two of those wrong conclusions were written into commit
+messages before being disproved.
+
+**And the logs agree with each other rather than with the console.** A boot with no network never
+rewrites `ra_wifi_launcher.log`, so the file still holds the *previous, working* boot's run — reporting
+`staged 45 definitions` and `reached stage 15 of 15` for a boot that did neither. Comparing that log
+against a snapshot taken on the failing boot produces a contradiction that cannot be resolved by
+reasoning, because the two readings describe different boots. **Check the log's timestamp against the
+run before trusting it.**
+
+`tools/ra_release.sh` fixes the order rather than remembering it — `=0` first because it is only a
+compile check, `=2` last because it is the deliverable — and then proves the result from the ELF
+rather than from intent: a `=2` launcher links dsiwifi into its ARM7 and a `=0` launcher does not, so
+counting those symbols separates them without trusting which `make` ran. It runs the host suite,
+prints the snapshot budget, refuses to emit a file if any of it fails, and reports the commit, whether
+the tree was dirty, and the md5.
+
+**The reading that identifies this in seconds** is `raSnapshot.rcFromFile` at `+0x98`: 0 means the
+staged set never arrived. `defsMagic` at `+0xC4` then says why — `RDA1` for arrived, `0` for the
+bootloader looking and finding nothing staged, anything else for nothing having been copied at all.
+
 ### The step-2 WiFi diagnostic
 
 ```sh
@@ -6371,6 +6410,13 @@ build, parses as it always did. A record that has a stamp but no game keeps its 
       change `o=` requires — the id twice and then the seconds. Read back on *Contra 4* as
       `302329  earned 154 s ago` followed by `302329  awarded`, with the account holding it on the
       same boot's `r=unlocks`.
+- [x] **The in-game menu shows what is waiting to sync** — **confirmed on hardware**. An
+      `Achievements...` entry in the root menu with `Sync Pending` inside it, one line per game:
+      the game, how many of its unlocks are still owed, and how long the oldest has waited. Counts
+      rather than a list, because achievement titles only exist for the game that is running; days
+      rather than a date, because five characters cannot tell the ninth of August from the eighth of
+      September and the launcher has the clock anyway. The queue record carries the game it came
+      from, read from the ROM's own header, so it works with the radio down.
 - [ ] **Hardcore.** Blocked on nothing technical: the server injects a
       *"Warning: Unknown Emulator"* notice for an unrecognised User-Agent and blocks
       hardcore only, by its own wording. What it needs is `nds-bootstrap-ra/0.1`
@@ -6405,7 +6451,27 @@ is not confined to adding a parameter: sending `o=` **changes the signature**, b
 the id a second time and then the seconds. `o=` with the old digest is refused, and refused with a
 message that says nothing about which half was wrong.
 
-### 3. The in-game log reader
+### 3. ~~The in-game log reader~~ — superseded, and three smaller things in its place
+
+The launcher's log on screen was the original item. What got built instead was **Sync Pending**, which
+answers the question that actually comes up while playing — *did the achievement I just earned get
+queued* — and needed the same plumbing. The log reader is still possible by the clean route (hand the
+menu the file's cluster) and is no longer the interesting half.
+
+What the work left behind, all confirmed and none of it fixed:
+
+- **`ndsHeader` is not stable during play.** The queue record reads `gameCode`/`gameTitle` from
+  `0x027FFE00` at the moment an achievement fires, and the game reuses that memory once it is running.
+  Proven by the pairing: an unlock seconds into the game carries `YCTE`/`CONTRA 4`, one at a stage end
+  minutes later carries neither. The fix is to capture both fields once at cardengine init.
+- **The queue file never migrates when it is empty.** `raWifiSubmitQueue()` returns early on an empty
+  queue without rewriting, so a file created at an older `RA_QUEUE_RECORD` keeps its old length
+  forever — `queue empty (2048 bytes read)` on a build whose records are 48 bytes.
+- **`raPendingBlock` sits where it does by argument, not measurement.** It is in the top of the
+  definitions' reservation, out of the heap, which is right. The hardware evidence that once pointed
+  elsewhere was the build-mode fault and is void.
+
+### 3b. The in-game log reader
 
 The launcher's log is written to the SD card and read on a PC. The in-game menu could show it, by the
 route already built for `ra_unlocks.txt`: hand the menu the log file's cluster. A previous attempt
