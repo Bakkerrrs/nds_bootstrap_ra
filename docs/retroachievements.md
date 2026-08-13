@@ -29,6 +29,28 @@ without rewriting the reader:
 Written as a handoff. Everything below the "Layering" table is background; this section
 is what you need to pick the work back up.
 
+> ### Picking it up from here
+>
+> **Read `## Building` first, specifically "Build the deliverable with `tools/ra_release.sh`".** The
+> single most expensive lesson on this branch is that `retail/bin/nds-bootstrap.nds` holds whichever
+> `RA_LAUNCHER_WIFI` mode built last, and that handing over a `=0` build presents as an in-game memory
+> fault rather than a build mistake. Use the script; never copy that file by hand.
+>
+> **The loop is closed end to end and confirmed on hardware.** An achievement fires inside the game,
+> the notification names it, the id and its earn time reach the SD card with no network, the next boot
+> submits it with `o=` so the server dates it correctly, and the in-game menu shows what is still
+> waiting under `Achievements... → Sync Pending`.
+>
+> **The next three pieces of work are small, known and written up** in "What is left" item 3: the
+> cardengine reads `ndsHeader` at unlock time and that memory is not stable during play, the queue file
+> never migrates its length while it is empty, and `raPendingBlock`'s placement is justified by design
+> rather than by measurement.
+>
+> **Two readings answer almost any in-game question**, and reaching for them early is worth more than
+> reasoning about the code: `rcFromFile` at `+0x98` of the snapshot says whether the staged set
+> arrived, and `defsMagic` at `+0xC4` says why not. Both are in the RAM viewer; the snapshot's address
+> is not fixed across boots, so find the `RA2S` magic rather than jumping to a remembered address.
+
 ### State
 
 **The client-side half of an achievement is finished and proven on real hardware.**
