@@ -38,6 +38,7 @@
 
 #include "ra.h"
 #include "locations.h"
+#include "ra_wifi.h"   /* raPendingBlock -- the menu's Sync Pending tally */
 #include "ra_text.h"
 
 #include "rc_runtime.h"
@@ -1074,6 +1075,20 @@ static u8 ra_rc_frame_step(raSnapshot* snapshot) {
 	*/
 	ra_rc_offer_unlock(snapshot);
 	snapshot->unlockSent   = unlockSent;
+	/*
+	    And into the menu's pending block, so Sync Pending counts what this session earned rather than
+	    only what was owed at boot -- which is the difference between the page answering "did the one I
+	    just earned get queued" and never showing it until the next boot.
+
+	    A store into the window this binary owns. Guarded on the launcher's magic so a boot that staged
+	    nothing is left alone rather than given a header it never wrote.
+
+	    This was removed during an isolation run and stayed removed by accident; the page has been
+	    reporting boot-time state only ever since.
+	*/
+	if (((raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_LOCATION)->magic == RA_PENDING_MAGIC) {
+		((raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_LOCATION)->session = unlockSent;
+	}
 	snapshot->unlockQueued = unlockQueued;
 	snapshot->unlockLost   = unlockLost;
 
