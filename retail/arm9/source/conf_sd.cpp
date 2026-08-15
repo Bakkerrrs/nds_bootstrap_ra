@@ -1834,9 +1834,23 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 
 		    The magic goes in only after a successful read, and is cleared first, because
 		    the staging region is uninitialised and the bootloader trusts that word.
+
+		    All three magics, and the pending one was missing here. The bootloader checks it
+		    exactly as it checks the other two -- see main.arm7.c -- and the only thing that
+		    had ever cleared it was the *previous* boot's bootloader, on its way out. So the
+		    launcher's guarantee was not self-contained: it held only for a boot that followed
+		    one which had got that far. On the first boot after power-on the word is whatever
+		    RAM came up holding, and on any boot where the wifi ladder stops before stage 13 --
+		    no access point, no config, a refused login, all ordinary -- raWifiStagePending()
+		    never writes, and that stale word is what decides whether the in-game menu shows a
+		    pending list and whose.
+
+		    Three words that must be cleared, in one place, rather than two here and one by
+		    somebody else's exit path.
 		*/
 		*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = 0;
 		*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
+		*(u32*)CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION = 0;
 		if (!colorTable && conf->consoleModel > 0) {
 			if (loadCardEngineBinary("nitro:/cardenginei_arm9_ra.bin",
 					(u8*)(CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + CARDENGINEI_ARM9_RA_IMAGE_OFFSET)) == 0) {
