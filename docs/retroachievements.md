@@ -6493,12 +6493,23 @@ What the work left behind, all confirmed and none of it fixed:
   definitions' reservation, out of the heap, which is right. The hardware evidence that once pointed
   elsewhere was the build-mode fault and is void.
 
-### 3b. The in-game log reader
+### 3b. ~~The in-game log reader~~ — dropped
 
-The launcher's log is written to the SD card and read on a PC. The in-game menu could show it, by the
-route already built for `ra_unlocks.txt`: hand the menu the log file's cluster. A previous attempt
-stashed the log in memory and shared the definitions block, which was reverted — the clean route is the
-cluster.
+Showing `ra_wifi_launcher.log` in the in-game menu, by handing the menu the log file's cluster the way
+`ra_unlocks.txt` is handed over. **Not going to be built**, and the reason is worth keeping because it
+is not "we ran out of time".
+
+The item only ever existed to avoid a physical cost: reading the log meant powering down, taking the
+card out, putting it in a PC, and putting it back. That is what made a two-line reading expensive, and
+it is what the feature was buying back.
+
+Both halves of that have since gone away. **Sync Pending answers the question that actually comes up
+while playing** — is what I just earned safe, and how much is waiting — which is the only thing anyone
+was really opening the log for mid-session. And the card no longer has to move: reading it over FTP
+after quitting costs nothing, which removes the rest of the reason.
+
+What is left over is genuine debugging, and that is not a mid-game activity. It wants the whole file
+on a screen with a scrollbar, not thirty-two columns of a DS panel.
 
 ### 4. ~~`surveyBlocks()` is still mode-blind~~ — done
 
