@@ -146,21 +146,38 @@ static bool screenHidden(void) {
 #define OVERLAY_PAL_BANK 15
 
 /*
-    The glyphs are drawn entirely in colour index 1 -- see draw(), which ORs a nibble of
-    1 for every set pixel -- so exactly one palette entry has to be borrowed. An earlier
+    The glyphs are drawn in two colour indices -- RA_TEXT_INK and RA_TEXT_SHADOW, which ra_text.c
+    writes as nibbles -- so exactly two palette entries have to be borrowed. An earlier
     version saved and whitened all sixteen in the bank, which cost nothing to write and
     everything to a game using those colours: on Final Fantasy III's title screen
     fourteen entries the overlay never needed went white for the three seconds a
     notification was up, and came back when it hid. A transient graphical fault tied to
     the toaster appearing, for no benefit.
 
-    One entry is still one entry the game may be using; that is unavoidable, since the
-    text has to be *some* colour. But the blast radius is now the minimum the design
-    requires rather than fifteen times it.
+    Two entries the game may be using is one more than before, and it is the price of the drop
+    shadow. It was worth paying: white glyphs on a game's own artwork are legible only where the
+    artwork happens to be dark, which on a photograph of a three-second toaster is exactly the
+    complaint that started this. The blast radius is still bounded to what the design needs rather
+    than fifteen times it, and both entries are saved and put back on hide.
 */
-#define OVERLAY_PAL_INDEX 1
-#define OVERLAY_PAL_ENTRY (OVERLAY_PAL_BANK * 16 + OVERLAY_PAL_INDEX)
-#define OVERLAY_ROW 10
+#define OVERLAY_PAL_ENTRY  (OVERLAY_PAL_BANK * 16 + RA_TEXT_INK)
+#define OVERLAY_PAL_SHADOW (OVERLAY_PAL_BANK * 16 + RA_TEXT_SHADOW)
+
+/* The two colours themselves: white text over black, which is the pairing that survives any
+   background the game puts underneath it. */
+#define OVERLAY_INK_COLOUR    0x7FFF
+#define OVERLAY_SHADOW_COLOUR 0x0000
+
+/*
+    Which character row of the sub screen the strip sits on, counting from the top.
+
+    Row 1 rather than the middle of the screen, because a notification belongs out of the way and
+    the way is wherever the game is being played. Not row 0: flush against the top edge reads as a
+    rendering fault on a screen with any bezel at all, and one row of clearance costs eight pixels.
+    The horizontal half of the same decision lives in ra_text.c, which right-aligns the text against
+    RA_TEXT_MARGIN -- together they put the message in the top right corner.
+*/
+#define OVERLAY_ROW 1
 
 /*
     Frames the notification stays up, and it is three seconds again rather than whatever the tick rate
@@ -240,6 +257,7 @@ static u16  savedBgCnt;
 static u16  savedHofs;
 static u16  savedVofs;
 static u16  savedPaletteEntry;
+static u16  savedPaletteShadow;
 static bool savedDispcntBg;
 /*
     The object path's state. `usingSprites` is what hide() and the per-frame hold branch on: the two
@@ -251,6 +269,7 @@ static u8   spriteSlot;
 static u32  spriteBase;
 static u32  spriteTile;
 static u16  savedObjPaletteEntry;
+static u16  savedObjPaletteShadow;
 
 /* Read into the snapshot, so the negotiation is observable rather than guessed at. */
 u32 raOverlayShows;
@@ -561,8 +580,10 @@ static void draw(int b, const void* text) {
 	int i;
 
 	overlayStateFor(layer, block);
-	savedPaletteEntry = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
-	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = 0x7FFF;  /* white */
+	savedPaletteEntry  = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
+	savedPaletteShadow = SUB_BG_PALETTE[OVERLAY_PAL_SHADOW];
+	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
+	SUB_BG_PALETTE[OVERLAY_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
 
 	/*
 	    Copied, not generated. This used to hold eleven glyphs in message order and expand them a bit at
@@ -620,7 +641,8 @@ static void draw(int b, const void* text) {
 #define SUB_OBJ_VRAM   0x06600000
 /* Sub engine object palette: sixteen banks of sixteen, alongside the background one. */
 #define SUB_OBJ_PALETTE ((vu16*)0x05000600)
-#define OBJ_PAL_ENTRY   (OVERLAY_PAL_BANK * 16 + OVERLAY_PAL_INDEX)
+#define OBJ_PAL_ENTRY   (OVERLAY_PAL_BANK * 16 + RA_TEXT_INK)
+#define OBJ_PAL_SHADOW  (OVERLAY_PAL_BANK * 16 + RA_TEXT_SHADOW)
 
 #define OAM_ENTRIES 128
 #define RA_SPRITES  8            /* 8 x 32px = 256px, the screen's width */
@@ -853,8 +875,10 @@ static bool spriteShow(const void* text) {
 	raOverlaySpriteOam  = spriteOam[0];
 	raOverlaySpriteSlot = (u8)slot;
 
-	savedObjPaletteEntry = SUB_OBJ_PALETTE[OBJ_PAL_ENTRY];
-	SUB_OBJ_PALETTE[OBJ_PAL_ENTRY] = 0x7FFF;   /* white */
+	savedObjPaletteEntry  = SUB_OBJ_PALETTE[OBJ_PAL_ENTRY];
+	savedObjPaletteShadow = SUB_OBJ_PALETTE[OBJ_PAL_SHADOW];
+	SUB_OBJ_PALETTE[OBJ_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
+	SUB_OBJ_PALETTE[OBJ_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
 
 	spriteBlit(spriteBase, text);
 	for (k = 0; k < RA_SPRITES; k++) {
@@ -876,7 +900,8 @@ static void spriteHide(void) {
 		SUB_OAM[i * 4 + 1] = 0;
 		SUB_OAM[i * 4 + 2] = 0;
 	}
-	SUB_OBJ_PALETTE[OBJ_PAL_ENTRY] = savedObjPaletteEntry;
+	SUB_OBJ_PALETTE[OBJ_PAL_ENTRY]  = savedObjPaletteEntry;
+	SUB_OBJ_PALETTE[OBJ_PAL_SHADOW] = savedObjPaletteShadow;
 	usingSprites = 0;
 }
 
@@ -970,7 +995,8 @@ static void hide(void) {
 	if (!savedDispcntBg) {
 		SUB_DISPCNT &= ~(1u << (8 + layer));
 	}
-	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY] = savedPaletteEntry;
+	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY]  = savedPaletteEntry;
+	SUB_BG_PALETTE[OVERLAY_PAL_SHADOW] = savedPaletteShadow;
 }
 
 void ra_overlay_tick(u32 unlocks, const void* text) {

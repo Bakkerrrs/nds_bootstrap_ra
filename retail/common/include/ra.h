@@ -698,6 +698,27 @@ typedef struct raSnapshot {
 #define RA_TEXT_BYTES (RA_TEXT_WORDS * 4)
 
 /*
+    Columns left clear at the right-hand end, and the message is right-aligned against them.
+
+    One column, and it earns its keep twice. The strip is exactly the width of the screen, so text
+    flush against column 31 is text touching the bezel -- and the drop shadow below hangs a pixel to
+    the right of every glyph, which at column 31 would fall off the strip and be clipped away on the
+    one character where its absence is most visible.
+*/
+#define RA_TEXT_MARGIN 1
+
+/*
+    The two colour indices the glyphs use, and they are here for the same reason the geometry is:
+    ra_text.c writes these nibbles and ra_overlay.c is what makes them a colour. They were a literal
+    1 on one side and an OVERLAY_PAL_INDEX on the other, which agreed only because nobody had had a
+    reason to change either. This project has paid for that shape of coupling more than once.
+
+    Index 0 stays the tile's transparency, so the game shows through everywhere the text does not.
+*/
+#define RA_TEXT_INK    1
+#define RA_TEXT_SHADOW 2
+
+/*
     How far rcheevos got, reported for the same reason RA_STAGE_* is: each step can fail
     for its own reason, and without this they all present as an achievement that does not
     unlock.

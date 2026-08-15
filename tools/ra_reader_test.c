@@ -237,17 +237,23 @@ static void wifi_feed_lines(raWifiVerdict* v, const char* const* lines) {
 }
 
 /*
-    Which nibbles of a 4bpp tile word carry ink, as a bitmask of pixel columns.
+    Which nibbles of a 4bpp tile word carry a given colour index, as a bitmask of pixel columns.
 
-    A mask rather than a nibble value, so a test can say "the ink spans columns 1 to 6" without
-    caring what colour index it is or how the font is bearing-shifted. See span().
+    A mask rather than a position, so a test can say "the ink spans columns 1 to 6" without caring
+    how the font is bearing-shifted. See span().
+
+    It takes the colour rather than testing for non-zero, and that is not generality for its own
+    sake: the glyphs are drawn in two colours now, ink over a drop shadow, so "something is set
+    here" can no longer tell an ink pixel from the shadow of the letter to its left -- and the whole
+    question the shadow raises, whether the ink still wins where the two overlap, is invisible to a
+    mask that ignores the value.
 */
-static u32 nibbleSpan(u32 word) {
+static u32 nibbleSpanOf(u32 word, u32 colour) {
 	u32 mask = 0;
 	int n;
 
 	for (n = 0; n < 8; n++) {
-		if (((word >> (n * 4)) & 0xF) != 0) {
+		if (((word >> (n * 4)) & 0xF) == colour) {
 			mask |= 1u << n;
 		}
 	}
@@ -1333,46 +1339,76 @@ int main(void) {
 		    and it is free to change. What is asserted is where the ink sits relative to the word.
 		*/
 		const u32* strip = (const u32*)ra_text_render("L", 0);
-		const int  col   = (RA_TEXT_COLS - 1) / 2;   /* one character, centred */
+		const int  col   = RA_TEXT_COLS - RA_TEXT_MARGIN - 1;   /* one character, right-aligned */
 		const u32* tile  = &strip[col * 8];
 		int        y;
 		int        uprightRows = 0;
 
 		/* The foot spans nibbles 1 to 6. */
-		CHECK(nibbleSpan(tile[6]) == span(1, 6));
+		CHECK(nibbleSpanOf(tile[6], RA_TEXT_INK) == span(1, 6));
 		/* The upright spans nibbles 1 to 2, on every row above the foot. */
 		for (y = 0; y < 6; y++) {
-			if (nibbleSpan(tile[y]) == span(1, 2)) {
+			if (nibbleSpanOf(tile[y], RA_TEXT_INK) == span(1, 2)) {
 				uprightRows++;
 			}
 		}
 		CHECK(uprightRows == 6);
-		/* Row 7 is the gap the font leaves between lines. */
-		CHECK(tile[7] == 0);
-		/* Every set pixel is colour index 1, which is the single entry the overlay borrows. */
+		/* Row 7 carries no ink: it is the gap the font leaves between lines. */
+		CHECK(nibbleSpanOf(tile[7], RA_TEXT_INK) == 0);
+		/* Every set pixel is one of the two entries the overlay borrows, and nothing else. */
 		{
 			int bad = 0;
 			for (y = 0; y < 8; y++) {
 				int n;
 				for (n = 0; n < 8; n++) {
 					const u32 nib = (tile[y] >> (n * 4)) & 0xF;
-					if (nib != 0 && nib != 1) {
+					if (nib != 0 && nib != RA_TEXT_INK && nib != RA_TEXT_SHADOW) {
 						bad++;
 					}
 				}
 			}
 			CHECK(bad == 0);
 		}
+
+		/*
+		    And the drop shadow, on the same glyph, which is where it can be stated exactly.
+
+		    'L' is an upright at columns 1-2 over a foot at columns 1-6, so its shadow is an upright
+		    at 2-3 over a foot at 2-7, one row lower. Ink is drawn second, so wherever the two want
+		    the same pixel the ink has it -- which on rows 1 to 5 leaves the shadow a single visible
+		    column at 3, and on row 6 leaves it nothing at all. That asymmetry is the assertion
+		    worth making: a shadow drawn *after* the ink would read as span(2,3) there and would
+		    look, on a photograph, like a font with a notch bitten out of it.
+		*/
+		CHECK(nibbleSpanOf(tile[0], RA_TEXT_SHADOW) == 0);          /* nothing above the first row */
+		for (y = 1; y <= 5; y++) {
+			CHECK(nibbleSpanOf(tile[y], RA_TEXT_SHADOW) == span(3, 3));
+		}
+		CHECK(nibbleSpanOf(tile[6], RA_TEXT_SHADOW) == 0);          /* the foot's ink covers it */
+		CHECK(nibbleSpanOf(tile[7], RA_TEXT_SHADOW) == span(2, 7)); /* the foot's own shadow */
 	}
 
-	printf("\n...centred, clipped, and never showing the previous message\n");
+	printf("\n...right-aligned, clipped, and never showing the previous message\n");
 	{
 		const u32* strip;
+		const int  last = RA_TEXT_COLS - RA_TEXT_MARGIN - 1;
 
-		/* Two lines land on the two rows, and each is centred on its own. */
+		/* Two lines land on the two rows, and each is right-aligned on its own. */
 		strip = (const u32*)ra_text_render("A", "A");
-		CHECK(strip[((RA_TEXT_COLS - 1) / 2) * 8 + 2] != 0);
-		CHECK(strip[(RA_TEXT_COLS + (RA_TEXT_COLS - 1) / 2) * 8 + 2] != 0);
+		CHECK(strip[last * 8 + 2] != 0);
+		CHECK(strip[(RA_TEXT_COLS + last) * 8 + 2] != 0);
+
+		/*
+		    The margin column is what the shadow hangs into, and 'd' is the proof rather than an
+		    illustration: its bowl reaches pixel 7 of its cell, so its shadow reaches pixel 8 --
+		    which is column 31, the margin. Right-aligned flush against the edge instead, that pixel
+		    would fall off the strip, and the last character of every message would be the one
+		    missing its shadow.
+		*/
+		strip = (const u32*)ra_text_render(0, "d");
+		CHECK(nibbleSpanOf(strip[(RA_TEXT_COLS + last) * 8], RA_TEXT_INK) == span(6, 7));
+		CHECK(nibbleSpanOf(strip[(RA_TEXT_COLS + RA_TEXT_COLS - 1) * 8 + 1], RA_TEXT_SHADOW)
+		      == span(0, 0));
 
 		/*
 		    A long title is clipped to the strip rather than wrapping into the row below or running

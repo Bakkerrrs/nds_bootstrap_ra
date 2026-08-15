@@ -2923,7 +2923,7 @@ upstream nds-bootstrap: no reader, no overlay, and no `IRQ_VCOUNT` forced on.
 Development and testing happen on a 3DS, and nothing else has ever been tried. Two of
 the things this fork does are real behaviour changes to a running game — forcing a
 VCOUNT interrupt on for games that never enabled one, and borrowing a background layer
-and a palette entry from the sub engine. Both are the kind of thing that shows up as an
+and palette entries from the sub engine. Both are the kind of thing that shows up as an
 intermittent oddity rather than a crash, which is exactly what a console nobody is
 testing on cannot be trusted to reveal. Shipping them to a DSi on the strength of "it
 should work" is not a trade worth making.
@@ -5729,7 +5729,7 @@ None of them can crash a game or corrupt a save.
 | # | Limitation | Severity | Observed? |
 | --- | --- | --- | --- |
 | 1 | Collides with the in-game menu on the frame it opens | cosmetic, transient | yes, once |
-| 2 | Borrows one palette entry the game may be using | cosmetic, transient | not since the fix |
+| 2 | Borrows two palette entries the game may be using | cosmetic, transient | not since the fix |
 | 3 | `surveyBlocks()` mis-reads non-text backgrounds | ~~**could corrupt graphics**~~ **fixed** | no |
 | 4 | Cannot choose which physical screen it appears on | design decision | yes, by design |
 | 5 | Silently skips notifications when no layer is free | design decision | yes, 5 of 18 attempts |
@@ -5741,11 +5741,13 @@ after the palette fix. No achievement is going to unlock on the exact frame the 
 opens, so the exposure is close to nil. The clean fix is for the overlay to stand down
 while the menu is up, which needs a way to know the menu is up.
 
-**2 — the borrowed palette entry.** The text has to be *some* colour, so one entry of the
-sub background palette is taken and restored on hide. Which entries a game is using is
-not discoverable from the registers, so there is no way to pick a provably free one. One
-entry is the floor this design has; it was fifteen until phase 1 found that the glyphs
-only ever use one.
+**2 — the borrowed palette entries.** The text has to be *some* colour, so entries of the
+sub background palette are taken and restored on hide. Which entries a game is using is
+not discoverable from the registers, so there is no way to pick a provably free one. It
+was fifteen until phase 1 found that the glyphs only ever used one, and it is two now:
+the drop shadow needs a colour of its own, and white glyphs without one are legible only
+where the game's artwork happens to be dark. Two is the floor this design has while the
+text has an outline at all, and both are saved and put back the same way the one was.
 
 **3 — the only one that could actually corrupt something.** `surveyBlocks()` reads every
 enabled layer's `BGCNT` as though it were a text background — character base in 16K
@@ -6390,6 +6392,85 @@ in the copy, never in the consumption — and the host suite pins that specific 
 
 Everything after the id stays optional and positional. A bare id, typed by hand or queued by an older
 build, parses as it always did. A record that has a stamp but no game keeps its stamp.
+
+## The notification moves to the corner and grows a shadow
+
+Three changes to how the notification presents itself, asked for together and worth writing down
+together because two of them are the same decision seen from different sides.
+
+### `RA UNLOCKED` becomes `ACHIEVEMENT`
+
+The heading was a debugging label that outlived its job. `RA UNLOCKED` said *the RetroAchievements
+code in this fork fired*, which is a sentence about the implementation, and it was the right thing to
+print back when "something fired" was the only reading available. The line underneath now carries the
+achievement's own name, so the heading's only remaining job is to tell a player that the words below
+are not part of the game they are playing. `ACHIEVEMENT` does that and says nothing about how.
+
+One character of this is a judgement call rather than a transcription: the request was written
+`ACHIVEMENT`, which is the ordinary typo for the word, and the string is user-visible. It went in
+spelled correctly. Reverting is a one-character edit at `RA_TEXT_HEADING`.
+
+### The message right-aligns, and the strip moves to row 1
+
+`OVERLAY_ROW` was 10, which on a 24-row screen is the middle. That was never a decision — the overlay
+had one row to be in and the middle was where it landed. It is 1 now: the top of the screen, with one
+row of clearance rather than flush against the edge, because flush against the edge reads as a
+rendering fault on a panel with any bezel at all.
+
+The horizontal half is subtler, and it is the reason the two changes belong together. **The strip is
+already the full width of the screen** — 32 tiles, 256 pixels, drawn as eight sprites side by side —
+so there is no such thing as moving it right. Moving the strip up and leaving the text centred inside
+it would have produced a message still floating in the middle of the screen, only higher: the same
+complaint with a different Y. So the corner is made of two independent pieces, `OVERLAY_ROW` in
+`ra_overlay.c` and the alignment in `ra_text.c`, and only both of them together are "the top right".
+
+`RA_TEXT_MARGIN` is one column, kept clear at the right-hand end, and it earns its keep twice: text
+flush against column 31 is text touching the bezel, and the shadow below hangs a pixel to the right of
+every glyph — at column 31 that pixel falls off the strip and is clipped, on the one character where
+its absence is most visible. `d` and `5` are the proof rather than the illustration: their bowls reach
+pixel 7 of their cell, so their shadows reach pixel 8, which is the next tile.
+
+### The shadow, and why it needed the renderer rewritten
+
+A drop shadow was the biggest available readability win, and the cost is stated plainly: **a second
+borrowed palette entry**, listed below as limitation 2. White glyphs on a game's own artwork are
+legible exactly where the artwork happens to be dark, which is not a property any game guarantees;
+white over black is legible over anything.
+
+What made this more than a second loop was the geometry. A glyph used to be written as eight whole
+words into the one tile it belonged to — the fastest thing possible, and structurally incapable of
+drawing a shadow, because a shadow is the same glyph one pixel right and one pixel down and *a pixel
+right of column 7 is the next tile*. Composing whole words can only draw shapes that respect the 8×8
+grid, and a drop shadow is defined by not respecting it. So `ra_text.c` gained `raTextPixel()`,
+addressing the strip as if it were a 256×16 bitmap, and everything above it works in pixels. Out of
+range is dropped rather than wrapped: a shadow hanging off the bottom row is the ordinary case for a
+descender, and wrapping it would put a smear at the far end of the row above.
+
+The pass order is a correctness argument, not a preference. **Both shadows first, then both glyphs** —
+not shadow-then-glyph per letter. A shadow is drawn a pixel into its neighbour's cell and the row-0
+shadow of a descender lands inside row 1, so interleaving would let a later letter's shadow fall on an
+earlier letter's ink: a grey notch bitten out of a white stroke, which on a photograph of a
+three-second toaster reads as a broken font rather than as an ordering bug.
+
+`RA_TEXT_INK` and `RA_TEXT_SHADOW` moved into `ra.h` next to the geometry, and that is the same lesson
+this project keeps re-learning. `ra_text.c` wrote a literal `1` and `ra_overlay.c` defined
+`OVERLAY_PAL_INDEX 1`, two constants in two files that had to agree and agreed only because nobody had
+had a reason to change either. Adding a second colour is exactly that reason.
+
+### What the host suite pins
+
+The nibble-order test on `L` is now stated in two colours instead of one, and it is a stronger test for
+it. `nibbleSpan()` became `nibbleSpanOf(word, colour)`, because "something is set here" can no longer
+tell ink from the shadow of the letter to its left.
+
+`L` is an upright at columns 1–2 over a foot at columns 1–6, so its shadow is an upright at 2–3 over a
+foot at 2–7, one row lower. Ink is drawn second, so on rows 1–5 the shadow has a single visible column
+at 3, and on row 6 the foot's ink covers it entirely. **That asymmetry is the assertion worth making**:
+a shadow drawn after the ink would read as `span(2,3)` on those rows, which is the notched-font bug
+above, caught by arithmetic instead of by a photograph.
+
+Right alignment is pinned on `d` at the last usable column, with the shadow asserted to land in
+column 31 — so the margin is checked to be doing the job it exists for, rather than merely existing.
 
 ## Status
 

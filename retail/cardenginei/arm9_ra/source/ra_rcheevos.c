@@ -283,7 +283,7 @@ static const void* textStrip;
     the heading says a RetroAchievements unlock just happened and the title says which. A bare game
     phrase appearing over a game would read as part of the game.
 */
-#define RA_TEXT_HEADING "RA UNLOCKED"
+#define RA_TEXT_HEADING "ACHIEVEMENT"
 
 /*
     Where the rendered notification is, for the overlay -- which lives beside this file now rather than

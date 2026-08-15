@@ -133,30 +133,60 @@ static const u8 raFont[RA_FONT_LAST - RA_FONT_FIRST + 1][8] = {
 */
 static u32 raTextStrip[RA_TEXT_WORDS] __attribute__((aligned(4)));
 
-/* Characters to the first NUL, stopping at the strip's width. */
+/* How many columns a line may occupy: the strip, less the margin the shadow hangs into. */
+#define RA_TEXT_USABLE (RA_TEXT_COLS - RA_TEXT_MARGIN)
+
+/* Characters to the first NUL, stopping at what a line may occupy. */
 static int raTextLength(const char* s) {
 	int n = 0;
 
 	if (!s) {
 		return 0;
 	}
-	while (s[n] && n < RA_TEXT_COLS) {
+	while (s[n] && n < RA_TEXT_USABLE) {
 		n++;
 	}
 	return n;
 }
 
 /*
-    One glyph into one tile of one row.
+    One pixel of the strip, addressed as if it were a 256x16 bitmap.
 
-    Colour index 1 for every set pixel, which is the whole reason the overlay only has to borrow a
-    single palette entry from the game -- see OVERLAY_PAL_INDEX. The leftmost pixel is the *lowest*
-    nibble, because that is how the DS reads a 4bpp tile.
+    This is the change that made the shadow possible, and it is worth saying why the tile-at-a-time
+    version could not do it. A glyph used to be written as eight whole words into the one tile it
+    belonged to. A shadow is the same glyph a pixel right and a pixel down, and a pixel right of
+    column 7 is *the next tile* -- so the offset copy of a letter does not live in the letter's tile
+    at all. Composing whole words could only ever draw shapes that respect the 8x8 grid, and a drop
+    shadow is defined by not respecting it.
+
+    So the coordinate arithmetic moves here, once, and everything above it works in pixels. Out of
+    range is dropped rather than wrapped: a shadow hanging off the bottom row is the ordinary case
+    for a descender, and wrapping it would put a smear at the far end of the row above.
+
+    The leftmost pixel is the *lowest* nibble, because that is how the DS reads a 4bpp tile.
 */
-static void raTextGlyph(int row, int col, char c) {
+static void raTextPixel(int x, int y, u32 colour) {
+	u32* word;
+	int  shift;
+
+	if (x < 0 || x >= RA_TEXT_COLS * 8 || y < 0 || y >= RA_TEXT_ROWS * 8) {
+		return;
+	}
+	word  = &raTextStrip[((y / 8) * RA_TEXT_COLS + (x / 8)) * 8 + (y & 7)];
+	shift = (x & 7) * 4;
+	*word = (*word & ~(0xFu << shift)) | (colour << shift);
+}
+
+/*
+    One glyph at a character cell, displaced by (dx, dy) pixels and drawn in one colour.
+
+    Two colours are used rather than one -- RA_TEXT_INK and RA_TEXT_SHADOW -- so the overlay borrows
+    two palette entries from the game instead of one. That is a real cost and it is the whole price
+    of this: see the note on ra_text_render().
+*/
+static void raTextGlyph(int row, int col, char c, int dx, int dy, u32 colour) {
 	const u8* rows;
-	u32*      tile;
-	int       y;
+	int       x, y;
 
 	if ((u8)c < RA_FONT_FIRST || (u8)c > RA_FONT_LAST) {
 		/*
@@ -168,29 +198,36 @@ static void raTextGlyph(int row, int col, char c) {
 		c = ' ';
 	}
 	rows = raFont[(u8)c - RA_FONT_FIRST];
-	tile = &raTextStrip[(row * RA_TEXT_COLS + col) * 8];
 
 	for (y = 0; y < 8; y++) {
 		const u8 bits = rows[y];
-		u32      out  = 0;
-		int      x;
 
 		for (x = 0; x < 8; x++) {
 			if (bits & (0x80 >> x)) {
-				out |= 1u << (x * 4);
+				raTextPixel(col * 8 + x + dx, row * 8 + y + dy, colour);
 			}
 		}
-		tile[y] = out;
 	}
 }
 
-static void raTextLine(int row, const char* s) {
+/*
+    One line, right-aligned against the margin.
+
+    Centred until now, and the reason for the change is where the strip sits rather than how it
+    looks on its own: the notification moved to the top right of the screen, so a centred line
+    inside a full-width strip would leave the message floating in the middle again with only its
+    height changed. Right-aligned, the text ends where the corner is.
+
+    A line longer than the strip is clipped by raTextLength() before it gets here, so `start` cannot
+    go negative and a long title loses its tail rather than running off the left edge.
+*/
+static void raTextLine(int row, const char* s, int dx, int dy, u32 colour) {
 	const int n     = raTextLength(s);
-	const int start = (RA_TEXT_COLS - n) / 2;
+	const int start = RA_TEXT_USABLE - n;
 	int       i;
 
 	for (i = 0; i < n; i++) {
-		raTextGlyph(row, start + i, s[i]);
+		raTextGlyph(row, start + i, s[i], dx, dy, colour);
 	}
 }
 
@@ -207,7 +244,16 @@ const void* ra_text_render(const char* line1, const char* line2) {
 		raTextStrip[i] = 0;
 	}
 
-	raTextLine(0, line1);
-	raTextLine(1, line2);
+	/*
+	    Both shadows first, then both glyphs. Not per-glyph, and the ordering is the correctness
+	    argument rather than a preference: a shadow is drawn a pixel into its neighbour's cell, and
+	    the row-0 shadow of a descender lands inside row 1. Interleaving the two passes would let a
+	    later letter's shadow fall on an earlier letter's ink -- a grey notch bitten out of a white
+	    stroke, which reads as a broken font rather than as an ordering bug.
+	*/
+	raTextLine(0, line1, 1, 1, RA_TEXT_SHADOW);
+	raTextLine(1, line2, 1, 1, RA_TEXT_SHADOW);
+	raTextLine(0, line1, 0, 0, RA_TEXT_INK);
+	raTextLine(1, line2, 0, 0, RA_TEXT_INK);
 	return raTextStrip;
 }
