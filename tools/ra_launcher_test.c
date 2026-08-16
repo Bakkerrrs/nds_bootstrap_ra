@@ -1751,7 +1751,14 @@ static void test_queue(void) {
 		    session its RAM editor.
 		*/
 		CHECK(offsetof(raSessionBlock, hardcore) == CARDENGINEI_ARM9_RA_SESSION_HARDCORE_OFFSET);
+		CHECK(offsetof(raSessionBlock, refusal) == CARDENGINEI_ARM9_RA_SESSION_REFUSAL_OFFSET);
+		CHECK(RA_REFUSED_CHEATS == CARDENGINEI_ARM9_RA_SESSION_REFUSED_CHEATS);
 		CHECK(RA_CHEATS_MIN_BYTES == CARDENGINEI_ARM9_RA_CHEATS_MIN_BYTES);
+		/*
+		    And the flag really is a flag. The RAM viewer and the unlock path both read it as a
+		    capability with `!= 0`, so a field that grew a third value would grant hardcore to it.
+		*/
+		CHECK(sizeof(((raSessionBlock*)0)->hardcore) == 1);
 		/*
 		    And the four regions do not overlap: the definitions end where the session block begins,
 		    that ends where the viewer's index begins, and that ends where the pending tally does.

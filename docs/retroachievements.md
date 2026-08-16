@@ -6779,6 +6779,11 @@ Menu**. The log should say `hardcore refused: the cheat engine runs for this ROM
 TWiLight and boot again — `cheatData.bin` is still on the card at that point, which is exactly the
 case the old `!= 0` check got wrong — and hardcore should come back.
 
+**The menu answers all of this without the log**, which is the cheapest way to read the result: open
+`Achievements...` and the line above `RetroAchievements` says `Hardcore -- RAM editing locked`,
+`Softcore -- cheats are on` or `Softcore`. If it says `No session this boot` on a 3DS boot that
+staged the RA window, something upstream of everything here is wrong and the log is the next stop.
+
 With `hardcore=0`, or with `ra.cfg` absent, the log should say `RAM editing unchanged -- softcore`
 and the viewer should edit exactly as it always has. That second boot is the one that matters most:
 the failure this change can plausibly introduce is not a hardcore session that edits, it is every
@@ -6867,6 +6872,57 @@ read this line first and expect to pay for it somewhere else.
 
 The three other tight variants are unaffected in kind: `dsiware` 2,612 bytes, `cheat` 3,064, the
 plain and `alt` builds 11,844.
+
+## The menu says which mode the session is in, and why
+
+Everything above changed what the loader *does* without changing what a player can *see*. The only
+visible trace of hardcore was a refusal in the RAM viewer, which is two pages deep and only appears
+if you go looking for the one thing that is now forbidden.
+
+So the RetroAchievements folder carries a line, above its own name:
+
+| What it says | When |
+| --- | --- |
+| `Hardcore -- RAM editing locked` | the session is hardcore |
+| `Softcore -- cheats are on` | hardcore was asked for and the cheat engine took it |
+| `Softcore` | `ra.cfg` says softcore, or there is no `ra.cfg` |
+| `No session this boot` | no launcher staged a session — a plain build, or a console with no RA window |
+
+A line rather than a page. It is one fact, and a page for one fact charges a button press for
+nothing. The folder's own comment has said since it was written that it exists so that "forcing a
+sync, reading the launcher's log or **showing the session** have somewhere to go that is not the
+root menu" — this is that.
+
+### The reason is the half that earns it
+
+`Softcore` on its own answers a question nobody was asking. The player who needs this screen is the
+one who set `hardcore=1`, is looking at a softcore session, and wants to know what took it — and
+before this line, the only answer available was to power the console off, take the card out, and
+read `ra_wifi_launcher.log` on a PC.
+
+So the session block grew a `refusal` byte beside the flag. A reason code rather than a string,
+because it crosses into a binary with no formatter and the set of reasons is small and closed. It is
+open at the end deliberately: the User-Agent is the refusal this project expects to add next, and it
+will cost a number and a line.
+
+The bootloader sets the reason when it takes hardcore away for cheats, and **only when there was
+something to take**: writing it on a session that never asked would have the menu explaining a
+refusal that never happened.
+
+### `hardcore` stays a flag
+
+The obvious economy was to fold the reason into the existing byte and make it an enum — `0`
+softcore, `1` hardcore, `2` refused-for-cheats. It is refused here, and the host suite pins the byte
+at one byte to keep it refused.
+
+Two things read that byte as a *capability*: the RAM viewer deciding whether to open its editor, and
+the unlock path deciding which magic to send. Both test `!= 0`. Against an enum, a third value added
+later would read as hardcore in exactly the two places where being wrong is expensive. The reason is
+display-only, nothing gates on it, and it lives in its own byte where it cannot be mistaken for
+permission.
+
+`cardenginei_arm9_igm` grew 280 bytes for the line and the block's second field, to 21,428 of the
+28,160 the B4DS layout allows.
 
 ## "A cheat file exists" was never the question
 
@@ -6993,6 +7049,11 @@ what the rules say about when it may be sent.
       half of `raWifiHardcoreRefused()`: the gate now refuses for a cheat file and for
       nothing else. **Built and host-tested; not yet confirmed on hardware** — see "What
       to look for on the next run" in that section.
+- [x] **The menu says which mode the session is in, and why.** A line in the
+      RetroAchievements folder: `Hardcore -- RAM editing locked`,
+      `Softcore -- cheats are on`, `Softcore`, or `No session this boot`. The reason is the
+      half that earns it — before this, a player who asked for hardcore and got softcore
+      could only find out why by reading the launcher's log on a PC.
 - [x] **The cheat check asks whether cheats are *on*, not whether a file exists.** It was
       `conf->cheatSize != 0`, which missed wide cheats and AP patches that are really cheat
       files — both of which run the engine — and which refused hardcore to a player who had

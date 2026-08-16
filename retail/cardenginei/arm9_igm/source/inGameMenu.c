@@ -845,8 +845,47 @@ static void raAchievementsPage(void) {
 }
 
 /*
-    The folder. One entry today, and it is a folder rather than a page so that forcing a sync, reading
-    the launcher's log or showing the session have somewhere to go that is not the root menu.
+    Which mode this session is in, and when it is not the one the player asked for, why.
+
+    A line in the folder rather than a page of its own: it is one fact, and a page for one fact is a
+    button press charged for nothing. It sits above the folder's own name so the two read as one
+    footer -- what this is, and what it is doing right now.
+
+    **The reason is the half that earns it.** "Softcore" alone answers a question nobody was asking;
+    a player who set `hardcore=1` and is looking at this screen wants to know what took it away, and
+    without this the only answer available is to power off, take the card out and read
+    `ra_wifi_launcher.log` on a PC.
+
+    The `hardcore` case says what changed rather than only what it is called, because the visible
+    consequence of hardcore in this menu is two pages away in the RAM viewer, and a player who finds
+    that refusal first should not have to guess which setting caused it.
+*/
+static void raSessionLine(int row) {
+	const raSessionBlock* const s = (const raSessionBlock*)CARDENGINEI_ARM9_RA_SESSION_LOCATION;
+
+	if (s->magic != RA_SESSION_MAGIC) {
+		/*
+		    Same distinction the pending page draws, and for the same reason: no launcher told this
+		    boot anything, which is a different state from being told softcore.
+		*/
+		print(1, row, (unsigned char*)"No session this boot", FONT_DARKER_GRAY, false);
+	} else if (s->hardcore) {
+		print(1, row, (unsigned char*)"Hardcore -- RAM editing locked", FONT_LIME, false);
+	} else if (s->refusal == RA_REFUSED_CHEATS) {
+		/*
+		    Red, although enabling cheats is a deliberate act and not an error. What is not
+		    deliberate is the consequence, and a player who turned on one cheat months ago is
+		    exactly the one who has not connected it to the mode this session is running in.
+		*/
+		print(1, row, (unsigned char*)"Softcore -- cheats are on", FONT_RED, false);
+	} else {
+		print(1, row, (unsigned char*)"Softcore", FONT_LIGHT_GRAY, false);
+	}
+}
+
+/*
+    The folder. Two entries today, and it is a folder rather than a page so that forcing a sync or
+    reading the launcher's log have somewhere to go that is not the root menu.
 */
 static void raMenu(void) {
 	int cursor = 0;
@@ -855,6 +894,7 @@ static void raMenu(void) {
 		clearScreen(false);
 		print(2, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
 		print(2, 1, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
+		raSessionLine(0x18 - 5);
 		/*
 		    The folder names itself down here, where the main menu names the program, rather than as
 		    a header above its own items -- which read as the same page twice on the way to them.

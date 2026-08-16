@@ -2441,6 +2441,18 @@ int arm7_main(void) {
 				    fork lying to itself before it lied to the server.
 				*/
 				if (cheatSizeTotal > CARDENGINEI_ARM9_RA_CHEATS_MIN_BYTES) {
+					/*
+					    The reason goes in beside the flag, and only when there was
+					    something to take away. Setting it on a session that never
+					    asked for hardcore would have the menu explaining a refusal
+					    that never happened.
+					*/
+					if (*(u8*)(CARDENGINEI_ARM9_RA_SESSION_LOCATION
+					           + CARDENGINEI_ARM9_RA_SESSION_HARDCORE_OFFSET)) {
+						*(u8*)(CARDENGINEI_ARM9_RA_SESSION_LOCATION
+						       + CARDENGINEI_ARM9_RA_SESSION_REFUSAL_OFFSET) =
+							CARDENGINEI_ARM9_RA_SESSION_REFUSED_CHEATS;
+					}
 					*(u8*)(CARDENGINEI_ARM9_RA_SESSION_LOCATION
 					       + CARDENGINEI_ARM9_RA_SESSION_HARDCORE_OFFSET) = 0;
 				}

@@ -2012,15 +2012,15 @@ bool raWifiShutdown(void) {
     available until that is answered -- see "What is left" in docs/retroachievements.md. What this
     change buys is that the answer is now the only thing in the way.
 */
-static bool raWifiHardcoreRefused(const raConfig* cfg, bool cheatsOn) {
+static u8 raWifiHardcoreRefused(const raConfig* cfg, bool cheatsOn) {
 	if (!cfg->hardcore) {
-		return false;
+		return RA_REFUSED_NONE;
 	}
 	if (cheatsOn) {
 		raWifiLog("\x1b[33mhardcore refused: the cheat engine runs for this ROM\x1b[37m\n");
-		return true;
+		return RA_REFUSED_CHEATS;
 	}
-	return false;
+	return RA_REFUSED_NONE;
 }
 
 /*
@@ -2036,14 +2036,19 @@ static bool raWifiHardcoreRefused(const raConfig* cfg, bool cheatsOn) {
     Written after raWifiHardcoreRefused() has had its say, so what the menu is handed is the mode the
     session will actually run in rather than the one ra.cfg asked for.
 
+    `refusal` rides along so the in-game menu can say *why* rather than only *what*. A player who set
+    hardcore=1 and is playing softcore has exactly one question, and the alternative answer to it is
+    "take the card out and read a log on a PC".
+
     The magic goes in last, for the reason the other three blocks give: the staging region is
     uninitialised, conf_sd.cpp cleared this word on its way past, and the bootloader trusts it.
 */
-static void raWifiStageSession(int hardcore) {
+static void raWifiStageSession(int hardcore, u8 refusal) {
 	raSessionBlock* const block = (raSessionBlock*)CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION;
 
 	block->hardcore = hardcore ? 1 : 0;
-	block->pad[0] = block->pad[1] = block->pad[2] = 0;
+	block->refusal  = refusal;
+	block->pad[0] = block->pad[1] = 0;
 	block->magic = RA_SESSION_MAGIC;
 
 	raWifiLog("in-game menu     RAM editing %s\n",
@@ -2054,6 +2059,12 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	raWifiSdFound = sdFound;
 	static raConfig config;
 	int             stage;
+	/*
+	    Why hardcore was refused, if it was, carried from the gate down to the staging call so the
+	    in-game menu can say it. Declared out here rather than beside the gate because the gate runs
+	    inside `if (config.found)` and the staging call has to happen either way.
+	*/
+	u8              refusal = RA_REFUSED_NONE;
 
 	logFile = fopen(sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT, "w");
 
@@ -2128,7 +2139,8 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 		    session will actually run in. Deciding it later would sign the login one way and the
 		    awards another.
 		*/
-		if (raWifiHardcoreRefused(&config, cheatsOn)) {
+		refusal = raWifiHardcoreRefused(&config, cheatsOn);
+		if (refusal) {
 			config.hardcore = 0;
 			raWifiLog("hardcore         falling back to softcore\n");
 		}
@@ -2152,7 +2164,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	    unknown one, and the menu should be told that rather than left to infer it from silence.
 	    Above the exits because the exits are the common case: see raWifiStageSession().
 	*/
-	raWifiStageSession(config.hardcore);
+	raWifiStageSession(config.hardcore, refusal);
 
 	/*
 	    `sync=0`: stop here, before a single register of the radio is touched.

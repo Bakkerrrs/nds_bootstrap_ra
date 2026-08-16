@@ -349,10 +349,28 @@ typedef struct raPendingBlock {
     evaluates achievements does not consult it: it queues what it earns, and whether that queue may
     be sent as hardcore was decided here, at boot, by the same word.
 */
+/*
+    Why hardcore was not granted, for the menu to say so. Only meaningful when the player asked for
+    it: `RA_REFUSED_NONE` with `hardcore` clear means ra.cfg said softcore, or there is no ra.cfg.
+
+    A reason code rather than a string because the block crosses into a binary with no formatter and
+    the set of reasons is small and closed. It is open at the end on purpose -- the User-Agent is the
+    refusal this project expects to add next, and it will cost a number and a line in the menu.
+*/
+#define RA_REFUSED_NONE        0
+#define RA_REFUSED_CHEATS      1   /* the cheat engine runs this session */
+
 typedef struct raSessionBlock {
 	u32 magic;      /* RA_SESSION_MAGIC, so an unwritten window is not read as an answer */
-	u8  hardcore;   /* the mode the launcher settled on, after raWifiHardcoreRefused() */
-	u8  pad[3];
+	/*
+	    The mode the launcher settled on, and the byte the bootloader may clear if it finds it is
+	    installing the cheat engine after all. **A plain flag, and it stays one**: the RAM viewer and
+	    the unlock path both read it as a capability, and a field that grew values would have those
+	    two testing `!= 0` against an enum.
+	*/
+	u8  hardcore;
+	u8  refusal;    /* RA_REFUSED_*, for display only -- nothing gates on it */
+	u8  pad[2];
 } raSessionBlock;
 
 /*
