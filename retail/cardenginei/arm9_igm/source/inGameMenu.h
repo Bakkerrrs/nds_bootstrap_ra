@@ -17,7 +17,8 @@ typedef enum {
 
 /* Inside that folder. One entry today; the folder exists so the next one costs nothing. */
 typedef enum {
-	RA_MENU_SYNC_PENDING = 0
+	RA_MENU_SYNC_PENDING = 0,
+	RA_MENU_ACHIEVEMENTS = 1
 } RaMenuItem;
 
 typedef enum {

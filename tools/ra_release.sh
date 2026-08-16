@@ -40,6 +40,36 @@ if [ "$WIFI" -lt 20 ]; then
 	exit 1
 fi
 
+# The in-game menu's one unchecked mirror, taken from the link rather than from intent.
+#
+# struct IgmText's size is written by hand a second time as a `.space` in
+# arm9_igm/source/card_engine_header.s, and nothing links the two files. When they disagreed --
+# 0xF40 there against 0xF68 in the header -- every symbol after the text block landed short of where
+# the C side computes it, and opening the menu jumped into the middle of the text. Contra 4 died on
+# the frame the menu opened, and the cause took a session to find because the build was clean.
+#
+# sharedAddr sits immediately after the block, 16-byte aligned, so its offset from igmText *is*
+# IGM_TEXT_SIZE_ALIGNED. If the two numbers disagree this is where it shows, before a card does.
+echo "the in-game menu's text mirror"
+IGM_ELF=retail/cardenginei/arm9_igm/build/cardenginei_arm9_igm.elf
+if [ -f "$IGM_ELF" ]; then
+	IGM_BASE=$(arm-none-eabi-nm "$IGM_ELF" | awk '$3 == "igmText" { print $1 }')
+	IGM_SHARED=$(arm-none-eabi-nm "$IGM_ELF" | awk '$3 == "sharedAddr" { print $1 }')
+	IGM_SIZE=$(printf '%d' $((0x$IGM_SHARED - 0x$IGM_BASE)))
+	IGM_WANT=$(grep -o 'sizeof(IgmText) == 0x[0-9A-Fa-f]*' retail/common/include/igm_text.h \
+	           | grep -o '0x[0-9A-Fa-f]*')
+	IGM_WANT=$(printf '%d' $(( ( $IGM_WANT + 0xF ) & ~0xF )))
+	if [ "$IGM_SIZE" -ne "$IGM_WANT" ]; then
+		echo "REFUSING: igmText occupies $IGM_SIZE bytes, the header says $IGM_WANT" >&2
+		echo "  the .space in arm9_igm/source/card_engine_header.s does not match struct IgmText" >&2
+		exit 1
+	fi
+	echo "  igmText $IGM_SIZE bytes, header and .space agree"
+else
+	echo "REFUSING: $IGM_ELF is missing, so the mirror cannot be checked" >&2
+	exit 1
+fi
+
 echo "host suite"
 if ! bash tools/ra_reader_test.sh 2>&1 | grep -q "PASSED"; then
 	echo "REFUSING: the host suite did not pass" >&2

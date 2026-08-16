@@ -733,6 +733,7 @@ void getIgmStrings(configuration* conf, bool b4ds) {
 	*/
 	setIgmString(lang.fetch("MENU", "RETROACHIEVEMENTS", "Achievements...").c_str(), igmText->menu[8]);
 	setIgmString(lang.fetch("MENU", "RA_SYNC_PENDING", "Sync Pending").c_str(), igmText->raMenu[0]);
+	setIgmString(lang.fetch("MENU", "RA_ACHIEVEMENTS", "Achievements").c_str(), igmText->raMenu[1]);
 
 	setIgmString(lang.fetch("OPTIONS", "MAIN_SCREEN", "Main Screen").c_str(), igmText->optionsLabels[0]);
 	setIgmString(lang.fetch("OPTIONS", "BRIGHTNESS", "Brightness").c_str(), igmText->optionsLabels[1]);

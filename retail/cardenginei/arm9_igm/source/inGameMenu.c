@@ -642,34 +642,195 @@ static void raPendingPage(void) {
 }
 
 /*
+    RetroAchievements: this game's set, earned and still to earn.
+
+    Read through the index cardenginei_arm9_ra built at init, never by parsing the block -- see
+    CARDENGINEI_ARM9_RA_VIEWER_LOCATION for why that is not a preference. The offsets are relative
+    to the definitions text, which is the one address both binaries can name.
+
+    Two levels, because 32 columns cannot hold a title, its points and its description at once. The
+    list gives one line each -- a mark, the title, the points -- and A opens the description of the
+    line under the cursor. That split is also what keeps the page useful on a large set: forty
+    achievements are eight screens of one line and forty screens of three.
+*/
+static void raAchievementsPage(void) {
+	const raViewerBlock* const v = (const raViewerBlock*)CARDENGINEI_ARM9_RA_VIEWER_LOCATION;
+	const char* const          text = (const char*)(CARDENGINEI_ARM9_RA_DEFS_LOCATION
+	                                                + CARDENGINEI_ARM9_RA_DEFS_HEADER);
+	/* Rows 3 to 20 hold the list, so eighteen entries a screen. */
+	const int rows = 18;
+	int       top = 0;
+	int       cursor = 0;
+
+	if (v->magic != RA_VIEWER_MAGIC || v->count == 0) {
+		clearScreen(false);
+		print(0, 0, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
+		/*
+		    Two states and they are not the same. No magic means this boot staged nothing -- no
+		    network, or a game the server does not know. A magic with no entries would mean a set
+		    that arrived empty, which is what an unsupported ROM's own set looks like.
+		*/
+		print(0, 2, (v->magic == RA_VIEWER_MAGIC)
+		            ? (unsigned char*)"This game has no achievements"
+		            : (unsigned char*)"No set was staged this boot", FONT_LIGHT_GRAY, false);
+		print(0, 23, igmText.bNo, FONT_WHITE, false);
+		waitKeys(KEY_B);
+		return;
+	}
+
+	while (1) {
+		int i;
+
+		clearScreen(false);
+		print(0, 0, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
+		printDec(0, 1, v->earned, 2, FONT_LIME, false);
+		print(3, 1, (unsigned char*)"of", FONT_LIGHT_GRAY, false);
+		printDec(6, 1, v->count, 2, FONT_WHITE, false);
+		print(9, 1, (unsigned char*)"earned", FONT_LIGHT_GRAY, false);
+
+		for (i = 0; i < rows && top + i < v->count; i++) {
+			const raViewerEntry* const e = &v->entry[top + i];
+			const int                  earned = (e->flags & RA_VIEWER_EARNED) != 0;
+
+			/*
+			    A mark rather than a colour alone: the two palettes are close enough on a lit DS
+			    screen that a photograph of this page could not settle which row was which, and this
+			    project reads a lot of photographs.
+
+			    Column 0 is not available for it. drawCursor() writes the caret there and *clears
+			    that column on every row* to erase the previous one, so a mark at 0 would survive
+			    exactly until the cursor moved.
+			*/
+			print(1, 3 + i, (unsigned char*)(earned ? "*" : "-"),
+			      earned ? FONT_LIME : FONT_DARKER_GRAY, false);
+			if (e->titleOff) {
+				print(3, 3 + i, (unsigned char*)(text + e->titleOff),
+				      earned ? FONT_LIGHT_GRAY : FONT_WHITE, false);
+			}
+			if (e->pointsOff) {
+				printRight(31, 3 + i, (unsigned char*)(text + e->pointsOff),
+				           FONT_LIGHT_BLUE, false);
+			}
+		}
+		drawCursor((u8)(3 + cursor));
+		print(0, 21, (unsigned char*)"A: what it takes", FONT_DARKER_GRAY, false);
+		print(0, 23, igmText.bNo, FONT_WHITE, false);
+
+		waitKeys(KEY_A | KEY_B | KEY_UP | KEY_DOWN);
+		if (KEYS & KEY_B) {
+			return;
+		}
+		if (KEYS & KEY_UP) {
+			if (cursor > 0) {
+				cursor--;
+			} else if (top > 0) {
+				top--;
+			}
+			continue;
+		}
+		if (KEYS & KEY_DOWN) {
+			if (cursor < rows - 1 && top + cursor + 1 < v->count) {
+				cursor++;
+			} else if (top + rows < v->count) {
+				top++;
+			}
+			continue;
+		}
+
+		/* A: the description of the line under the cursor, on a page of its own. */
+		{
+			const raViewerEntry* const e = &v->entry[top + cursor];
+
+			clearScreen(false);
+			if (e->titleOff) {
+				print(0, 0, (unsigned char*)(text + e->titleOff), FONT_WHITE, false);
+			}
+			if (e->pointsOff) {
+				print(0, 2, (unsigned char*)(text + e->pointsOff), FONT_LIGHT_BLUE, false);
+				print(5, 2, (unsigned char*)"points", FONT_LIGHT_GRAY, false);
+			}
+			if (e->flags & RA_VIEWER_EARNED) {
+				printRight(31, 2, (unsigned char*)"earned", FONT_LIME, false);
+			}
+			if (e->descOff) {
+				/*
+				    Wrapped by hand at 32 columns, because print() does not wrap and a description
+				    is up to 64 characters -- two full lines. Broken at a space where there is one
+				    within reach, so a word is not cut in half.
+				*/
+				const char* d = text + e->descOff;
+				int         line;
+
+				for (line = 0; line < 4 && *d; line++) {
+					unsigned char row[33];
+					int           n = 0;
+					int           cut;
+
+					while (n < 32 && d[n]) {
+						n++;
+					}
+					cut = n;
+					if (d[n]) {
+						while (cut > 0 && d[cut] != ' ') {
+							cut--;
+						}
+						if (cut == 0) {
+							cut = n;   /* one long word: cut it rather than loop forever */
+						}
+					}
+					for (n = 0; n < cut; n++) {
+						row[n] = (unsigned char)d[n];
+					}
+					row[cut] = 0;
+					print(0, 5 + line, row, FONT_LIGHT_GRAY, false);
+					d += cut;
+					while (*d == ' ') {
+						d++;
+					}
+				}
+			}
+			print(0, 23, igmText.bNo, FONT_WHITE, false);
+			waitKeys(KEY_B);
+		}
+	}
+}
+
+/*
     The folder. One entry today, and it is a folder rather than a page so that forcing a sync, reading
     the launcher's log or showing the session have somewhere to go that is not the root menu.
 */
 static void raMenu(void) {
 	int cursor = 0;
 
-	clearScreen(false);
-	print(2, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
-	/*
-	    The folder names itself down here, where the main menu names the program, rather than as a
-	    header above its own only item -- which read as the same page twice on the way to it.
-	*/
-	print(1, 0x18 - 3, (unsigned char*)"RetroAchievements", FONT_LIGHT_GRAY, false);
-	print(0, 23, igmText.bNo, FONT_WHITE, false);
-	drawCursor(0);
-
 	while (1) {
-		waitKeys(KEY_A | KEY_B);
+		clearScreen(false);
+		print(2, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
+		print(2, 1, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
+		/*
+		    The folder names itself down here, where the main menu names the program, rather than as
+		    a header above its own items -- which read as the same page twice on the way to them.
+		*/
+		print(1, 0x18 - 3, (unsigned char*)"RetroAchievements", FONT_LIGHT_GRAY, false);
+		print(0, 23, igmText.bNo, FONT_WHITE, false);
+		drawCursor((u8)cursor);
+
+		waitKeys(KEY_A | KEY_B | KEY_UP | KEY_DOWN);
 		if (KEYS & KEY_B)
 			return;
-		{
-			raPendingPage();
-			clearScreen(false);
-			print(2, 0, igmText.raMenu[RA_MENU_SYNC_PENDING], FONT_WHITE, false);
-			print(1, 0x18 - 3, (unsigned char*)"RetroAchievements", FONT_LIGHT_GRAY, false);
-			print(0, 23, igmText.bNo, FONT_WHITE, false);
-			drawCursor(cursor);
+		if (KEYS & KEY_UP) {
+			if (cursor > 0)
+				cursor--;
+			continue;
 		}
+		if (KEYS & KEY_DOWN) {
+			if (cursor < RA_MENU_ACHIEVEMENTS)
+				cursor++;
+			continue;
+		}
+		if (cursor == RA_MENU_SYNC_PENDING)
+			raPendingPage();
+		else
+			raAchievementsPage();
 	}
 }
 
