@@ -91,11 +91,13 @@ client that is not an emulator, which is itself the first question.
 >
 > Your hardcore rules forbid cheats, savestates, rewind and slowdown. Against this loader:
 >
-> - **Cheats** — nds-bootstrap has a cheat engine. A hardcore session is refused whenever that
->   engine will run, and it falls back to softcore rather than claiming hardcore. The check is the
->   loader's own "are cheats active" predicate rather than "does a cheat file exist": it covers all
->   three inputs the engine takes, and it is re-checked at the last moment before the game starts,
->   when the loader knows whether the engine actually got installed.
+> - **Cheats** — nds-bootstrap has a cheat engine, and a hardcore session is refused whenever that
+>   engine will run: it falls back to softcore rather than claiming hardcore. Worth being precise
+>   about how that is determined, since it is not a setting. The loader has no cheats on/off
+>   switch — the front-end writes the codes the player selected into a file, and the loader installs
+>   whatever it is given. So "cheats are on" is measured from the three cheat inputs it can size,
+>   and it is re-checked at the last moment before the game starts, when the loader knows whether
+>   the engine actually got installed.
 > - **Savestates** — nds-bootstrap has none. Not disabled: the feature does not exist in the
 >   codebase.
 > - **Rewind and slowdown** — likewise absent. The game runs on real hardware at its own speed.

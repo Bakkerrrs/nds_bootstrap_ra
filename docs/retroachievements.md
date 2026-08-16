@@ -6934,6 +6934,27 @@ permission.
 The gate's surviving half asked `conf->cheatSize != 0`, and that turns out to be the wrong question
 asked of the wrong file. It was wrong in both directions, and only one of them is cosmetic.
 
+### There is no cheats switch to read, and that is why the size is the switch
+
+Worth stating before the predicate, because `> 4` looks like a threshold somebody tuned and it is
+not. **nds-bootstrap has no cheats on/off setting anywhere.** Not in the configuration struct — the
+only cheat-shaped fields are `cheatFileCluster`/`cheatSize`, `wideCheatFileCluster`/`wideCheatSize`
+and the AP patch, all of them file locations and lengths. Not in the in-game menu: `MenuItem` has no
+cheats entry, and the `"Cheats..."` string is commented out in `conf_sd.cpp` with `menu[6]` since
+reclaimed by `RAM Viewer...`.
+
+The cheat *engine binary* is staged unconditionally for every non-DSiWare boot, so its presence
+means nothing either. What decides is `cheatSizeTotal`, and nothing else.
+
+The switch lives in **TWiLight Menu**, which writes only the cheats the player ticked into
+`cheatData.bin` before handing over. By the time nds-bootstrap sees it, an intention has already
+become a length — so asking "how many bytes of cheats am I about to install" is not a proxy for the
+real question. It *is* the real question, and the only form of it that exists on this side.
+
+That also explains the number. `> 4` is not a tolerance: it is the length of a file that holds a
+terminator and no cheats, which is what TWiLight leaves behind when the player opens the cheat list
+and ticks nothing.
+
 ### The hole: `cheatData.bin` is one of three inputs
 
 nds-bootstrap's own predicate, in `main.arm7.c`:
