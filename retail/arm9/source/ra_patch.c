@@ -90,6 +90,14 @@ static const char raPatchSayTitle[]   = "\"Title\":\"";
 */
 static const char raPatchSayDesc[]    = "\"Description\":\"";
 static const char raPatchSayPoints[]  = "\"Points\":";
+/*
+    And the game's Rich Presence script, which is measured rather than kept -- see raPatch::richBytes.
+
+    Borders again, and again none of length two or more: `"RichPresencePatch":"` repeats the quote (at
+    0, 18 and 20) and several letters, but the two-character prefix is `"R` and no later quote is
+    followed by an `R`. So restart-and-retest stays exact with a fifth needle.
+*/
+static const char raPatchSayRich[]    = "\"RichPresencePatch\":\"";
 
 /* RA's own two values for the field. 3 is published; 5 is unofficial and not scored. */
 #define RA_PATCH_FLAGS_CORE       3
@@ -674,6 +682,37 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			continue;
 		}
 
+		if (p->state == RA_PATCH_RICH) {
+			/*
+			    Decoded length, not raw: an escape is two bytes on the wire and one or two after
+			    decoding, and what matters is how much would have to be *stored*. Same rule the title
+			    and the description use, so the number is comparable to theirs.
+			*/
+			if (p->escape) {
+				p->escape = 0;
+				p->richBytes += (c == '/' || c == '\\' || c == '"') ? 1u : 2u;
+				continue;
+			}
+			if (c == '\\') {
+				p->escape = 1;
+				continue;
+			}
+			if (c == '"') {
+				p->state    = RA_PATCH_SCAN;
+				p->inString = 0;
+				p->memAt    = 0;
+				p->flagsAt  = 0;
+				p->idAt     = 0;
+				p->titleAt  = 0;
+				p->descAt   = 0;
+				p->pointsAt = 0;
+				p->richAt   = 0;
+				continue;
+			}
+			p->richBytes++;
+			continue;
+		}
+
 		if (p->state == RA_PATCH_POINTS) {
 			if (c >= '0' && c <= '9') {
 				const u32 digit = (u32)(c - '0');
@@ -818,6 +857,7 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 		p->titleAt  = raPatchAdvance(raPatchSayTitle, p->titleAt, c);
 		p->descAt   = raPatchAdvance(raPatchSayDesc, p->descAt, c);
 		p->pointsAt = raPatchAdvance(raPatchSayPoints, p->pointsAt, c);
+		p->richAt   = raPatchAdvance(raPatchSayRich, p->richAt, c);
 
 		if (raPatchSayMemAddr[p->memAt] == 0) {
 			/*
@@ -903,6 +943,25 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->titleAt    = 0;
 			p->descAt     = 0;
 			p->pointsAt   = 0;
+			continue;
+		}
+		if (raPatchSayRich[p->richAt] == 0) {
+			/*
+			    No commit, and no interaction with the definition being held: this key belongs to the
+			    reply's root object, not to an achievement, and it may arrive anywhere relative to
+			    them. Counting is all it does, so it cannot disturb one.
+			*/
+			p->state     = RA_PATCH_RICH;
+			p->richBytes = 0;
+			p->richSeen  = 1;
+			p->escape    = 0;
+			p->memAt     = 0;
+			p->flagsAt   = 0;
+			p->idAt      = 0;
+			p->titleAt   = 0;
+			p->descAt    = 0;
+			p->pointsAt  = 0;
+			p->richAt    = 0;
 			continue;
 		}
 		if (raPatchSayPoints[p->pointsAt] == 0) {

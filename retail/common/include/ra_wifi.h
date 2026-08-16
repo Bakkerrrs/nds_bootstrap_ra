@@ -711,6 +711,7 @@ typedef struct raNetStream {
 #define RA_PATCH_TITLE  4
 #define RA_PATCH_DESC   5
 #define RA_PATCH_POINTS 6
+#define RA_PATCH_RICH   7
 
 /*
     Each staged line is `<id>:<memaddr>`, and the id is the achievement's own number on
@@ -824,6 +825,23 @@ typedef struct raPatch {
 	u8    pointsBad;      /* ...and it will not fit a u32, so it is treated as absent */
 	u16   withPoints;     /* definitions written with one */
 	u16   pointsNoRoom;   /* ...and points dropped so the achievement itself could be kept */
+	/*
+	    How long this game's Rich Presence script is, decoded, and whether one arrived at all.
+
+	    **Counted and thrown away**, which is the whole point of it. Rendering rich presence on the
+	    console is reachable -- it is memory reads against a script, which is what this fork already
+	    does sixty times a second -- and *sending* it is not, because the game's boot kills the link
+	    and dsiwifi's ARM7 half wants 104,148 bytes against 12,636 free. So the open question is not
+	    whether it can be evaluated but whether it can be **stored**: the block is 32K less the
+	    viewer's index and the pending tally, and a real set already takes 9,662 of it.
+
+	    RA's scripts range from a line to tens of kilobytes depending on how many lookup tables the
+	    author used, and no amount of reasoning settles which this project is facing. One counter and
+	    one boot does, before a byte of it is designed. `richSeen` because a script of length 0 and no
+	    script at all are different answers.
+	*/
+	u32   richBytes;
+	u8    richSeen;
 	u16   withId;         /* definitions written with a RetroAchievements id */
 	u16   withoutId;      /* ...and without one, which is a set we cannot report on */
 	/*
@@ -875,6 +893,7 @@ typedef struct raPatch {
 	u8    titleAt;
 	u8    descAt;
 	u8    pointsAt;
+	u8    richAt;
 	u8    idBad;          /* the id being read will not fit a u32; treat the line as id-less */
 	u8    oddCapture;     /* copying the reply into oddContext right now */
 	u8    escape;

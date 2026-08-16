@@ -683,6 +683,16 @@ static void test_patch(void) {
 	CHECK(patch.wanted == strlen(patchExpect));
 	/* Decoded length, so the escaped slash counts as the one character it becomes. */
 	CHECK(patch.longest == strlen("0xH0a1b2c=1_d0xH0a1b2c=0"));
+	/*
+	    The Rich Presence script is counted and not kept. Decoded length, so the `\n` in the fixture
+	    is the two characters this scanner would have had to store rather than the one byte it
+	    represents -- the number has to be comparable with the title's and the description's, which
+	    are decoded the same way.
+	*/
+	CHECK(patch.richSeen == 1);
+	CHECK(patch.richBytes == strlen("Display:") + 2 + strlen("Stars: @Number(0xH1)"));
+	/* And it disturbed nothing: the block is what it was before the fifth needle existed. */
+	CHECK(strcmp(block, patchExpect) == 0);
 	CHECK(patch.shortest == strlen("0xH000010>d0xH000010"));
 	/*
 	    The ids came off the reply, not out of a counter. Both published achievements carried one;

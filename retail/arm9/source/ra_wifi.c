@@ -1549,6 +1549,19 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	    is empty because it has been completed is a very different reading from one whose armed half
 	    is empty because the block overflowed.
 	*/
+	/*
+	    The measurement rich presence is waiting on, and the only thing this build does about it.
+	    Rendering a script on the console is reachable -- it is memory reads, which is what this fork
+	    already does sixty times a second -- and sending one is not, because the game's boot kills the
+	    link. So the open question is whether a script would *fit* beside the set, and one number off a
+	    real game answers it before anything is designed.
+	*/
+	if (patch.richSeen) {
+		raWifiLog("rich presence    %lu bytes (measured, not kept)\n",
+		          (unsigned long)patch.richBytes);
+	} else {
+		raWifiLog("rich presence    none in the reply\n");
+	}
 	if (patch.earned || patch.earnedNoRoom) {
 		raWifiLog("earned shown     %u", patch.earned);
 		if (patch.earnedNoRoom) {
