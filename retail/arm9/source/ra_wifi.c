@@ -716,21 +716,26 @@ static void raWifiIdentify(void) {
 		    can say no set applies -- and until now it was the only answer that left the *wrong* set
 		    armed.
 
-		    loadRaDefinitions() stages sd:/_nds/nds-bootstrap/ra_definitions.txt for whatever game is
+		    loadRaDefinitions() stages sd:/_nds/nds-bootstrap/ra_achievements.txt for whatever game is
 		    booting, unconditionally: it is a hand-managed debugging file with no way to know which
 		    game it belongs to, and it says so. That is harmless while it is overwritten -- for a ROM
 		    the server knows, stage 15 replaces the block with that ROM's own set, empty or not.
 
 		    A ROM the server does *not* know never reaches stage 15 ("no GameID; the set cannot be
 		    asked for"), raWifiCacheLoad() has no cache for it either, and the hand file therefore
-		    survives into the game. Seen on a card: ra_definitions.txt held Ketsui Death Label's
-		    fifteen definitions and the console booted Arkanoid DS, which the server does not know --
-		    so Ketsui's triggers spent that session watching Ketsui's addresses inside Arkanoid's RAM.
+		    survives into the game -- one game's triggers watching that game's addresses inside
+		    another game's RAM.
 
 		    Worse than the self-test bug this branch started with, and in the one way that matters:
 		    these are **real RetroAchievements ids**. A trigger firing on unrelated memory queues an
 		    unlock the server will happily accept, and the player wakes up holding an achievement for
 		    a game they were not playing. Nothing undoes that from here.
+
+		    Reasoned from the source, **not** observed: it needs a card that has ra_achievements.txt,
+		    and no run has been made on one. An earlier version of this comment cited a card whose
+		    sd:/ra_definitions.txt held another game's set -- that file is RA_DEFS_DUMP_PATH, which
+		    this launcher *writes* and never reads, so it was evidence of the last fetch and of
+		    nothing else. The defect is in the path either way; the sighting was not.
 
 		    Cleared here rather than at the `done:` fallback because here is where the fact exists. A
 		    ladder that never got this far cannot tell "no set for this ROM" from "never asked", and

@@ -6625,23 +6625,30 @@ awarded 1, refused 0, still owed 0
 `ra_unlocks.txt` afterwards: empty. The real unlock crossed a game boundary and cleared, and the
 self-test wrote nothing behind it. That is both halves of the fix, in the hardest case available.
 
-**But the same log exposes a worse bug of the same shape**, and this one queues *real* ids.
+**Reading that log turned up a worse bug of the same shape**, and this one queues *real* ids.
 
-`loadRaDefinitions()` stages `ra_definitions.txt` for whatever game is booting, unconditionally —
+`loadRaDefinitions()` stages `ra_achievements.txt` for whatever game is booting, unconditionally —
 it is a hand-managed debugging file with no way to know which game it belongs to, and it says so.
 That is harmless while something overwrites it, which for a ROM the server knows is exactly what
 stage 15 does.
 
 A ROM the server does **not** know never reaches stage 15 (`no GameID; the set cannot be asked
-for`), `raWifiCacheLoad()` has no cache for it either, and the hand file survives into the game. On
-this card `ra_definitions.txt` held Ketsui's fifteen definitions — so Arkanoid DS ran with Ketsui's
-triggers armed, watching Ketsui's addresses (`0x090ae8`, `0x0572f8`, …) inside Arkanoid's RAM.
+for`), `raWifiCacheLoad()` has no cache for it either, and the hand file survives into the game —
+one game's triggers watching that game's addresses inside another game's RAM.
 
 Worse than the self-test, in the one way that matters. A synthetic id gets a 404. **A real id gets
 accepted**: a trigger firing on unrelated memory queues an unlock the server records, and the player
 wakes up holding an achievement for a game they were not playing. Nothing undoes that from here.
 
-Nothing fired during that session — the queue came back clean — which is luck, not design.
+**Reasoned from the source, not observed**, and the correction is worth keeping because it is the
+kind of mistake this document exists to prevent. The first version of this section said the hazard
+had been *seen*: the card's `sd:/ra_definitions.txt` held Ketsui's fifteen definitions while the
+console booted Arkanoid DS. But `sd:/ra_definitions.txt` is `RA_DEFS_DUMP_PATH` — a file this
+launcher **writes and never reads**. It was the record of the last successful fetch and evidence of
+nothing else. The file that would have to be present is
+`sd:/_nds/nds-bootstrap/ra_achievements.txt`, in a different directory, and whether that card has
+one was never checked. Two files whose names differ by one word, and reading the wrong one as the
+input turned a sound argument into a false sighting.
 
 The fix is one line and it goes where the fact exists: `r=gameid` returning `GameID: 0` is the only
 answer that can say *no set applies to this ROM*, so `raWifiIdentify()` clears the staged block
