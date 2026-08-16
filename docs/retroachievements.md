@@ -6790,12 +6790,41 @@ cannot fire. See "The survey learns to read the BG mode".
 What remains is smaller and is written down there: **tile data is still marked as a single 16K block**,
 which is a heuristic and not a reading, because how far a character base reaches is not in any register.
 
-### 6. The in-game achievement viewer — the launcher half is done, the menu half is not
+### 6. The in-game achievement viewer — the launcher half is **confirmed on hardware**, the menu half is not
 
-`<id>:<memaddr>\t<title>\t<points>\t<description>` is written, earned achievements are staged as
-`#!<id>\t<title>\t<points>\t<description>`, and `ra_split_definitions()` no longer lets the extra
-fields leak into the notification's title. What is missing is the page itself, and it is blocked on
-one decision that is worth stating rather than discovering.
+Contra 4, GameID 12917, on a 3DS, with two achievements earned and submitted in the boots before:
+
+```
+definitions      43 kept, 0 unofficial      <- 45 in the set, less the 2 earned
+titles           43 with, 3 clipped
+desc / points    43 / 43 with
+earned shown     2
+already earned   2 of 3 matched this set
+block            9662 of 32247 used, 9662 wanted
+def 1    46      #!302329	Welcome to the Jungle	3	Clear Stage 1
+```
+
+Every claim this format was designed on, measured rather than argued:
+
+- **The 64-byte description cap is right.** 43 of 43 descriptions survived with none clipped; the
+  longest in the set is 57 characters. The graded degradation never fired, which is the correct
+  outcome for a set at 30% of the block rather than evidence that it works -- the 56-definition set
+  measured at 87% is still the case that needs it.
+- **Moving an achievement to display-only is what made "earned as well as pending" affordable.**
+  `302329` was 120 bytes armed and is 46 bytes earned, and the block fell from 9,924 to 9,662 for
+  two of them. The memaddr is four fifths of a record and the earned half does not carry one.
+- **`wanted` equals `used`**, so nothing was traded away.
+- **The title cut works**: the notification read `ACHIEVEMENT / Welcome to the Jungle`, with no
+  points or description trailing it.
+
+Two things were confirmed on the way that belong to the branch before this one. The orphaned-set
+discard fired for the first time on real hardware -- `staged definitions discarded: they cannot be
+this ROM's`, on Arkanoid DS -- and two queued unlocks crossed from a supported game to an
+unsupported one and came back `AchievementsRemaining` 44 then 43 with `SoftcoreScore` 457 then 460,
+which is the server saying it recorded them rather than merely `Success:true`.
+
+What is missing is the page itself, and it is blocked on one decision that is worth stating rather
+than discovering.
 
 **The menu cannot parse the block, and the reason is that the block is mutated in place.**
 `ra_split_definitions()` turns a record's newline into a NUL so rcheevos gets C strings, and turns
