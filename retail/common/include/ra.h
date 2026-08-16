@@ -630,7 +630,16 @@ typedef struct raSnapshot {
 	*/
 	u8  overlaySpriteOam;  /* +0xC0  first OAM entry used, or 0xFF for the background path */
 	u8  overlaySpriteSlot; /* +0xC1  2K unit of object VRAM claimed, or 0xFF */
-	u8  pad0[2];           /* +0xC2  to word-align what follows */
+	/*
+	    Triggers refused the ring because their id was synthetic -- see RA_SYNTHETIC_ID_BASE.
+
+	    A number rather than nothing, because this is the difference between "the self-test fired and
+	    was correctly not queued" and "nothing fired at all", and on a game the server does not know
+	    those are the two states worth telling apart. It took a card's queue file to tell them apart
+	    last time.
+	*/
+	u8  unlockSynthetic;   /* +0xC2  triggers dropped for having a synthetic id */
+	u8  pad0;              /* +0xC3  to word-align what follows */
 	/*
 	    What ra_definition() actually found where the bootloader was supposed to leave the staged
 	    definitions, published raw instead of collapsed into rcFromFile's single bit.

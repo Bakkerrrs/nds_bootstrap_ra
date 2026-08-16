@@ -379,9 +379,43 @@ static u8  unlockQueued;    /* how many are in the ring */
 static u8  unlockLost;      /* ring was full when one fired */
 static u16 unlockSent;      /* handed to the ARM7 and acknowledged */
 static u8  unlockNoChannel; /* the published shared address was not one of the two legal ones */
+static u8  unlockSynthetic; /* triggers refused for carrying a synthetic id */
 
 static void ra_rc_queue_unlock(u32 id) {
 	if (id == 0) {
+		return;
+	}
+	/*
+	    A synthetic id is not an achievement and must never leave this binary.
+
+	    RA_SYNTHETIC_ID_BASE is what a definition gets when it arrived without an id of its own, which
+	    in practice means the built-in self-test -- and the self-test is what runs in **every game
+	    RetroAchievements does not know**. So on an unsupported game this fired, went down the ring to
+	    the ARM7, and was appended to sd:/ra_unlocks.txt as though a player had earned something.
+
+	    What that cost, read off one card and one log:
+
+	      the queue was never empty      the launcher cleared it at boot and the self-test refilled it
+	                                     seconds later, every single boot
+	      the menu showed a pending row  a fake unlock is indistinguishable from a real one once it is
+	                                     in the file, so Sync Pending reported work that did not exist
+	      the server was sent nonsense   `4026531840 refused: Unknown achievement` -- a 404 per boot,
+	                                     forever, from a client whose User-Agent is still trying to get
+	                                     sanctioned
+
+	    The guard goes here rather than in the ARM7 or the launcher because this is the one place that
+	    knows the id is synthetic. Downstream it is just a large number, and a large number is exactly
+	    what a real id looks like.
+
+	    Counted, not silently dropped, and the notification is untouched: the overlay is driven by
+	    triggeredCount, which the event handler bumps before calling this. The self-test still proves
+	    on screen that the reader, the runtime and the overlay all work. It just no longer claims a
+	    player earned something.
+	*/
+	if (id >= RA_SYNTHETIC_ID_BASE) {
+		if (unlockSynthetic < 255) {
+			unlockSynthetic++;
+		}
 		return;
 	}
 	if (unlockQueued >= RA_UNLOCK_RING) {
@@ -1074,7 +1108,8 @@ static u8 ra_rc_frame_step(raSnapshot* snapshot) {
 	    the two apart and costs one compare on a frame with nothing to send.
 	*/
 	ra_rc_offer_unlock(snapshot);
-	snapshot->unlockSent   = unlockSent;
+	snapshot->unlockSent      = unlockSent;
+	snapshot->unlockSynthetic = unlockSynthetic;
 	/*
 	    And into the menu's pending block, so Sync Pending counts what this session earned rather than
 	    only what was owed at boot -- which is the difference between the page answering "did the one I

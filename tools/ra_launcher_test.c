@@ -1152,11 +1152,13 @@ static void test_queue(void) {
 
 		/*
 		    Refused rather than truncated, the same correction ra_patch.c and ra_take_id() needed.
-		    4294967295 is the largest u32 and must survive; one more digit is a different
-		    achievement and must not be silently shortened into a real one.
+		    One digit past a u32 is a different number and must not be silently shortened into a
+		    real one. Stated on RA_SYNTHETIC_ID_BASE - 1 rather than on 4294967295, which used to be
+		    the largest value that had to survive and is now refused for a different reason -- see
+		    the synthetic block below.
 		*/
-		raQueueScan(&q, "4294967295", 10);
-		CHECK(q.count == 1 && q.ids[0] == 4294967295u);
+		raQueueScan(&q, "4026531839", 10);
+		CHECK(q.count == 1 && q.ids[0] == RA_SYNTHETIC_ID_BASE - 1);
 		raQueueScan(&q, "4294967296", 10);
 		CHECK(q.count == 0 && q.dropped == 1);
 		raQueueScan(&q, "99999999999", 11);
@@ -1165,6 +1167,31 @@ static void test_queue(void) {
 		/* Zero is not an id -- rcheevos refuses it -- and a file of zeros is not a file of unlocks. */
 		raQueueScan(&q, "0\n00\n", 5);
 		CHECK(q.count == 0 && q.dropped == 2);
+
+		/*
+		    A synthetic id is not an achievement, and this is the case a card taught us.
+
+		    cardenginei_arm9_ra gives an id-less definition RA_SYNTHETIC_ID_BASE + index, and the
+		    built-in self-test is exactly such a definition -- so on every game RetroAchievements
+		    does not know, the self-test fired, was queued as a real unlock, showed up in the in-game
+		    menu as work waiting to sync, and was submitted on the next boot. The server's answer, off
+		    a real log: `4026531840 refused: Unknown achievement`, a 404 per boot forever.
+
+		    The ARM9 guard stops new ones. This stops the ones already on cards, and it is the half
+		    that has to be right about *consumption*: the drop happens after the record's stamp, code
+		    and title have been taken, or `20260815183256` and `PICROSS3D` become two more ids.
+		*/
+		raQueueScan(&q, "4026531840\t20260815183256\tC6PJ\tPICROSS3D\n", 41);
+		CHECK(q.count == 0);
+		CHECK(q.synthetic == 1);
+		CHECK(q.dropped == 0);   /* well-formed, not corrupt -- the counts say different things */
+
+		/* A real unlock in the same file survives it, which is the case that actually matters. */
+		raQueueScan(&q, "4026531840\t20260815183256\tC6PJ\tPICROSS3D\n"
+		                "302329\t20260815183300\tYCTE\tCONTRA 4\n", 78);
+		CHECK(q.count == 1 && q.ids[0] == 302329);
+		CHECK(q.synthetic == 1);
+		CHECK(strcmp(q.titles[0], "CONTRA 4") == 0);
 
 		/* More than the queue holds is reported, not silently dropped. */
 		{
@@ -1207,18 +1234,18 @@ static void test_queue(void) {
 		}
 
 		/* Two owed: they land at record boundaries the cardengine can compute without reading. */
-		raQueueScan(&q, "93119\n4294967295\n", 17);
+		raQueueScan(&q, "93119\n4026531839\n", 17);
 		keep[0] = 0;
 		keep[1] = 1;
 		written = raQueuePack(&q, keep, 2, out, sizeof(out));
 		CHECK(written == 2);
 		CHECK(memcmp(out + 0 * RA_QUEUE_RECORD, "93119\n", 6) == 0);
-		CHECK(memcmp(out + 1 * RA_QUEUE_RECORD, "4294967295\n", 11) == 0);
+		CHECK(memcmp(out + 1 * RA_QUEUE_RECORD, "4026531839\n", 11) == 0);
 		CHECK(out[2 * RA_QUEUE_RECORD] == 0);
 
 		/* And what it wrote is what the parser reads back -- the round trip, not two guesses. */
 		raQueueScan(&q, out, sizeof(out));
-		CHECK(q.count == 2 && q.ids[0] == 93119 && q.ids[1] == 4294967295u);
+		CHECK(q.count == 2 && q.ids[0] == 93119 && q.ids[1] == RA_SYNTHETIC_ID_BASE - 1);
 
 		/*
 		    Refused rather than half-written. A partial queue is indistinguishable from a whole one

@@ -320,6 +320,26 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 			}
 		}
 
+		/*
+		    A synthetic id is not an achievement, and here rather than three lines earlier because
+		    the record's stamp, code and title have to be consumed first: dropping at the id would
+		    leave `20260815183256` and `PICROSS3D` to be read as two more ids.
+
+		    cardenginei_arm9_ra no longer writes these -- see ra_rc_queue_unlock() -- but every card
+		    that ran a build which did is carrying one per boot of every game the server does not
+		    know, and each one is a `404 Unknown achievement` sent on the next boot. Dropping them on
+		    the way in means they are never sent and raQueuePack() writes them out of the file, so a
+		    card cleans itself on the first boot with wifi.
+
+		    Not `dropped`: these are well-formed records that meant something to the build that wrote
+		    them, and a count that says "cleaned one" reads differently from one that says "your file
+		    is corrupt".
+		*/
+		if (value >= RA_SYNTHETIC_ID_BASE) {
+			q->synthetic++;
+			continue;
+		}
+
 		seen = 0;
 		for (j = 0; j < q->count; j++) {
 			if (q->ids[j] == value) {

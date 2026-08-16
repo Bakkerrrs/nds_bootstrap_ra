@@ -26,6 +26,12 @@
 
 #include <nds/ndstypes.h>
 #include <stddef.h>   /* size_t, for the ra_net entry points below */
+/*
+    RA_SYNTHETIC_ID_BASE, which the queue reader has to know: the cardengine side of this fork
+    writes ids and the launcher side decides what to do with them, and "which ids are not real" is a
+    fact both halves need and neither owns. Header-only, so this costs the ARM7 nothing.
+*/
+#include "ra.h"
 
 /*
     Master switch, and it is off in every shipped build. Three values:
@@ -245,6 +251,15 @@ typedef struct raQueue {
 	int  named;              /* how many of those named their game */
 	int  count;              /* how many of those */
 	int  dropped;            /* unparseable or out of range, so the file said something we ignored */
+	/*
+	    Records carrying a synthetic id -- see RA_SYNTHETIC_ID_BASE. Never sent, never counted as
+	    owed, and counted here so a card cleaning itself of them says so once instead of going quiet.
+
+	    Separate from `dropped` because these are not malformed. They are perfectly well-formed
+	    records that a build before the ARM9 guard wrote from its own self-test, and telling the
+	    two apart is what says whether a card is being cleaned or a file is corrupt.
+	*/
+	int  synthetic;
 	int  truncated;          /* the file held more than RA_QUEUE_MAX */
 	int  sent;               /* the server answered, whatever it answered */
 	int  accepted;           /* ...and said Success */

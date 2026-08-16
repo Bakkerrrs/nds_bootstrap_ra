@@ -1017,6 +1017,15 @@ static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
 			raWifiLog("\x1b[33m%d unusable value(s) in the file\x1b[37m\n", q.dropped);
 		}
 		/*
+		    Said out loud rather than cleaned quietly, because "empty" and "empty once the self-test's
+		    fakes were thrown out" are different states, and the second one dates the card to a build
+		    from before the ARM9 guard.
+		*/
+		if (q.synthetic) {
+			raWifiLog("\x1b[33m%d self-test id(s) discarded, not achievements\x1b[37m\n",
+			          q.synthetic);
+		}
+		/*
 		    A file that is not RA_QUEUE_BYTES long is brought up to length before returning, and an
 		    empty queue is the only path that could ever leave it short: every other exit rewrites the
 		    whole thing.
@@ -1028,17 +1037,23 @@ static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
 		    Raising RA_QUEUE_RECORD from 16 to 32 and then to 48 each left every existing card in that
 		    state, and nothing else would ever have fixed it: the file only grows on a boot that had
 		    something to send, and a card that cannot sync is exactly the one accumulating unlocks.
+
+		    A file holding only synthetic ids is rewritten by the same code for a different reason:
+		    the queue reads as empty, so nothing below would ever clear it, and the record would sit
+		    there being counted by the in-game menu on every future boot.
 		*/
-		if (got != sizeof(file)) {
+		if (got != sizeof(file) || q.synthetic) {
 			FILE* resize = fopen(path, "wb");
 
 			if (resize) {
+				const int was = (int)got;
+
 				memset(file, 0, sizeof(file));
 				got = fwrite(file, 1, sizeof(file), resize);
 				fclose(resize);
-				raWifiLog("queue            resized to %d bytes\n", (int)got);
+				raWifiLog("queue            rewritten, %d bytes (was %d)\n", (int)got, was);
 			} else {
-				raWifiLog("\x1b[33mqueue is %d bytes, not %d, and could not be resized\x1b[37m\n",
+				raWifiLog("\x1b[33mqueue is %d bytes, not %d, and could not be rewritten\x1b[37m\n",
 				          (int)got, (int)sizeof(file));
 			}
 		}

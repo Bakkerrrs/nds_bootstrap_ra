@@ -6504,6 +6504,109 @@ above, caught by arithmetic instead of by a photograph.
 Right alignment is pinned on `d` at the last usable column, with the shadow asserted to land in
 column 31 — so the margin is checked to be doing the job it exists for, rather than merely existing.
 
+## The self-test was queueing itself as an achievement
+
+The bug: **in every game RetroAchievements does not know, this fork earned a fake achievement,
+filed it on the card, showed it to the player as work waiting to sync, and sent it to the
+server — once per boot, forever.**
+
+### What the card said
+
+Reported as "I ran a game with no RA support; the Contra 4 unlock went up to RA fine but never
+cleared from the queue, and the menu still listed something pending". Two hypotheses were
+plausible from the source — a lost award reply, or a stale WRAM block — and both were wrong. The
+card settled it in three lines.
+
+`sd:/ra_unlocks.txt`, pulled over FTP:
+
+```
+4026531840	20260815183256	C6PJ	PICROSS3D
+```
+
+`4026531840` is `0xF0000000`. That is `RA_SYNTHETIC_ID_BASE`, the id this fork gives a definition
+that arrived without one — and the built-in self-test is exactly such a definition. And the
+launcher log from the following boot:
+
+```
+-- stage 13: report what the last session earned --
+queue            1 to send
+  4026531840  earned 71 s ago
+  4026531840  refused: Unknown achievement.
+award reply:
+  {"Success":false,"Status":404,"Code":"not_found","Error":"Unknown achievement."}
+awarded 0, refused 1, still owed 0
+```
+
+Read together they describe a loop, not an incident. Picross 3D is a game the server answers for
+with no definitions — `definitions none`, `2 server notice(s) dropped`, the set is literally called
+*Unsupported Game Version (Picross 3D)*. With nothing staged, `cardenginei_arm9_ra` falls back to
+its built-in self-test, the self-test triggers seconds into play, the trigger goes down the unlock
+ring to the ARM7, and the ARM7 appends it to `ra_unlocks.txt` exactly as it would a real
+achievement. Next boot: the launcher submits it, gets a 404, clears it — and the self-test refills
+the file before the player reaches a menu.
+
+So the queue was **never** clean on an unsupported game. It was cleared correctly every boot and
+refilled every boot, which from the outside is indistinguishable from never being cleared at all.
+
+### Three things it was costing
+
+| | |
+| --- | --- |
+| The menu | Sync Pending counted a fake unlock. A fake is indistinguishable from a real one once it is in the file — the record even carries a game code and title, because the ARM7 stamps those from the running cartridge. |
+| The card | One junk record per boot of every unsupported game. |
+| The server | A `404 Unknown achievement` per boot, from a client whose User-Agent is still trying to get sanctioned by RA. Of everything here, this is the one that could have cost the project the feature. |
+
+It also retires a symptom that was closed on the wrong evidence. "`RA UNLOCKED` appeared at the
+start of the game where the probe should no longer be" was attributed to the `RA_LAUNCHER_WIFI=0`
+delivery fault and fixed by `tools/ra_release.sh`. That fault was real — but the self-test *also*
+fires on a correct `=2` build in any game the server does not know, so that symptom had a second
+cause and it was never closed.
+
+### The guard, and where it goes
+
+In `ra_rc_queue_unlock()`, the one function every trigger passes through:
+
+```c
+if (id >= RA_SYNTHETIC_ID_BASE) {
+    if (unlockSynthetic < 255) {
+        unlockSynthetic++;
+    }
+    return;
+}
+```
+
+**Here rather than downstream, because this is the only place that knows the id is synthetic.** By
+the time it reaches the ARM7 or the launcher it is just a large number, and a large number is what
+a real id looks like.
+
+The notification is deliberately untouched. The overlay is driven by `triggeredCount`, which the
+event handler bumps *before* calling this, so the self-test still proves on screen that the reader,
+the runtime, the ring and the overlay all work. It just no longer claims a player earned something.
+
+Counted rather than dropped in silence, and published as `raSnapshot.unlockSynthetic` in the two
+padding bytes that were already there — the snapshot is still 0xCC. On a game with no definitions,
+"the self-test fired and was correctly not queued" and "nothing fired at all" are the two states
+worth telling apart, and last time it took a card's queue file to tell them apart.
+
+### And the cards already carrying them
+
+`raQueueScan()` drops synthetic ids on the way in and counts them separately from `dropped` —
+these are well-formed records that meant something to the build that wrote them, so "cleaned one"
+and "your file is corrupt" stay distinguishable. The launcher says so
+(`N self-test id(s) discarded, not achievements`) and rewrites the file even when the queue reads
+as empty, which it now does: without that the record would sit there being counted by the menu on
+every future boot, because nothing else clears an empty queue.
+
+The placement inside the scanner is the part that has to be right. The drop happens **after** the
+record's stamp, code and title are consumed, not at the id — dropping early would leave
+`20260815183256` and `PICROSS3D` to be read as two more ids, which is the same trap the tab
+delimiter exists to avoid. The host suite pins that case with the exact record off the card.
+
+One test changed rather than being added: the queue parser's upper-bound case used to assert that
+`4294967295`, the largest `u32`, survives a scan. It no longer does — it is above
+`RA_SYNTHETIC_ID_BASE` — so the boundary is now stated on `RA_SYNTHETIC_ID_BASE - 1`. Real RA ids
+are six or seven digits, so nothing real is near either number.
+
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
