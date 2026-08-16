@@ -6761,6 +6761,12 @@ against the other copy of it.
 The test rig is the standing one — TWiLight Menu at its defaults, on a 3DS, from the SD card. Two
 boots answer everything, and neither needs the radio.
 
+**Set `sync=0` alongside `hardcore=1` for all of this.** Not only because it is faster — the ladder
+exits at stage 0c instead of spending forty seconds failing to associate — but because it is the
+only way to exercise hardcore without risking the queue while the User-Agent is unrecognised; see
+"The hazard in turning it on today". It is also the case the whole design turns on, since staging
+happens ten rungs before the pending tally does.
+
 With `hardcore=1` in `ra.cfg`, `sd:/ra_wifi_launcher.log` should carry, in stage 0c:
 
 ```
@@ -6789,9 +6795,8 @@ and the viewer should edit exactly as it always has. That second boot is the one
 the failure this change can plausibly introduce is not a hardcore session that edits, it is every
 *other* session losing its editor because the block was read wrong.
 
-`sync=0` is the cheapest way to test both, and it is also the case the whole design turns on — it
-exits the ladder at stage 0c, ten rungs before the pending tally is staged, and the lock must still
-be in force.
+All of it with `sync=0`, per the note above: the ladder exits at stage 0c, ten rungs before the
+pending tally is staged, and the lock must still be in force.
 
 ## A queued unlock remembers the mode it was earned in
 
@@ -6985,6 +6990,34 @@ would get its RAM editor back with nothing failing to compile.
 
 Nothing on the ARM7: the cheat total was already computed there for the engine's own sake, and the
 extra work is a compare and a byte store. `cardenginei_arm7_twlsdk` stays at 60 bytes of margin.
+
+### The hazard in turning it on today, which is not in this code
+
+Setting `hardcore=1` with `sync=1` before the User-Agent is recognised **can lose unlocks**, and the
+mechanism is a rule that is correct for the case it was written for.
+
+`raWifiSubmitOne()` keeps a record only when *nobody answered* — a dropped connection, a timeout. A
+record the server answers and does not accept is counted as refused and cleared, because the
+refusals that rule was written against are "unknown achievement" and "already held", where keeping
+it means retrying the same rejection on every boot forever.
+
+Nobody has yet seen what the server does with `h=1` from a client it does not recognise. Three
+things are possible — refuse it, accept it and record it as softcore, or accept it and record
+nothing — and only the first is a problem. If it is the first, a real achievement is discarded by a
+rule that thinks it is cleaning up a bad id.
+
+**This is deliberately not guarded against.** A guard would have to tell "refused because this
+client may not claim hardcore" from "refused because the id is wrong", and the only thing that could
+tell them apart is the server's `Error` string, which nobody here has read. Writing a matcher
+against a message that has never been seen is the kind of guess this document has a section about.
+What is done instead is to say so where a player will read it, in `tools/ra.example.cfg`, and to
+name the safe way to exercise all of this: **`hardcore=1` with `sync=0`.** The session is staged
+before the radio is touched, so the lock, the menu line and the recorded mode all work, and nothing
+is ever sent or cleared.
+
+The first run that does point a real account at it should read the award reply body in the log
+before drawing any conclusion — it is already logged in full, for the separate reason that
+`Success:true` and "the account holds it" turned out not to be the same statement.
 
 ### What this still does *not* settle
 
