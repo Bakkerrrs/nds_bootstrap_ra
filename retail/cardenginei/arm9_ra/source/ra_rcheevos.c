@@ -299,10 +299,33 @@ static u8    activatedCount;
 static int   defFirstError;
 
 /*
-    The test achievement's id. Any non-zero number does; it is only how the runtime
-    identifies the trigger back to us, and nothing here talks to the server yet.
+    The test achievement's id.
+
+    **It is RA_SYNTHETIC_ID_BASE, and the reason is a bug that reached a real account.**
+
+    This used to be 1, under a comment that said "any non-zero number does; it is only how the
+    runtime identifies the trigger back to us, and nothing here talks to the server yet". Every
+    clause of that was true when it was written. The last one stopped being true, and nothing
+    brought the constant along.
+
+    So on every game RetroAchievements does not know -- which is when the self-test runs -- this
+    fired, went down the ring to the ARM7, was written to sd:/ra_unlocks.txt, and was submitted.
+    Achievement 1 is a real, published achievement on a Mega Drive game, so the server accepted it
+    and filed it on the player's account. It had been doing that since the self-test existed.
+
+    The guard in ra_rc_queue_unlock() below was written for exactly this failure and did not catch
+    it, because it tests `id >= RA_SYNTHETIC_ID_BASE` and 1 is not. That guard was added after a
+    card was found carrying `4026531840` -- 0xF0000000 -- which is what a *staged definition with no
+    id* gets. The built-in self-test is the other kind of idless definition and had a constant of its
+    own, four hundred lines away, that the fix never touched. One bug, two spellings, and the fix
+    spelled it one way.
+
+    Making the two the same value is what closes it rather than another check: there is no longer a
+    number here that the guard has to be told about separately. Nothing collides -- an idless staged
+    definition takes `RA_SYNTHETIC_ID_BASE + i`, and the self-test only activates when no definition
+    was activated at all, so index 0 is never both.
 */
-#define RA_TEST_ACHIEVEMENT_ID 1
+#define RA_TEST_ACHIEVEMENT_ID RA_SYNTHETIC_ID_BASE
 
 /*
     rcheevos asks for memory through this, once per distinct address per frame.

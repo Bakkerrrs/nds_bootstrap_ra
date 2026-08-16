@@ -1131,6 +1131,32 @@ int main(void) {
 	    address translation lands on the right word, and whether the peek path refuses
 	    anything it should not.
 	*/
+	printf("\nthe self-test's own id is one the unlock guard refuses\n");
+	{
+		/*
+		    The bug this pins reached a real account, and it reached it past a guard written for it.
+
+		    ra_rc_queue_unlock() refuses an id at or above RA_SYNTHETIC_ID_BASE, because that is what
+		    a definition with no id of its own gets. The **built-in** self-test is the other kind of
+		    idless definition and carried its own constant, RA_TEST_ACHIEVEMENT_ID, four hundred lines
+		    away -- which was 1. So on every game the server does not know, the self-test fired,
+		    passed the guard, was queued, and was submitted. Achievement 1 is published on a Mega
+		    Drive game, so the server accepted it.
+
+		    Checked by *calling the guard* rather than by comparing the two constants, because what
+		    has to hold is that nothing this binary invents can be queued -- not that two numbers
+		    happen to be ordered. A future third source of made-up ids fails here the same way.
+		*/
+		const u8 queuedBefore    = unlockQueued;
+		const u8 syntheticBefore = unlockSynthetic;
+
+		ra_rc_queue_unlock(RA_TEST_ACHIEVEMENT_ID);
+		CHECK(unlockQueued == queuedBefore);
+		CHECK(unlockSynthetic == syntheticBefore + 1);
+		/* And stated as the relationship too, so a failure says which half moved. */
+		CHECK(RA_TEST_ACHIEVEMENT_ID >= RA_SYNTHETIC_ID_BASE);
+	}
+
 	printf("\nrcheevos parses the definition and evaluates it\n");
 	/*
 	    rcheevos comes up over several ticks now -- see RA_RC_LOADING. Ticked until it settles,

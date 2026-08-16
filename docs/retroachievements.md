@@ -6656,6 +6656,66 @@ there. Not at the `done:` fallback, because a ladder that never got that far can
 this ROM" from "never asked" — and the hand file is the only way to test definitions with no access
 point at all. It stays staged on every path except the one that positively contradicts it.
 
+### The same bug had a second spelling, and the fix only spelled it one way
+
+Months later, a player asked why achievement **1** kept appearing on their account. It has no game
+of its own as far as any DS set is concerned, it had been arriving since early on, and nobody had
+looked because it looked like something RetroAchievements did rather than something we did.
+
+It is `RA_TEST_ACHIEVEMENT_ID`, and it was `1`, under this comment:
+
+> The test achievement's id. Any non-zero number does; it is only how the runtime identifies the
+> trigger back to us, **and nothing here talks to the server yet**.
+
+Every clause was true when it was written. The last one stopped being true when step 6b closed the
+loop, and nothing brought the constant along.
+
+**So the guard above was written for this exact failure and did not catch it.** It tests
+`id >= RA_SYNTHETIC_ID_BASE`, because the card that exposed the bug was carrying `4026531840` —
+`0xF0000000`, what a *staged definition with no id* gets. The **built-in** self-test is the other
+kind of idless definition, and it had a constant of its own four hundred lines away. One bug, two
+spellings, and the fix spelled it one way.
+
+The consequence is the one this section already said was the worse kind: a synthetic id gets a 404,
+and **a real id gets accepted**. Achievement 1 is published, on a Mega Drive game, so every boot of
+a DS game the server does not know filed a Sonic unlock on the player's account. Confirmed by the
+player from the site, and deleted there.
+
+#### The fix is to stop having two numbers
+
+`RA_TEST_ACHIEVEMENT_ID` is now `RA_SYNTHETIC_ID_BASE`. Not a second check — there is simply no
+longer a value here that the guard has to be told about separately. Nothing collides: an idless
+staged definition takes `RA_SYNTHETIC_ID_BASE + i`, and the self-test only activates when no
+definition was activated at all, so index 0 is never both.
+
+The host suite now pins it **by calling the guard**, not by comparing the two constants:
+`ra_rc_queue_unlock(RA_TEST_ACHIEVEMENT_ID)` must leave the ring untouched and bump
+`unlockSynthetic`. What has to hold is that nothing this binary invents can be queued, not that two
+numbers happen to be ordered — a third source of made-up ids fails that test the same way. With the
+old value it fails three times.
+
+#### Cards already carrying one, and why nothing filters it
+
+A queued `4026531840` is dropped on the way in, safely, because no real id is near it. **A queued
+`1` cannot be filtered on the same terms**, because 1 *is* a real achievement — the player found
+which one. Any rule that dropped it would be a guess about RetroAchievements' id space dressed up
+as a check, and this document has a section about what those cost.
+
+So the source is fixed and nothing cleans up after it. A card that has been running unsupported
+games may still hold one; deleting `sd:/ra_unlocks.txt` clears it, and the launcher recreates the
+file at full length on the next boot.
+
+#### It was not the id in the run that found it
+
+Worth separating, because the two are independent and both were real. In the log that exposed this,
+id 1 was submitted **without `o=`** — no `earned N s ago` line beside it. A self-test record goes
+through `raUnlockAppend()` like any other and carries a stamp, as the `4026531840` record above
+does. So that particular `1` had no record of its own: it was the mode field's digit, left in front
+of the parser by the padding bug. The recurring one, on games the server does not know, is this one.
+
+Two sources, one wrong id, and the log alone could not have told them apart. The missing timestamp
+could.
+
 ## The RAM viewer closes for a hardcore session
 
 The hardcore gate used to refuse every session, and only one of its two reasons was about the
