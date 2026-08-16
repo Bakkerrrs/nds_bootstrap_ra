@@ -711,6 +711,34 @@ static void raWifiIdentify(void) {
 		raWifiLog("\x1b[33mthe server does not know this hash\x1b[37m\n"
 		          "the dump is not one the set covers.\n");
 		raWifiLog("body: %s\n", raNetBody(response));
+		/*
+		    And throw away anything already staged for it, because this reply is the one thing that
+		    can say no set applies -- and until now it was the only answer that left the *wrong* set
+		    armed.
+
+		    loadRaDefinitions() stages sd:/_nds/nds-bootstrap/ra_definitions.txt for whatever game is
+		    booting, unconditionally: it is a hand-managed debugging file with no way to know which
+		    game it belongs to, and it says so. That is harmless while it is overwritten -- for a ROM
+		    the server knows, stage 15 replaces the block with that ROM's own set, empty or not.
+
+		    A ROM the server does *not* know never reaches stage 15 ("no GameID; the set cannot be
+		    asked for"), raWifiCacheLoad() has no cache for it either, and the hand file therefore
+		    survives into the game. Seen on a card: ra_definitions.txt held Ketsui Death Label's
+		    fifteen definitions and the console booted Arkanoid DS, which the server does not know --
+		    so Ketsui's triggers spent that session watching Ketsui's addresses inside Arkanoid's RAM.
+
+		    Worse than the self-test bug this branch started with, and in the one way that matters:
+		    these are **real RetroAchievements ids**. A trigger firing on unrelated memory queues an
+		    unlock the server will happily accept, and the player wakes up holding an achievement for
+		    a game they were not playing. Nothing undoes that from here.
+
+		    Cleared here rather than at the `done:` fallback because here is where the fact exists. A
+		    ladder that never got this far cannot tell "no set for this ROM" from "never asked", and
+		    the hand file is the only way to test definitions with no access point at all -- so it
+		    stays staged on every path except the one that positively contradicts it.
+		*/
+		*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
+		raWifiLog("staged definitions discarded: they cannot be this ROM's\n");
 		return;
 	}
 
@@ -2066,6 +2094,12 @@ done:
 	    whatever loadRaDefinitions() staged before the ladder ran still stands. The cache is preferred
 	    over that file because it is this ROM's own set rather than one hand-managed file that cannot
 	    know which game is running.
+
+	    With one exception, and it is the case that made the exception necessary: if the server was
+	    asked about this ROM and answered that it does not know it, raWifiIdentify() has already
+	    thrown the staged definitions away. "Still stands" above means "on every path that did not
+	    positively contradict it" -- a hand file surviving into a game it was never written for is
+	    how a real achievement id gets queued from a game nobody was playing.
 	*/
 	if (!verdict.patched && raWifiCacheLoad(sdFound)) {
 		verdict.defsBytes = *(u32*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + 4);

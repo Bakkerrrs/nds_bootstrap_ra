@@ -6607,6 +6607,48 @@ One test changed rather than being added: the queue parser's upper-bound case us
 `RA_SYNTHETIC_ID_BASE` — so the boundary is now stated on `RA_SYNTHETIC_ID_BASE - 1`. Real RA ids
 are six or seven digits, so nothing real is near either number.
 
+### Confirmed on hardware, and it found a second one
+
+*Ketsui Death Label* earned `301258` (*Sea Horse Hunter*), then the console booted **Arkanoid DS**,
+which the server does not know:
+
+```
+the server does not know this hash
+body: {"Success":true,"GameID":0}
+...
+queue            1 to send
+  301258  earned 127 s ago
+  301258  awarded
+awarded 1, refused 0, still owed 0
+```
+
+`ra_unlocks.txt` afterwards: empty. The real unlock crossed a game boundary and cleared, and the
+self-test wrote nothing behind it. That is both halves of the fix, in the hardest case available.
+
+**But the same log exposes a worse bug of the same shape**, and this one queues *real* ids.
+
+`loadRaDefinitions()` stages `ra_definitions.txt` for whatever game is booting, unconditionally —
+it is a hand-managed debugging file with no way to know which game it belongs to, and it says so.
+That is harmless while something overwrites it, which for a ROM the server knows is exactly what
+stage 15 does.
+
+A ROM the server does **not** know never reaches stage 15 (`no GameID; the set cannot be asked
+for`), `raWifiCacheLoad()` has no cache for it either, and the hand file survives into the game. On
+this card `ra_definitions.txt` held Ketsui's fifteen definitions — so Arkanoid DS ran with Ketsui's
+triggers armed, watching Ketsui's addresses (`0x090ae8`, `0x0572f8`, …) inside Arkanoid's RAM.
+
+Worse than the self-test, in the one way that matters. A synthetic id gets a 404. **A real id gets
+accepted**: a trigger firing on unrelated memory queues an unlock the server records, and the player
+wakes up holding an achievement for a game they were not playing. Nothing undoes that from here.
+
+Nothing fired during that session — the queue came back clean — which is luck, not design.
+
+The fix is one line and it goes where the fact exists: `r=gameid` returning `GameID: 0` is the only
+answer that can say *no set applies to this ROM*, so `raWifiIdentify()` clears the staged block
+there. Not at the `done:` fallback, because a ladder that never got that far cannot tell "no set for
+this ROM" from "never asked" — and the hand file is the only way to test definitions with no access
+point at all. It stays staged on every path except the one that positively contradicts it.
+
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
