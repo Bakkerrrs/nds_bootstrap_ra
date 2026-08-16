@@ -6853,6 +6853,39 @@ twice: the index needs its own constant in `locations.h`, the menu needs its lab
 what produced the black-screen-then-TWiLight crash the first time the RetroAchievements folder was
 added.
 
+### 7. Rich presence — measured, and the answer is "most games, not all"
+
+Two halves, and only one is blocked. **Rendering** a script is reachable: it is memory reads against
+a script, which this fork already does sixty times a second, with rcheevos here and an arena that
+has margin. **Sending** it is not, for the reason written down under "In-game networking, reopened
+and then closed by measurement" -- the game's boot kills the link and dsiwifi's ARM7 half wants
+104,148 bytes against 12,636 free.
+
+So the question for the reachable half was never whether a script can be evaluated. It was whether
+it can be **stored**. One counter and three boots answered it:
+
+| game | set | RP script | total | of the 30,199-byte block |
+| --- | --- | --- | --- | --- |
+| Ketsui Death Label | ~4,000 | 1,786 | 5,786 | 19% |
+| Contra 4 | 9,662 | 1,768 | 11,430 | 38% |
+| **Super Mario 64 DS** | 28,585 | **14,115** | 42,700 | **141%** |
+
+An eight-fold spread, and the two extremes are the same game. Worse: Mario 64 DS's 28,585 is the set
+*without* titles, points or descriptions -- with them it passes 33,600 and overflows the block on its
+own. Its arena is at 91% too (128,352 of 140,852), so there is no room to move it to either.
+
+**So the policy is fit-or-drop, counted and logged.** A script that fits is stored and rendered; one
+that does not is refused whole, because a truncated Rich Presence script is not a shorter script --
+its lookup tables are what make up most of its length, and rcheevos would refuse to parse the
+remainder. Two of the three games measured get rich presence; the largest does not, and the log says
+which.
+
+The path that would give it to Mario 64 DS as well is worth naming rather than pretending it does not
+exist: **put the script on the SD instead of in the block**, and hand the cardengine its cluster the
+way `ra_unlocks.txt` is handed over today. Then it never competes with the definitions. The cost
+moves to the arena at parse time, which for the one game that needs it is already at 91% -- so that
+route needs its own measurement before it is a plan.
+
 ### 5. The deferred graphical limitations
 
 Catalogued above with what the sprite path changed about each. Items 1 (the in-game menu collision) and
