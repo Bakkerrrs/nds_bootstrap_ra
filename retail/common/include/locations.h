@@ -221,6 +221,36 @@
                                                       - CARDENGINEI_ARM9_RA_PENDING_MAX \
                                                       - CARDENGINEI_ARM9_RA_VIEWER_MAX)
 
+/*
+    What kind of session this boot is running, for the in-game menu. Today that is one flag:
+    whether the player asked for hardcore and got it.
+
+    Staged and copied exactly like the tally and the index above, and kept *separate* from the
+    tally for one reason, which is timing. raWifiStagePending() runs at stage 13, so every
+    ordinary early exit -- `sync=0`, no access point, a refused login -- leaves no pending block
+    at all, while the ladder still falls through to `done:`, loads this ROM's cached set and boots
+    the game. A session that earns achievements with the radio off is the normal case here, not an
+    edge. A hardcore flag folded into a block that is absent on exactly those boots would read as
+    "not hardcore" precisely when the answer matters most, and the menu would unlock its RAM
+    editor for a session that is about to claim h=1.
+
+    So this one is written the moment ra.cfg has been parsed and the gate has run, before a single
+    register of the radio is touched, on every path out of raWifiProbe().
+
+    Its absence is meaningful and is the safe default: no magic means no launcher told this boot
+    anything, which happens on a plain nds-bootstrap build, on a RA_LAUNCHER_WIFI=0 build, and on
+    any console where the RA window is not staged. None of those can submit a hardcore unlock, and
+    all of them should leave the RAM viewer exactly as it has always been.
+
+    256 bytes for one flag, for the reason the tally's half-kilobyte gives: the next thing the menu
+    needs to know about the session should cost a field rather than three constants and a copy.
+*/
+#define CARDENGINEI_ARM9_RA_SESSION_MAGIC            0x31534152   /* 'RAS1' */
+#define CARDENGINEI_ARM9_RA_SESSION_MAX              0x100
+#define CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x38200)
+#define CARDENGINEI_ARM9_RA_SESSION_LOCATION         (CARDENGINEI_ARM9_RA_VIEWER_LOCATION \
+                                                      - CARDENGINEI_ARM9_RA_SESSION_MAX)
+
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
 #define COLOR_LUT_BUFFERED_LOCATION                  0x027D0000
 #define CARDENGINEI_ARM9_SDK5_BUFFERED_LOCATION      0x027E0000

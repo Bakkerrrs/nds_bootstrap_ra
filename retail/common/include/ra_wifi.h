@@ -295,6 +295,28 @@ typedef struct raPendingBlock {
 	u32  queued[RA_PENDING_QUEUED_MAX];
 } raPendingBlock;
 
+#define RA_SESSION_MAGIC       0x31534152u   /* 'RAS1' */
+
+/*
+    What the in-game menu needs to know about this boot's session, staged before the radio is
+    touched. See CARDENGINEI_ARM9_RA_SESSION_LOCATION for why it is not part of the block above.
+
+    One flag so far, and it is a capability rather than a preference: `hardcore` set means the menu
+    must refuse to *write* memory, because everything this session queues will be claimed as
+    hardcore when some later boot has a network to claim it on. The menu reads memory either way --
+    RetroAchievements' rules are about editing, and a hex dump of a running game is a debugging
+    tool this fork has no reason to take away.
+
+    Written by the launcher, read by cardenginei_arm9_igm, and by nothing else. The cardengine that
+    evaluates achievements does not consult it: it queues what it earns, and whether that queue may
+    be sent as hardcore was decided here, at boot, by the same word.
+*/
+typedef struct raSessionBlock {
+	u32 magic;      /* RA_SESSION_MAGIC, so an unwritten window is not read as an answer */
+	u8  hardcore;   /* the mode the launcher settled on, after raWifiHardcoreRefused() */
+	u8  pad[3];
+} raSessionBlock;
+
 /*
     What one pass over the queue did, so the log can say it rather than imply it.
 

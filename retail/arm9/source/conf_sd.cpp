@@ -228,9 +228,24 @@ extern "C" void loadRaDefinitions(void) {
 	size = ftell(file);
 	fseek(file, 0, SEEK_SET);
 
-	/* Room for the header and a terminator, or it does not go. */
+	/*
+	    Room for the header and a terminator, or it does not go -- and room for the three structures
+	    that live in the top of this same reservation, which this check used to ignore.
+
+	    raWifiFetchPatch() has subtracted them for a while, because a fetched set arrives from a
+	    scanner that fills whatever it is given. A hand-written file is bounded by whoever wrote it
+	    and so looked safe, but the bound is the same bound: at 30 KB this file would have written
+	    straight through the pending tally, the viewer's index and the session block that decides
+	    whether the in-game menu may edit RAM. Two of those are cosmetic if they are wrong. The third
+	    is not, and a file large enough to reach it would silently unlock the RAM editor in a
+	    hardcore session.
+	*/
 	if (size > 0
-	 && size < (long)(CARDENGINEI_ARM9_RA_DEFS_MAX - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1)) {
+	 && size < (long)(CARDENGINEI_ARM9_RA_DEFS_MAX
+	                  - CARDENGINEI_ARM9_RA_PENDING_MAX
+	                  - CARDENGINEI_ARM9_RA_VIEWER_MAX
+	                  - CARDENGINEI_ARM9_RA_SESSION_MAX
+	                  - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1)) {
 		u8* text = (u8*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
 		                 + CARDENGINEI_ARM9_RA_DEFS_HEADER);
 		if (fread(text, 1, size, file) == (size_t)size) {
@@ -1846,12 +1861,19 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 		    never writes, and that stale word is what decides whether the in-game menu shows a
 		    pending list and whose.
 
-		    Three words that must be cleared, in one place, rather than two here and one by
-		    somebody else's exit path.
+		    Four words now, and the fourth is the one where a stale value is not merely
+		    cosmetic. The session block tells the in-game menu whether this boot is hardcore,
+		    and the menu locks its RAM editor when it is. Left uncleared, the word RAM came up
+		    holding decides that -- in either direction. A stale "hardcore" would refuse a
+		    player their hex editor for no reason they can see, and a stale magic over a boot
+		    that never staged one would hand the editor to a hardcore session.
+
+		    Cleared in one place, rather than three here and one by somebody else's exit path.
 		*/
 		*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = 0;
 		*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
 		*(u32*)CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION = 0;
+		*(u32*)CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION = 0;
 		if (!colorTable && conf->consoleModel > 0) {
 			if (loadCardEngineBinary("nitro:/cardenginei_arm9_ra.bin",
 					(u8*)(CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + CARDENGINEI_ARM9_RA_IMAGE_OFFSET)) == 0) {

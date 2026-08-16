@@ -2403,6 +2403,20 @@ int arm7_main(void) {
 				*(u32*)CARDENGINEI_ARM9_RA_PENDING_LOCATION = 0;
 			}
 
+			/*
+			    And what kind of session this is, on the same terms again: its own
+			    magic, checked separately, and the destination's first word zeroed when
+			    there is nothing to copy. That zero is what the in-game menu reads as
+			    "nobody told me", which is the answer that leaves its RAM editor alone.
+			*/
+			if (*(u32*)CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION == CARDENGINEI_ARM9_RA_SESSION_MAGIC) {
+				tonccpy((u32*)CARDENGINEI_ARM9_RA_SESSION_LOCATION,
+				        (u32*)CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION,
+				        CARDENGINEI_ARM9_RA_SESSION_MAX);
+			} else {
+				*(u32*)CARDENGINEI_ARM9_RA_SESSION_LOCATION = 0;
+			}
+
 			if (ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed) {
 				arm9_stateFlag = ARM9_WRAMONARM9;
 				while (arm9_stateFlag != ARM9_READY);
@@ -2411,6 +2425,7 @@ int arm7_main(void) {
 		*(u32*)CARDENGINEI_ARM9_RA_BUFFERED_LOCATION = 0;
 		*(u32*)CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION = 0;
 		*(u32*)CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION = 0;
+		*(u32*)CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION = 0;
 
 		toncset((u32*)CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION, 0, 0x1800);
 		*(u32*)(COLOR_LUT_BUFFERED_LOCATION-4) = 0;

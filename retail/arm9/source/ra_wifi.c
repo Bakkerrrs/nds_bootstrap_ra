@@ -1433,14 +1433,16 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	char* const    block = (char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
 	                               + CARDENGINEI_ARM9_RA_DEFS_HEADER);
 	/*
-	    Minus the two things that live in the top of this same reservation: the pending tally the
-	    menu's Sync Pending page reads, and the viewer's index. Subtracted here rather than trusted
-	    to stay clear -- the block is written by a scanner that fills whatever it is given, so the
-	    only thing standing between a large set and those two structures is this number.
+	    Minus the three things that live in the top of this same reservation: the pending tally the
+	    menu's Sync Pending page reads, the viewer's index, and the session block that tells the menu
+	    whether it may edit RAM. Subtracted here rather than trusted to stay clear -- the block is
+	    written by a scanner that fills whatever it is given, so the only thing standing between a
+	    large set and those three structures is this number.
 	*/
 	const u32      blockMax = CARDENGINEI_ARM9_RA_DEFS_MAX
 	                          - CARDENGINEI_ARM9_RA_PENDING_MAX
 	                          - CARDENGINEI_ARM9_RA_VIEWER_MAX
+	                          - CARDENGINEI_ARM9_RA_SESSION_MAX
 	                          - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1;
 	raNetProgress  p;
 	int            got;
@@ -1960,14 +1962,24 @@ bool raWifiShutdown(void) {
                     so there is nothing to switch off and nothing to check. Stated rather than left
                     as an assumed gap, because "we did not find it" and "it does not exist" are
                     different claims and only one of them is true here.
-      RAM editing   the in-game menu's RAM viewer *writes* -- see the RAMW message in inGameMenu.c.
-                    That is a cheat device by any reading of the rules, it is live during play rather
-                    than decided at boot, and it is **not gated yet**. It is the piece that has to
-                    move next, and until it does no build here should claim hardcore.
+      RAM editing   the in-game menu's RAM viewer writes -- and **now refuses to when the session is
+                    hardcore**. This was an unconditional refusal here for as long as it could not
+                    be anything else: the editor is a page two button presses away rather than a
+                    setting a player turns on, so there was no state to consult. There is now.
+                    raWifiStageSession() below hands the menu the mode this boot settled on and the
+                    menu holds its editor shut for it, which is what lets this function stop
+                    refusing every session out of hand. See CARDENGINEI_ARM9_RA_SESSION_LOCATION,
+                    and the `mode == 1` branch of ramViewer() where the refusal now lives.
 
     The rule for what to do about it: **fall back to softcore and say so**, never claim hardcore and
     hope. An unlock claimed as hardcore under a cheat file is exactly what gets a client's
     User-Agent refused, and this fork's User-Agent is still trying to be recognised at all.
+
+    One disqualification is left and this function cannot make it, because it is not a fact about
+    this console: the server does not recognise our User-Agent, and its own notice says it declines
+    hardcore for a client it does not know. Whatever ra.cfg asks for, hardcore is not actually
+    available until that is answered -- see "What is left" in docs/retroachievements.md. What this
+    change buys is that the answer is now the only thing in the way.
 */
 static bool raWifiHardcoreRefused(const raConfig* cfg, bool cheatsOn) {
 	if (!cfg->hardcore) {
@@ -1977,13 +1989,34 @@ static bool raWifiHardcoreRefused(const raConfig* cfg, bool cheatsOn) {
 		raWifiLog("\x1b[33mhardcore refused: a cheat file is loaded for this ROM\x1b[37m\n");
 		return true;
 	}
-	/*
-	    And refused anyway while the RAM viewer can write. Deliberately unconditional: it is not a
-	    setting a player turns on, it is a page in a menu two button presses away, so there is no
-	    state to consult -- the capability is present in every build that has the menu.
-	*/
-	raWifiLog("\x1b[33mhardcore refused: the in-game menu can write RAM\x1b[37m\n");
-	return true;
+	return false;
+}
+
+/*
+    Tell the in-game menu what kind of session it is about to be opened in.
+
+    Called from the one place that knows the answer, and -- this is the whole point of it being its
+    own block rather than a field in the pending tally -- called *before* every path that can leave
+    raWifiProbe() early. The tally is staged at stage 13, so it does not exist on a boot with no
+    access point. This does, because such a boot still falls through to `done:`, still loads this
+    ROM's cached set, still plays the game and still queues unlocks for a later boot to submit as
+    hardcore. The menu has to be told on those boots most of all.
+
+    Written after raWifiHardcoreRefused() has had its say, so what the menu is handed is the mode the
+    session will actually run in rather than the one ra.cfg asked for.
+
+    The magic goes in last, for the reason the other three blocks give: the staging region is
+    uninitialised, conf_sd.cpp cleared this word on its way past, and the bootloader trusts it.
+*/
+static void raWifiStageSession(int hardcore) {
+	raSessionBlock* const block = (raSessionBlock*)CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION;
+
+	block->hardcore = hardcore ? 1 : 0;
+	block->pad[0] = block->pad[1] = block->pad[2] = 0;
+	block->magic = RA_SESSION_MAGIC;
+
+	raWifiLog("in-game menu     RAM editing %s\n",
+	          hardcore ? "\x1b[32mlocked -- hardcore\x1b[37m" : "unchanged -- softcore");
 }
 
 void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
@@ -2081,6 +2114,14 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 		raWifiLog("put username= and password= in\n%s\n",
 		          sdFound ? RA_CFG_PATH : RA_CFG_PATH_FAT);
 	}
+
+	/*
+	    And the menu is told, here, outside the `config.found` branch and above every `goto done`
+	    below it. Outside the branch because a missing ra.cfg is a softcore session rather than an
+	    unknown one, and the menu should be told that rather than left to infer it from silence.
+	    Above the exits because the exits are the common case: see raWifiStageSession().
+	*/
+	raWifiStageSession(config.hardcore);
 
 	/*
 	    `sync=0`: stop here, before a single register of the radio is touched.

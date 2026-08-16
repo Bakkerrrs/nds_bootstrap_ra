@@ -1652,12 +1652,60 @@ static void test_queue(void) {
 		CHECK(sizeof(raViewerBlock) <= CARDENGINEI_ARM9_RA_VIEWER_MAX);
 		CHECK(RA_VIEWER_MAGIC == CARDENGINEI_ARM9_RA_VIEWER_MAGIC);
 		/*
-		    And the three regions do not overlap: the block ends where the viewer's index begins, and
-		    that begins where the pending tally does not. Stated as arithmetic because the launcher's
-		    blockMax is the only thing keeping the scanner out of both.
+		    Same pin again for the session block, and this is the one where the two constants are
+		    read by code that can never be compared by a compiler: the launcher writes RA_SESSION_-
+		    MAGIC from ra_wifi.h and the bootloader checks CARDENGINEI_ARM9_RA_SESSION_MAGIC from
+		    locations.h. Drifted apart, the bootloader would zero the destination on every boot, the
+		    menu would read "nobody told me", and a hardcore session would get its RAM editor back
+		    with nothing failing to compile and no message anywhere.
 		*/
+		CHECK(RA_SESSION_MAGIC == CARDENGINEI_ARM9_RA_SESSION_MAGIC);
+		CHECK(sizeof(raSessionBlock) <= CARDENGINEI_ARM9_RA_SESSION_MAX);
+		/*
+		    And the four regions do not overlap: the definitions end where the session block begins,
+		    that ends where the viewer's index begins, and that ends where the pending tally does.
+		    Stated as arithmetic because the launcher's blockMax is the only thing keeping the
+		    scanner out of all three.
+		*/
+		CHECK(CARDENGINEI_ARM9_RA_SESSION_LOCATION + CARDENGINEI_ARM9_RA_SESSION_MAX
+		      == CARDENGINEI_ARM9_RA_VIEWER_LOCATION);
 		CHECK(CARDENGINEI_ARM9_RA_VIEWER_LOCATION + CARDENGINEI_ARM9_RA_VIEWER_MAX
 		      == CARDENGINEI_ARM9_RA_PENDING_LOCATION);
+		CHECK(CARDENGINEI_ARM9_RA_PENDING_LOCATION + CARDENGINEI_ARM9_RA_PENDING_MAX
+		      == CARDENGINEI_ARM9_RA_DEFS_LOCATION + CARDENGINEI_ARM9_RA_DEFS_MAX);
+		/*
+		    The staging copies are laid out differently from the destinations -- the pending tally is
+		    staged well past the definitions rather than inside them -- so their non-overlap is a
+		    separate fact and is checked separately.
+		*/
+		CHECK(CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION + CARDENGINEI_ARM9_RA_PENDING_MAX
+		      <= CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION);
+		CHECK(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION + CARDENGINEI_ARM9_RA_DEFS_MAX
+		      <= CARDENGINEI_ARM9_RA_PENDING_BUFFERED_LOCATION);
+	}
+
+	printf("\nand a set can never be large enough to reach any of them\n");
+	{
+		/*
+		    The cap the launcher applies to a fetched set, restated here against the reservation it
+		    is protecting. This exists because the cap is three subtractions in one function and the
+		    reservation is four constants in another, and the arithmetic that ties them was wrong for
+		    the hand-written file for as long as that file was assumed to be small -- see
+		    loadRaDefinitions() in conf_sd.cpp, which now subtracts the same three.
+		*/
+		const unsigned long blockMax = CARDENGINEI_ARM9_RA_DEFS_MAX
+		                               - CARDENGINEI_ARM9_RA_PENDING_MAX
+		                               - CARDENGINEI_ARM9_RA_VIEWER_MAX
+		                               - CARDENGINEI_ARM9_RA_SESSION_MAX
+		                               - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1;
+
+		CHECK(CARDENGINEI_ARM9_RA_DEFS_LOCATION + CARDENGINEI_ARM9_RA_DEFS_HEADER + blockMax
+		      < CARDENGINEI_ARM9_RA_SESSION_LOCATION);
+		/*
+		    And it is still big enough to be worth having: the largest real set measured on this
+		    project is 9,662 bytes.
+		*/
+		CHECK(blockMax > 16384);
 	}
 
 	printf("\nand o= changes the signature as well as the URL\n");

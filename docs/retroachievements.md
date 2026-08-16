@@ -6656,6 +6656,146 @@ there. Not at the `done:` fallback, because a ladder that never got that far can
 this ROM" from "never asked" — and the hand file is the only way to test definitions with no access
 point at all. It stays staged on every path except the one that positively contradicts it.
 
+## The RAM viewer closes for a hardcore session
+
+The hardcore gate used to refuse every session, and only one of its two reasons was about the
+player's configuration. `raWifiHardcoreRefused()` checked for a cheat file and then refused anyway,
+unconditionally, with the comment saying why: the in-game menu's RAM viewer *writes*, that is a
+cheat device by any reading of RetroAchievements' rules, and it is a page two button presses away
+rather than a setting anyone opts into. There was no state to consult, so the gate consulted none.
+
+There is state now. The viewer refuses to edit in a hardcore session, and the unconditional half of
+the gate is gone. What remains is the cheat-file check — and the User-Agent, which is not a fact
+about this console and cannot be checked here at all.
+
+### What the viewer actually does, which is narrower than "the RAM viewer"
+
+Reading is not what the rules are about, and nothing about reading changed. Navigation, the jump-to
+box, the ARM7 window, the cursor: all of it works in hardcore exactly as before. A hex dump of a
+running game is a debugging tool and this fork has no reason to take it away from anybody.
+
+What is refused is entering **edit mode**, which is the only thing in the viewer that writes. That
+distinction is also what makes the refusal cheap: one branch, at the one place `mode` becomes 2.
+
+Both write paths are behind it, and they are not the same path:
+
+- **ARM9 memory is edited in place.** `ramPtr` is `(u8*)address` — the game's own memory, not a copy
+  of it — so `KEY_UP` on a selected byte is a store to the running game. There is no commit step.
+- **ARM7 memory is edited through a buffer**, and pushed across with the `RAMW` message on A or B.
+
+Entering the mode is gated once, and the mode's body is gated again. The second gate cannot fire
+today, because the branch above it is the only way in. It is there because a later change that adds
+a second way in would reopen both paths at once, and the symptom would not be a crash anybody
+notices — it would be an unlock claimed as hardcore.
+
+Pressing A in a locked session says so, over the last two rows of the dump:
+
+```
+Hardcore: RAM editing is locked
+Set hardcore=0 in ra.cfg to edit
+```
+
+Two lines because one of them has to be the way out. A refusal that does not say what to change is
+a bug report waiting to be filed.
+
+### The block, and why it is not a field in the pending tally
+
+The menu has no configuration, no filesystem and no launcher. It learns things the way it learns
+the sync tally: the launcher stages a block, the bootloader copies it into DSi WRAM, the menu reads
+it where it lands. `CARDENGINEI_ARM9_RA_SESSION_LOCATION` is the fourth such block, after the
+binary, the definitions and the tally, and it is wired exactly like them — its own magic, checked
+separately by the bootloader, cleared by `loadFromSD()` on the way past so the guarantee does not
+depend on the previous boot.
+
+The obvious cheaper thing was a `u8` inside `raPendingBlock`, which already crosses this exact gap.
+It is wrong, and the reason is *when* rather than *where*.
+
+`raWifiStagePending()` runs at **stage 13**, most of the way up the network ladder. Every ordinary
+early exit — `sync=0`, no access point, DHCP never answers, a refused login — leaves no pending
+block at all. Those boots are not failures: they fall through to `done:`, load this ROM's cached
+set, and play the game. rcheevos evaluates, achievements fire, and the queue fills up for a later
+boot to submit. **A session that earns achievements with the radio off is the normal case for this
+client, not an edge case.** A hardcore flag living in a block that is absent on exactly those boots
+would read as "not hardcore" precisely when it matters, and the menu would unlock its editor for a
+session whose unlocks are going out as `h=1`.
+
+So the session block is written the moment `ra.cfg` has been parsed and the gate has ruled, at
+stage 0c, before a single register of the radio is touched — above every `goto done` in the
+function. It carries the mode the session will *actually* run in, not the one the file asked for,
+because it is written after `raWifiHardcoreRefused()` has had its say.
+
+### Absent means unlocked, and that is the safe direction
+
+The menu treats a missing magic as "nobody told me anything", and answers softcore. That is not the
+convenient default dressed up as the safe one — it is safe because of who reaches it:
+
+| Boot | Session block | Can it submit a hardcore unlock? |
+| --- | --- | --- |
+| Plain nds-bootstrap, no RA | never staged | no — there is no RA client |
+| `RA_LAUNCHER_WIFI=0` | never staged, `ra_wifi.c` is compiled out | no — nothing submits anything |
+| DS/DSi, or a colour LUT selected | staged, never copied — the RA window does not load | no — no achievements are evaluated |
+| 3DS, `hardcore=0` or no `ra.cfg` | staged, `hardcore = 0` | no — `h=0` on every request |
+| 3DS, `hardcore=1` | staged, `hardcore = 1` | yes — and the editor is locked |
+
+Every row that reads "unlocked" is a row that cannot claim hardcore. The failure this ordering
+avoids is the other one, and it is the reason the fourth word joined the three that `loadFromSD()`
+clears: an uncleared staging word is whatever RAM came up holding, and on the first boot after
+power-on that word would otherwise decide whether a hardcore session may edit its own memory.
+
+### A bug this found on the way past
+
+`loadRaDefinitions()` capped the hand-written `ra_achievements.txt` at the definitions reservation
+minus its header, ignoring the three structures that live in the top of that same reservation.
+`raWifiFetchPatch()` has subtracted them for a while — a fetched set arrives from a scanner that
+fills whatever it is given — but a hand-written file looked safe because it is bounded by whoever
+wrote it.
+
+It is the same bound. At 30 KB that file would have written straight through the tally, the
+viewer's index and now the session block. Two of those being wrong is cosmetic. The third is a
+hardcore session with its RAM editor silently handed back, from a file the player wrote. Both caps
+now subtract all three, and the host suite pins the arithmetic against the reservation rather than
+against the other copy of it.
+
+### What to look for on the next run
+
+The test rig is the standing one — TWiLight Menu at its defaults, on a 3DS, from the SD card. Two
+boots answer everything, and neither needs the radio.
+
+With `hardcore=1` in `ra.cfg`, `sd:/ra_wifi_launcher.log` should carry, in stage 0c:
+
+```
+hardcore         1
+in-game menu     RAM editing locked -- hardcore
+```
+
+and **not** `hardcore refused: the in-game menu can write RAM`, which no longer exists. Then in the
+game: open the menu, `RAM Viewer`, A to place the cursor, A again. The two red lines should appear
+and the byte under the cursor should not change. B, then `SELECT` for the ARM7 window, and the same
+again — that is the `RAMW` path rather than the in-place one, and it is worth pressing separately.
+
+With `hardcore=0`, or with `ra.cfg` absent, the log should say `RAM editing unchanged -- softcore`
+and the viewer should edit exactly as it always has. That second boot is the one that matters most:
+the failure this change can plausibly introduce is not a hardcore session that edits, it is every
+*other* session losing its editor because the block was read wrong.
+
+`sync=0` is the cheapest way to test both, and it is also the case the whole design turns on — it
+exits the ladder at stage 0c, ten rungs before the pending tally is staged, and the lock must still
+be in force.
+
+### What this does *not* settle, and it is the next real question
+
+**The queue does not record which mode an unlock was earned in.** A record is `<id>`, a timestamp
+and the game; the mode is applied at submission, from whatever `ra.cfg` says on the boot that
+happens to have a network. So a player can earn unlocks in a softcore session with the editor open,
+set `hardcore=1`, boot, and watch them go out as `h=1`.
+
+That is exactly the shape of thing that gets a client's User-Agent refused, and it is now reachable
+in a way it was not while the gate refused every session outright. The fix is a fifth field on the
+queue record — it fits: 44 bytes used of 48 — and the launcher refusing to upgrade a record it did
+not earn. It is **deliberately not built yet**, because the deferred-submission question below has
+to be answered first: if RetroAchievements does not sanction sending an unlock on a later boot at
+all, the record's mode field is not the part of this design that needs rethinking.
+
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
@@ -6704,27 +6844,52 @@ point at all. It stays staged on every path except the one that positively contr
       rather than a date, because five characters cannot tell the ninth of August from the eighth of
       September and the launcher has the clock anyway. The queue record carries the game it came
       from, read from the ROM's own header, so it works with the radio down.
-- [ ] **Hardcore.** Blocked on nothing technical: the server injects a
+- [x] **The RAM viewer closes for a hardcore session.** The launcher stages the mode it
+      settled on before it touches the radio, on every path out of the ladder rather than
+      only the ones that reach stage 13, and the in-game menu refuses to enter edit mode
+      when it reads hardcore. Reading memory is untouched. This retired the *unconditional*
+      half of `raWifiHardcoreRefused()`: the gate now refuses for a cheat file and for
+      nothing else. **Built and host-tested; not yet confirmed on hardware** — see "What
+      to look for on the next run" in that section.
+- [ ] **Hardcore.** Blocked on nothing in this tree any more. The server injects a
       *"Warning: Unknown Emulator"* notice for an unrecognised User-Agent and blocks
       hardcore only, by its own wording. What it needs is `nds-bootstrap-ra/0.1`
       recognised by RetroAchievements, which is a conversation rather than a commit.
+      The one code-shaped thing left behind it is the queue not recording which mode an
+      unlock was earned in, and that waits on the same conversation.
 - [ ] Phase 4: rich presence, achievement list, login status
 
 ## What is left
 
 Ordered by value rather than by effort, and the first item is not code.
 
-### 1. Get the User-Agent recognised — the only thing blocking hardcore
+### 1. Get the User-Agent recognised — now genuinely the only thing blocking hardcore
 
 The server's own notice says it blocks **hardcore only** for an unrecognised client, so softcore works
-today and hardcore is a registration away. Two questions belong in that conversation rather than being
-decided here:
+today and hardcore is a registration away. Until recently that was half true: the client was also
+disqualifying itself, because the in-game menu could edit memory. It no longer can in a hardcore
+session — see "The RAM viewer closes for a hardcore session" — so the sentence in this heading is
+now literal.
 
-- What the registration process is for a client that is not an emulator.
-- Whether **deferred submission** is sanctioned. This client cannot reach the network while a game is
+Three questions belong in that conversation rather than being decided here, and the second one
+gates the third:
+
+- **What the registration process is** for a client that is not an emulator.
+- **Whether deferred submission is sanctioned.** This client cannot reach the network while a game is
   running — measured and documented under "In-game networking, reopened and then closed by
-  measurement" — so an unlock is queued to the SD card and sent on a later boot. That is a real
-  difference from every emulator integration and it is better raised than discovered.
+  measurement" — so an unlock is queued to the SD card and sent on a later boot, sometimes a day
+  later. `o=` already carries when it was earned rather than when it was sent, so the server dates it
+  correctly, but the submission itself is still out of band compared with every emulator
+  integration. It is better raised than discovered.
+- **Whether a queued unlock may be submitted in a mode chosen after it was earned.** Ours currently
+  can be, and should not be: the record carries no mode, so flipping `hardcore=1` between the boot
+  that earned it and the boot that sends it upgrades it. The fix is small and known. Whether it is
+  the *right* fix depends entirely on the answer above — if deferred submission is not sanctioned at
+  all, the mode field is not the part that needs rethinking.
+
+A draft of the message is in `docs/ra-registration-request.md`, kept in the tree so the questions
+asked and the answers given end up in the same place as everything else this project has had to
+learn the hard way.
 
 ### 2. ~~`o=` on `r=awardachievement`, so the timestamp is when it was earned~~ — done
 

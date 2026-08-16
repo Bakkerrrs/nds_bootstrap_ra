@@ -1100,9 +1100,71 @@ static void jumpToAddress(void) {
 	}
 }
 
+/*
+    Is this boot a hardcore RetroAchievements session.
+
+    The launcher settles that before it touches the radio and stages the answer where the bootloader
+    copies it, exactly as it stages the pending tally -- see CARDENGINEI_ARM9_RA_SESSION_LOCATION.
+    Read here rather than inferred from anything else in the window: a set of definitions being
+    present says achievements are being evaluated, which is true in softcore too.
+
+    **No magic means no.** That is the safe default and not merely the convenient one. The word is
+    zeroed by the bootloader on every boot that stages no session block, so a plain nds-bootstrap
+    build, a build with the launcher's network compiled out, and a console where the RA window never
+    loads all read false -- and none of those can submit a hardcore unlock. The failure this
+    ordering avoids is the other one: a stale word from a previous boot deciding that a hardcore
+    session may edit its own memory.
+*/
+static bool raHardcoreSession(void) {
+	const raSessionBlock* const s = (const raSessionBlock*)CARDENGINEI_ARM9_RA_SESSION_LOCATION;
+
+	return s->magic == RA_SESSION_MAGIC && s->hardcore != 0;
+}
+
+/*
+    Why A did nothing, said where the player is looking when they press it.
+
+    Drawn over the last two rows of the dump and left until a key is pressed; the loop redraws every
+    row from memory each pass, so nothing has to clean this up. Two lines because one of them has to
+    be the way out -- a refusal that does not say what to change is a bug report.
+
+    A is waited out before the message is dismissible, and that is not fussiness. waitKeys() gives up
+    suppressing a held key after ten frames and then returns on the next one it sees, so a press held
+    for more than about a sixth of a second would dismiss the very message it opened -- the player
+    would see a red flash and nothing they could read. Releasing first makes the dismissal a fresh
+    press whatever they did with the first one.
+*/
+static void ramEditRefused(void) {
+	print(0, 22, (unsigned char*)"Hardcore: RAM editing is locked", FONT_RED, false);
+	print(0, 23, (unsigned char*)"Set hardcore=0 in ra.cfg to edit", FONT_LIGHT_GRAY, false);
+
+	do {
+		while (REG_VCOUNT != 191) mySwiDelay(100);
+		while (REG_VCOUNT == 191) mySwiDelay(100);
+	} while (KEYS & KEY_A);
+
+	waitKeys(KEY_A | KEY_B);
+}
+
 static void ramViewer(void) {
+	bool hardcore;
+
 	clearScreen(false);
 	(*changeMpu)();
+
+	/*
+	    Read once, and after changeMpu() rather than before it.
+
+	    After, because the block lives in DSi WRAM and this function is compiled into builds that
+	    have no such thing -- the RAM viewer is offered on every console, the RA window is not. Under
+	    the widened regions the read is the same read the viewer itself is about to make of anywhere
+	    the player types, so it cannot fault where the viewer would not.
+
+	    Once, because nothing can change the answer while the menu is open -- the launcher wrote it
+	    at boot and the game has been stopped since -- and one read means the check below and the
+	    write it guards cannot disagree.
+	*/
+	hardcore = raHardcoreSession();
 
 	u8 *arm7RamBuffer = ((u8*)sharedAddr) - 0x74C;
 	tonccpy(arm7RamBak, arm7RamBuffer, 0xC0);
@@ -1213,7 +1275,20 @@ static void ramViewer(void) {
 				if(cursorPosition < 8 * 23 - 1)
 					cursorPosition++;
 			} else if (KEYS & KEY_A) {
-				mode = 2;
+				/*
+				    The one door into edit mode, and where a hardcore session is turned away.
+
+				    Here rather than at the viewer's entrance on purpose: reading memory is not
+				    what RetroAchievements' rules are about, and a hex dump of a running game is a
+				    debugging tool this fork has no reason to take away from anybody. What is
+				    forbidden is changing it, so that is what is refused -- navigation, the ARM7
+				    window and the cursor all still work.
+				*/
+				if (hardcore) {
+					ramEditRefused();
+				} else {
+					mode = 2;
+				}
 			} else if (KEYS & KEY_B) {
 				mode = 0;
 			} else if(KEYS & KEY_Y) {
@@ -1221,6 +1296,20 @@ static void ramViewer(void) {
 				clearScreen(false);
 			}
 		} else if(mode == 2) {
+			/*
+			    Gated twice, and the second gate is not decoration.
+
+			    Everything below this line writes: the four directions edit the byte under the
+			    cursor in place -- on the ARM9 `ramPtr` *is* the game's memory, not a copy of it --
+			    and A or B pushes the edited window back across to the ARM7 with RAMW. Today the
+			    branch above is the only way into this mode, so this cannot fire. A later change
+			    that adds a second way in would reopen all of it at once, and the symptom would not
+			    be a crash somebody notices: it would be an unlock claimed as hardcore.
+			*/
+			if (hardcore) {
+				mode = 1;
+				continue;
+			}
 			if (KEYS & KEY_UP) {
 				ramPtr[cursorPosition]++;
 			} else if (KEYS & KEY_DOWN) {
