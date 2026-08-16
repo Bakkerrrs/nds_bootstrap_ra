@@ -1323,6 +1323,63 @@ int main(void) {
 		*(u32*)block = 0;
 	}
 
+	printf("\nthe viewer's index is taken before the block is cut up\n");
+	{
+		/*
+		    The case the index exists for. After ra_split_definitions() has run, the record
+		    terminator and the field separators are all NUL, and an earned `#!` record still has its
+		    tabs -- two shapes in one buffer. So this asserts the offsets *against the mutated block*,
+		    which is the state the menu actually sees, using a set that carries both.
+		*/
+		char* const  block = (char*)CARDENGINEI_ARM9_RA_DEFS_LOCATION;
+		char* const  text  = block + CARDENGINEI_ARM9_RA_DEFS_HEADER;
+		const raViewerBlock* v = (const raViewerBlock*)CARDENGINEI_ARM9_RA_VIEWER_LOCATION;
+		static const char set[] =
+			"#!302329\tWelcome to the Jungle\t3\tClear Stage 1\n"
+			"302330:0xH1=1\tBack to the Lab Again\t5\tClear Stage 2\n"
+			"# a comment somebody typed\n"
+			"0xH2=2\tNo id at all\n";
+		char*        lines[RA_DEFS_MAX_LINES];
+		const char*  titles[RA_DEFS_MAX_LINES];
+		const u32    len = (u32)strlen(set);
+
+		memcpy(text, set, len + 1);
+		CHECK(ra_split_definitions(text, len, lines, titles) == 2);   /* the comment is not one */
+
+		CHECK(v->magic == RA_VIEWER_MAGIC);
+		/* Three records indexed, and the typed comment is not among them. */
+		CHECK(v->count == 3);
+		CHECK(v->earned == 1);
+
+		/* The earned one keeps its id, its flag, and all three fields. */
+		CHECK(v->entry[0].id == 302329);
+		CHECK(v->entry[0].flags == RA_VIEWER_EARNED);
+		CHECK(strcmp(text + v->entry[0].titleOff, "Welcome to the Jungle") == 0);
+		CHECK(strcmp(text + v->entry[0].pointsOff, "3") == 0);
+		CHECK(strcmp(text + v->entry[0].descOff, "Clear Stage 1") == 0);
+
+		/*
+		    And the armed one, whose fields the split has just turned into NUL-terminated strings --
+		    which is why reading them back through the index is the assertion worth making rather
+		    than reading them before it ran.
+		*/
+		CHECK(v->entry[1].id == 302330);
+		CHECK(v->entry[1].flags == 0);
+		CHECK(strcmp(text + v->entry[1].titleOff, "Back to the Lab Again") == 0);
+		CHECK(strcmp(text + v->entry[1].pointsOff, "5") == 0);
+		CHECK(strcmp(text + v->entry[1].descOff, "Clear Stage 2") == 0);
+
+		/*
+		    A record with no id and no points is indexed with what it has. Offset 0 says absent, and
+		    it is unambiguous because offset 0 is the first record's first byte.
+		*/
+		CHECK(v->entry[2].id == 0);
+		CHECK(strcmp(text + v->entry[2].titleOff, "No id at all") == 0);
+		CHECK(v->entry[2].pointsOff == 0 && v->entry[2].descOff == 0);
+
+		*(u32*)block = 0;
+	}
+
 	printf("\nthe notification's pixels come out the way the DS reads them\n");
 	{
 		/*

@@ -590,9 +590,121 @@ static void ra_rc_event_handler(const rc_runtime_event_t* runtimeEvent) {
     what each definition is meant to do -- which matters when the answer arrives hours later
     as a photograph.
 */
+/*
+    The viewer's index, filled while the block is still pristine.
+
+    Called once per record by ra_split_definitions(), from inside the loop and **before** that loop
+    replaces this record's tabs with NULs. That ordering is the whole reason this function exists
+    rather than living in the menu: see CARDENGINEI_ARM9_RA_VIEWER_LOCATION.
+
+    `base` is the definitions text, so the offsets recorded here are what the menu can use against
+    its own view of the same bytes -- the block is at one address here and another in the launcher
+    that staged it, and only an offset means the same thing in both.
+
+    Fields are found by counting tabs from the start of the record, which works for both shapes
+    without knowing which it is: neither a memaddr nor an id can contain one. So tab 1 opens the
+    title, tab 2 the points and tab 3 the description, whether the record began with `<id>:<memaddr>`
+    or with `#!<id>`.
+
+    **And each tab is replaced by a NUL as it is recorded**, which is what makes every offset here
+    the start of a C string. The first version left that to the caller and got it half right: the
+    armed path cut the first two tabs and nothing cut the third, so `pointsOff` pointed at
+    `5\tClear Stage 2` -- and an earned record, which the split skips entirely, had all three tabs
+    intact and gave a title of `Welcome to the Jungle\t3\tClear Stage 1`. The host suite caught both
+    by reading the fields back through the index rather than by inspecting the buffer.
+
+    Cutting here also removes a duplication: the memaddr and the title are terminated by the same
+    two cuts, so ra_split_definitions() now takes both from the entry instead of walking the record
+    a second time with its own copy of the rule.
+
+    Returns the entry, or NULL when the index is full, so the caller can use the offsets it just
+    recorded.
+*/
+static raViewerEntry* ra_viewer_add(char* base, char* record, u8 flags) {
+	raViewerBlock* v = (raViewerBlock*)CARDENGINEI_ARM9_RA_VIEWER_LOCATION;
+	raViewerEntry* e;
+	char*          p = record;
+	char*          d;
+	u32            id = 0;
+	int            tab = 0;
+
+	if (v->count >= RA_VIEWER_MAX_ENTRIES) {
+		return 0;
+	}
+	e = &v->entry[v->count];
+	e->id        = 0;
+	e->titleOff  = 0;
+	e->pointsOff = 0;
+	e->descOff   = 0;
+	e->flags     = flags;
+	e->pad       = 0;
+
+	if (flags & RA_VIEWER_EARNED) {
+		p += 2;   /* past the `#!` */
+	}
+
+	/*
+	    The id, and it is read rather than taken: ra_take_id() advances a pointer everything
+	    downstream depends on, and this runs before any of that. A record with no id keeps 0, which
+	    is what a hand-written file produces and what the menu shows as an achievement it cannot
+	    name to the server.
+	*/
+	d = p;
+	while (*d >= '0' && *d <= '9') {
+		id = id * 10u + (u32)(*d - '0');
+		d++;
+	}
+	if (d != p && (*d == ':' || (flags & RA_VIEWER_EARNED))) {
+		e->id = id;
+	}
+
+	for (d = record; *d; d++) {
+		if (*d != '\t') {
+			continue;
+		}
+		if (++tab > 3) {
+			break;
+		}
+		*d = 0;   /* the field before it ends here, and the one after it starts as a string */
+		{
+			const u32 off = (u32)(d + 1 - base);
+
+			/*
+			    Past what a u16 can hold means the field is unreachable from the index, and the
+			    honest answer is to report it absent rather than to record a wrapped offset pointing
+			    at another achievement's text. The block is 32K and the field is 16 bits, so this
+			    cannot happen today; it is here because the block size is a tunable.
+			*/
+			if (off < 0x10000u) {
+				if (tab == 1)      e->titleOff  = (u16)off;
+				else if (tab == 2) e->pointsOff = (u16)off;
+				else               e->descOff   = (u16)off;
+			}
+		}
+	}
+
+	v->count++;
+	if (flags & RA_VIEWER_EARNED) {
+		v->earned++;
+	}
+	return e;
+}
+
 static u8 ra_split_definitions(char* text, u32 length, char** lines, const char** titles) {
+	raViewerBlock* const viewer = (raViewerBlock*)CARDENGINEI_ARM9_RA_VIEWER_LOCATION;
 	u8  count = 0;
 	u32 i     = 0;
+
+	/*
+	    Claimed before the first record, and the magic written first rather than last -- the opposite
+	    of every other block in this project, on purpose. Elsewhere the magic says "this is complete";
+	    here it says "this binary owns the window now", and the count beside it is what says how much
+	    of it is real. A menu opened while this is still filling would read a short list, which is a
+	    state that cannot happen -- the split runs at init, long before a player can press X.
+	*/
+	viewer->magic  = RA_VIEWER_MAGIC;
+	viewer->count  = 0;
+	viewer->earned = 0;
 
 	while (i < length && count < RA_DEFS_MAX_LINES) {
 		char* start;
@@ -620,49 +732,34 @@ static u8 ra_split_definitions(char* text, u32 length, char** lines, const char*
 				*--end = 0;
 			}
 		}
-		if (*start && *start != '#') {
+		/*
+		    Indexed here, which is also where the record is cut into fields: `start` arrives whole
+		    and NUL-terminated with its tabs intact, and ra_viewer_add() records each field's offset
+		    as it replaces that field's tab. Both shapes go in, because the menu shows an earned
+		    achievement beside a pending one and only the flag tells them apart.
+
+		    A `#` line that is not `#!` is a comment somebody typed, and gets neither an index entry
+		    nor a definition.
+		*/
+		if (start[0] == '#') {
+			if (start[1] == '!') {
+				ra_viewer_add(text, start, RA_VIEWER_EARNED);
+			}
+			continue;   /* earned or a typed comment; either way not a definition */
+		}
+		if (*start) {
+			const raViewerEntry* const e = ra_viewer_add(text, start, 0);
+
 			/*
-			    The title, if the launcher attached one: `<memaddr>\t<title>`. Splitting here rather
-			    than at activation time is the same argument that put ra_take_id() here -- everything
-			    downstream uses these pointers, and a line that still had a tab in it is a line
-			    rcheevos would refuse.
+			    The title comes from the entry rather than from a second walk of the record. One
+			    place decides where a field begins, so the notification and the menu cannot disagree
+			    about it -- and the record is already cut into strings by the call above, which is
+			    what rcheevos needs of `start` anyway.
 
-			    The first tab only. A title cannot contain one: JSON has no raw tabs inside strings
-			    and the launcher writes escapes through verbatim, so `\t` in a title arrives as two
-			    characters. See raPatch in ra_wifi.h.
+			    A full index gives no entry, and the definition still arms: an achievement that
+			    cannot be listed is a smaller loss than one that cannot fire.
 			*/
-			char* tab = start;
-
-			while (*tab && *tab != '\t') {
-				tab++;
-			}
-			if (*tab == '\t') {
-				*tab = 0;
-				titles[count] = tab + 1;
-				/*
-					And the title stops at the *next* tab, because the record does not end there any
-					more: it is `<memaddr>\t<title>\t<points>\t<description>` now, and a title that
-					ran to the end of the line would put `Stage 1 clear\t5\tFinish stage one` on the
-					notification. Cutting here rather than in the launcher keeps the block one text
-					the viewer can also read -- see the record format at raPatch in ra_wifi.h.
-
-					Only the first of them is cut. Everything after it belongs to fields this binary
-					has no use for, and leaving them intact is what lets the in-game menu read the
-					same bytes.
-				*/
-				{
-					char* end = titles[count];
-
-					while (*end && *end != '\t') {
-						end++;
-					}
-					if (*end == '\t') {
-						*end = 0;
-					}
-				}
-			} else {
-				titles[count] = 0;
-			}
+			titles[count] = (e && e->titleOff) ? (const char*)(text + e->titleOff) : 0;
 			lines[count++] = start;
 		}
 	}
