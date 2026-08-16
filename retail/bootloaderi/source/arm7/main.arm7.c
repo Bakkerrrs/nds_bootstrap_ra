@@ -2413,6 +2413,37 @@ int arm7_main(void) {
 				tonccpy((u32*)CARDENGINEI_ARM9_RA_SESSION_LOCATION,
 				        (u32*)CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION,
 				        CARDENGINEI_ARM9_RA_SESSION_MAX);
+
+				/*
+				    And the last word on cheats, taken here because here is where it is
+				    finally true.
+
+				    The launcher decides the session's mode from the three cheat files it
+				    can size, and that is the best it can do -- it cannot know whether the
+				    total will *fit*. The room depends on the ROM's own layout and is
+				    worked out a few hundred lines above this, differently again in
+				    hook_arm7.c, and `cheatSizeTotal` has already been zeroed once up there
+				    for a console with no space to put an engine in.
+
+				    So by this line the answer is settled, and it is a byte away from the
+				    block that carries it into the game. The floor is the same one the
+				    launcher used; the ceiling belongs to `cheatsEnabled` below and only
+				    ever refuses more.
+
+				    Written as an offset rather than through the structure, like every
+				    other reach into these blocks from this file: the bootloader acts on
+				    them without knowing what they are, and the host suite is what holds
+				    the offset to the struct.
+
+				    Downgrade only. A boot may lose hardcore here and can never gain it:
+				    the launcher has already signed r=startsession with what it believed,
+				    and a block that granted more than the launcher claimed would be this
+				    fork lying to itself before it lied to the server.
+				*/
+				if (cheatSizeTotal > CARDENGINEI_ARM9_RA_CHEATS_MIN_BYTES) {
+					*(u8*)(CARDENGINEI_ARM9_RA_SESSION_LOCATION
+					       + CARDENGINEI_ARM9_RA_SESSION_HARDCORE_OFFSET) = 0;
+				}
 			} else {
 				*(u32*)CARDENGINEI_ARM9_RA_SESSION_LOCATION = 0;
 			}

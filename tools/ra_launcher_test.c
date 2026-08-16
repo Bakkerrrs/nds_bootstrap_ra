@@ -1743,6 +1743,16 @@ static void test_queue(void) {
 		CHECK(RA_SESSION_MAGIC == CARDENGINEI_ARM9_RA_SESSION_MAGIC);
 		CHECK(sizeof(raSessionBlock) <= CARDENGINEI_ARM9_RA_SESSION_MAX);
 		/*
+		    And the two facts the bootloader needs about the *inside* of that block, which it reaches
+		    without including ra_wifi.h. The offset is the sharper of the two: written through a
+		    literal on one side and a struct member on the other, a field inserted before `hardcore`
+		    would move the flag and the bootloader would go on clearing a byte of the magic --
+		    zeroing a quarter of it, so the menu would read "nobody told me" and hand a cheating
+		    session its RAM editor.
+		*/
+		CHECK(offsetof(raSessionBlock, hardcore) == CARDENGINEI_ARM9_RA_SESSION_HARDCORE_OFFSET);
+		CHECK(RA_CHEATS_MIN_BYTES == CARDENGINEI_ARM9_RA_CHEATS_MIN_BYTES);
+		/*
 		    And the four regions do not overlap: the definitions end where the session block begins,
 		    that ends where the viewer's index begins, and that ends where the pending tally does.
 		    Stated as arithmetic because the launcher's blockMax is the only thing keeping the

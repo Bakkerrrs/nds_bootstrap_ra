@@ -1985,7 +1985,10 @@ bool raWifiShutdown(void) {
     RetroAchievements' hardcore rules forbid cheats, savestates, rewind and slowdown. What this fork
     can be held to is what it can *observe*, and the honest reading of nds-bootstrap is:
 
-      cheats        a cheat file loaded for this ROM -- conf->cheatSize. Observable, and gated here.
+      cheats        the cheat engine actually running, which is three files summed against
+                    RA_CHEATS_MIN_BYTES and not `conf->cheatSize != 0`. Observable, gated here, and
+                    gated again by the bootloader once it knows whether the engine fits. See the
+                    raWifiProbe() call in main.cpp for what asking the easy question cost.
       savestates    **nds-bootstrap has none.** There is no savestate feature anywhere in the tree,
                     so there is nothing to switch off and nothing to check. Stated rather than left
                     as an assumed gap, because "we did not find it" and "it does not exist" are
@@ -2014,7 +2017,7 @@ static bool raWifiHardcoreRefused(const raConfig* cfg, bool cheatsOn) {
 		return false;
 	}
 	if (cheatsOn) {
-		raWifiLog("\x1b[33mhardcore refused: a cheat file is loaded for this ROM\x1b[37m\n");
+		raWifiLog("\x1b[33mhardcore refused: the cheat engine runs for this ROM\x1b[37m\n");
 		return true;
 	}
 	return false;

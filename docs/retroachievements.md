@@ -6773,6 +6773,12 @@ game: open the menu, `RAM Viewer`, A to place the cursor, A again. The two red l
 and the byte under the cursor should not change. B, then `SELECT` for the ARM7 window, and the same
 again — that is the `RAMW` path rather than the in-place one, and it is worth pressing separately.
 
+A third boot is worth one flash cycle on its own: `hardcore=1` **with cheats enabled in TWiLight
+Menu**. The log should say `hardcore refused: the cheat engine runs for this ROM`, then
+`RAM editing unchanged -- softcore`, and the viewer should edit. Then turn every cheat back off in
+TWiLight and boot again — `cheatData.bin` is still on the card at that point, which is exactly the
+case the old `!= 0` check got wrong — and hardcore should come back.
+
 With `hardcore=0`, or with `ra.cfg` absent, the log should say `RAM editing unchanged -- softcore`
 and the viewer should edit exactly as it always has. That second boot is the one that matters most:
 the failure this change can plausibly introduce is not a hardcore session that edits, it is every
@@ -6862,6 +6868,68 @@ read this line first and expect to pay for it somewhere else.
 The three other tight variants are unaffected in kind: `dsiware` 2,612 bytes, `cheat` 3,064, the
 plain and `alt` builds 11,844.
 
+## "A cheat file exists" was never the question
+
+The gate's surviving half asked `conf->cheatSize != 0`, and that turns out to be the wrong question
+asked of the wrong file. It was wrong in both directions, and only one of them is cosmetic.
+
+### The hole: `cheatData.bin` is one of three inputs
+
+nds-bootstrap's own predicate, in `main.arm7.c`:
+
+```c
+cheatSizeTotal = wideCheatSize + cheatSize + (apPatchIsCheat ? apPatchSize : 0);
+cheatsEnabled  = (cheatSizeTotal > 4 && cheatSizeTotal <= 0x8000);
+```
+
+Two of those three were not being looked at. A card with **wide cheats** and no `cheatData.bin`, or
+with an **AP patch that is really a cheat file** — `pck_load.cpp` sets `apPatchIsCheat` for a `.bin`
+AP fix and for a `cheatVer` entry in a pack — ran the cheat engine while the gate reported a clean
+session and let it claim hardcore.
+
+### The false positive: opening the cheat screen is not turning cheats on
+
+The floor is `> 4`, not `> 0`, and that is the whole point of the number. TWiLight Menu writes
+`cheatData.bin` when the player *opens* the cheat list for a game; switching every cheat back off
+leaves the file behind, a few bytes long, holding its terminator and nothing else. Testing `!= 0`
+refused hardcore for a player who had once looked at the cheat screen and turned everything off —
+which is exactly the state RetroAchievements would call clean.
+
+### Two gates, because neither side knows the whole answer
+
+The launcher now sums the same three files against `RA_CHEATS_MIN_BYTES`. What it deliberately does
+**not** reproduce is the ceiling: `cheatsEnabled` also refuses a total the cheat engine has no room
+for, and that limit comes out of the ROM's own layout — `0x8000` in one place, a variable derived
+from `0x4000` in `hook_arm7.c`, and `cheatSizeTotal` is zeroed outright for a console with nowhere
+to put an engine. A launcher guess at it would be a fourth copy of a number that already exists
+three times.
+
+So the bootloader has the last word, one line after it copies the session block, at the point where
+the answer is finally settled:
+
+```c
+if (cheatSizeTotal > CARDENGINEI_ARM9_RA_CHEATS_MIN_BYTES) {
+    *(u8*)(CARDENGINEI_ARM9_RA_SESSION_LOCATION
+           + CARDENGINEI_ARM9_RA_SESSION_HARDCORE_OFFSET) = 0;
+}
+```
+
+**Downgrade only.** A boot can lose hardcore there and can never gain it: the launcher has already
+signed `r=startsession` with what it believed, and a block granting more than the launcher claimed
+would be the fork lying to itself before it lied to the server.
+
+It reaches into the block by offset rather than through the structure, because this file does not
+include `ra_wifi.h` — the same arrangement the pending block's magic already has, and for the same
+reason. The host suite pins `offsetof(raSessionBlock, hardcore)` against the constant. That check
+earns its place: a field inserted before `hardcore` would move the flag, the bootloader would go on
+clearing a byte of the *magic* instead, the menu would read "nobody told me", and a cheating session
+would get its RAM editor back with nothing failing to compile.
+
+### What it did not cost
+
+Nothing on the ARM7: the cheat total was already computed there for the engine's own sake, and the
+extra work is a compare and a byte store. `cardenginei_arm7_twlsdk` stays at 60 bytes of margin.
+
 ### What this still does *not* settle
 
 The mode is now recorded honestly, but **whether a deferred unlock may be submitted at all** is
@@ -6925,6 +6993,12 @@ what the rules say about when it may be sent.
       half of `raWifiHardcoreRefused()`: the gate now refuses for a cheat file and for
       nothing else. **Built and host-tested; not yet confirmed on hardware** — see "What
       to look for on the next run" in that section.
+- [x] **The cheat check asks whether cheats are *on*, not whether a file exists.** It was
+      `conf->cheatSize != 0`, which missed wide cheats and AP patches that are really cheat
+      files — both of which run the engine — and which refused hardcore to a player who had
+      opened the cheat screen once and turned everything off. It is now the same sum
+      nds-bootstrap builds `cheatSizeTotal` from, against the same floor, and the bootloader
+      clears the staged session's hardcore flag if it installs the engine after all.
 - [x] **A queued unlock carries the mode it was earned in.** `h=` and the signature come
       from the record, not from `ra.cfg` at submission time, so earning in softcore with
       the RAM editor open and then setting `hardcore=1` no longer upgrades anything. The

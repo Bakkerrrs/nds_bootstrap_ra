@@ -247,6 +247,21 @@
 */
 #define CARDENGINEI_ARM9_RA_SESSION_MAGIC            0x31534152   /* 'RAS1' */
 #define CARDENGINEI_ARM9_RA_SESSION_MAX              0x100
+/*
+    Where the hardcore flag sits inside that block, and the floor below which cheats are not on.
+
+    Both are restated here for the bootloader, which reaches into this block and does not include
+    ra_wifi.h -- the same arrangement as the magic above, and for the same reason: it must be able to
+    act on these without knowing what a raSessionBlock is. The host suite pins each against its
+    original, because nothing else would notice them drifting.
+
+    The bootloader needs them because it has the last word on cheats. The launcher sizes the three
+    cheat files and stages a mode; only the bootloader knows whether the engine it is about to
+    install actually fits, and if it installs one it clears this byte. See RA_CHEATS_MIN_BYTES in
+    ra_wifi.h for why the floor is 4 rather than 0.
+*/
+#define CARDENGINEI_ARM9_RA_SESSION_HARDCORE_OFFSET  0x4
+#define CARDENGINEI_ARM9_RA_CHEATS_MIN_BYTES         4
 #define CARDENGINEI_ARM9_RA_SESSION_BUFFERED_LOCATION (CARDENGINEI_ARM9_RA_BUFFERED_LOCATION + 0x38200)
 #define CARDENGINEI_ARM9_RA_SESSION_LOCATION         (CARDENGINEI_ARM9_RA_VIEWER_LOCATION \
                                                       - CARDENGINEI_ARM9_RA_SESSION_MAX)

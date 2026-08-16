@@ -617,7 +617,37 @@ int main(int argc, char** argv) {
 	    run in the launcher, before a game exists to contend for the ARM7.
 	*/
 	myConsoleDemoInit();
-	raWifiProbe(sdFound, conf->ndsPath, conf->cheatSize != 0);
+	{
+		/*
+		    Whether the cheat engine is going to run, which is a different question from whether a
+		    cheat file exists -- and this used to ask the second one, as `conf->cheatSize != 0`.
+
+		    That was wrong in both directions, and the direction that matters is the one that let
+		    cheats through. **`cheatData.bin` is only one of three inputs.** nds-bootstrap's own
+		    predicate is `wideCheatSize + cheatSize + (apPatchIsCheat ? apPatchSize : 0) > 4` -- see
+		    main.arm7.c, where `cheatSizeTotal` is built and `cheatsEnabled` is decided from it. A
+		    card with wide cheats and no `cheatData.bin`, or with an AP patch that is really a cheat
+		    file, ran the cheat engine while this said the session was clean.
+
+		    And the other direction is the one a player would notice: `!= 0` refuses hardcore for a
+		    `cheatData.bin` that exists but holds nothing. TWiLight Menu writes that file when the
+		    player *opens* the cheat screen for a game; turning every cheat back off leaves the file
+		    behind, a few bytes long, which is why the real predicate is `> 4` and not `> 0`. Asking
+		    whether the file exists punished a player for having looked.
+
+		    The ceiling is deliberately not reproduced here. `cheatsEnabled` also refuses a total the
+		    cheat engine has no room for, and that limit is computed from the ROM's own layout in the
+		    bootloader -- 0x8000 in one place, a variable derived from 0x4000 in another. A launcher
+		    guess at it would be a fourth copy of a number that already exists twice. Being
+		    over-strict there costs a player hardcore on a card with a 32 KB cheat file, and the
+		    bootloader has the last word anyway: it clears the staged session's hardcore flag when it
+		    installs the engine, at the point where the answer is finally known.
+		*/
+		const u32 cheatBytes = conf->wideCheatSize + conf->cheatSize
+		                       + ((conf->valueBits & BIT(5)) ? conf->apPatchSize : 0);
+
+		raWifiProbe(sdFound, conf->ndsPath, cheatBytes > RA_CHEATS_MIN_BYTES);
+	}
 #endif
 
 	if (status == 0) {

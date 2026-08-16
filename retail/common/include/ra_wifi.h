@@ -317,6 +317,22 @@ typedef struct raPendingBlock {
 	u32  queued[RA_PENDING_QUEUED_MAX];
 } raPendingBlock;
 
+/*
+    The size below which nds-bootstrap does not install the cheat engine, and therefore the line
+    between "a cheat file is present" and "cheats are on".
+
+    It is 4 because an empty cheat list is not an empty file: TWiLight Menu writes cheatData.bin when
+    the player opens the cheat screen for a game, and turning every cheat back off leaves the file
+    there holding only its terminator. `cheatSizeTotal > 4` is what the bootloader tests -- see
+    `cheatsEnabled` in main.arm7.c and hook_arm7.c -- and it is restated here because the launcher
+    has to answer the same question about the same card, hours earlier in the boot, to decide whether
+    a session may claim hardcore.
+
+    Only the floor is shared. Each of those sites also refuses a total too large for the room it has,
+    and that ceiling is computed from the ROM's layout: nothing outside the bootloader can know it.
+*/
+#define RA_CHEATS_MIN_BYTES    4
+
 #define RA_SESSION_MAGIC       0x31534152u   /* 'RAS1' */
 
 /*
@@ -985,9 +1001,17 @@ typedef struct raHashInfo {
     switch above for why that is the design and not a shortcut.
 */
 /*
-    `cheatsOn` is conf->cheatSize != 0. Passed in rather than read here because this file knows
-    nothing about nds-bootstrap's configuration, and because what hardcore requires is a *list* of
-    such facts -- see raWifiHardcoreRefused().
+    `cheatsOn` is whether the cheat engine is going to run: the same sum of the three cheat inputs
+    that main.arm7.c builds `cheatSizeTotal` from, against RA_CHEATS_MIN_BYTES. **Not** whether a
+    cheat file exists, which is what it used to be and which was wrong twice -- see the call in
+    main.cpp for both failures.
+
+    Passed in rather than read here because this file knows nothing about nds-bootstrap's
+    configuration, and because what hardcore requires is a *list* of such facts -- see
+    raWifiHardcoreRefused().
+
+    It is the launcher's best answer rather than the final one: the bootloader clears the staged
+    session's hardcore flag if it installs the engine after all.
 */
 void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn);
 
