@@ -493,6 +493,9 @@ void raQueueTally(const raQueue* q, u32 now, raPendingBlock* out) {
 		*/
 		if (q->codes[i][0] == 0) {
 			out->unnamed++;
+			if (out->queuedCount < RA_PENDING_QUEUED_MAX) {
+				out->queued[out->queuedCount++] = q->ids[i];
+			}
 			continue;
 		}
 
@@ -518,6 +521,15 @@ void raQueueTally(const raQueue* q, u32 now, raPendingBlock* out) {
 		}
 
 		g->count++;
+
+		/*
+		    ...and the id itself, so the achievements page can mark this one row rather than only
+		    report a total. Recorded for every record, not only the named ones: an id with no game
+		    is still an id the viewer may be showing.
+		*/
+		if (out->queuedCount < RA_PENDING_QUEUED_MAX) {
+			out->queued[out->queuedCount++] = q->ids[i];
+		}
 
 		/*
 		    The oldest of this game's unlocks, in whole days. Guarded both ways: a record with no

@@ -657,23 +657,23 @@ static void raAchievementsPage(void) {
 	const raViewerBlock* const v = (const raViewerBlock*)CARDENGINEI_ARM9_RA_VIEWER_LOCATION;
 	const char* const          text = (const char*)(CARDENGINEI_ARM9_RA_DEFS_LOCATION
 	                                                + CARDENGINEI_ARM9_RA_DEFS_HEADER);
-	/* Rows 3 to 20 hold the list, so eighteen entries a screen. */
-	const int rows = 18;
+	/* Rows 3 to 21 hold the list, so nineteen entries a screen. */
+	const int rows = 19;
 	int       top = 0;
 	int       cursor = 0;
 
 	if (v->magic != RA_VIEWER_MAGIC || v->count == 0) {
 		clearScreen(false);
-		print(0, 0, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
+		print(1, 0, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
 		/*
 		    Two states and they are not the same. No magic means this boot staged nothing -- no
 		    network, or a game the server does not know. A magic with no entries would mean a set
 		    that arrived empty, which is what an unsupported ROM's own set looks like.
 		*/
-		print(0, 2, (v->magic == RA_VIEWER_MAGIC)
+		print(1, 2, (v->magic == RA_VIEWER_MAGIC)
 		            ? (unsigned char*)"This game has no achievements"
 		            : (unsigned char*)"No set was staged this boot", FONT_LIGHT_GRAY, false);
-		print(0, 23, igmText.bNo, FONT_WHITE, false);
+		print(1, 23, igmText.bNo, FONT_WHITE, false);
 		waitKeys(KEY_B);
 		return;
 	}
@@ -682,15 +682,26 @@ static void raAchievementsPage(void) {
 		int i;
 
 		clearScreen(false);
-		print(0, 0, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
-		printDec(0, 1, v->earned, 2, FONT_LIME, false);
-		print(3, 1, (unsigned char*)"of", FONT_LIGHT_GRAY, false);
-		printDec(6, 1, v->count, 2, FONT_WHITE, false);
-		print(9, 1, (unsigned char*)"earned", FONT_LIGHT_GRAY, false);
+		/*
+		    Column 1, not 0, and the header is the reason this note is here twice. drawCursor()
+		    clears column 0 of every row to erase the previous caret, so a title printed at 0 loses
+		    its first letter the moment the cursor is drawn -- which on hardware read `chievements`,
+		    and `02 of 45` as `2 of 45`. Nothing on this page may start at column 0.
+		*/
+		print(1, 0, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
+		printDec(1, 1, v->earned, 2, FONT_LIME, false);
+		print(4, 1, (unsigned char*)"of", FONT_LIGHT_GRAY, false);
+		printDec(7, 1, v->count, 2, FONT_WHITE, false);
+		print(10, 1, (unsigned char*)"earned", FONT_LIGHT_GRAY, false);
+		if (v->queued) {
+			printDec(17, 1, v->queued, 2, FONT_RED, false);
+			print(20, 1, (unsigned char*)"to sync", FONT_LIGHT_GRAY, false);
+		}
 
 		for (i = 0; i < rows && top + i < v->count; i++) {
 			const raViewerEntry* const e = &v->entry[top + i];
 			const int                  earned = (e->flags & RA_VIEWER_EARNED) != 0;
+			const int                  queued = (e->flags & RA_VIEWER_QUEUED) != 0;
 
 			/*
 			    A mark rather than a colour alone: the two palettes are close enough on a lit DS
@@ -701,8 +712,14 @@ static void raAchievementsPage(void) {
 			    that column on every row* to erase the previous one, so a mark at 0 would survive
 			    exactly until the cursor moved.
 			*/
-			print(1, 3 + i, (unsigned char*)(earned ? "*" : "-"),
-			      earned ? FONT_LIME : FONT_DARKER_GRAY, false);
+			/*
+			    Three states, and the middle one is the one a player actually wants: earned on the
+			    server, earned and still in the queue, not earned. Queued keeps the star because it
+			    *is* earned -- what it is missing is the server's acknowledgement, and red says that
+			    without pretending it did not happen.
+			*/
+			print(1, 3 + i, (unsigned char*)((earned || queued) ? "*" : "-"),
+			      earned ? FONT_LIME : (queued ? FONT_RED : FONT_DARKER_GRAY), false);
 			if (e->titleOff) {
 				print(3, 3 + i, (unsigned char*)(text + e->titleOff),
 				      earned ? FONT_LIGHT_GRAY : FONT_WHITE, false);
@@ -713,10 +730,14 @@ static void raAchievementsPage(void) {
 			}
 		}
 		drawCursor((u8)(3 + cursor));
-		print(0, 21, (unsigned char*)"A: what it takes", FONT_DARKER_GRAY, false);
-		print(0, 23, igmText.bNo, FONT_WHITE, false);
+		/*
+		    One line rather than two, because the row it used to take is a row of the list -- and on
+		    a 24-row screen with forty-five achievements to show, a row is worth more than a second
+		    hint. Left and right page through, which is the only way a set this size is walkable.
+		*/
+		print(1, 23, (unsigned char*)"A: OK / B: Back", FONT_WHITE, false);
 
-		waitKeys(KEY_A | KEY_B | KEY_UP | KEY_DOWN);
+		waitKeys(KEY_A | KEY_B | KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT);
 		if (KEYS & KEY_B) {
 			return;
 		}
@@ -736,6 +757,24 @@ static void raAchievementsPage(void) {
 			}
 			continue;
 		}
+		/*
+		    A page at a time. Clamped rather than wrapped, and the cursor is pulled back to the last
+		    real row on the final page -- a caret sitting on a blank line below the set would be the
+		    page inviting a press that does nothing.
+		*/
+		if (KEYS & KEY_LEFT) {
+			top = (top > rows) ? top - rows : 0;
+			continue;
+		}
+		if (KEYS & KEY_RIGHT) {
+			if (top + rows < v->count) {
+				top += rows;
+				if (top + cursor >= v->count) {
+					cursor = v->count - top - 1;
+				}
+			}
+			continue;
+		}
 
 		/* A: the description of the line under the cursor, on a page of its own. */
 		{
@@ -743,30 +782,40 @@ static void raAchievementsPage(void) {
 
 			clearScreen(false);
 			if (e->titleOff) {
-				print(0, 0, (unsigned char*)(text + e->titleOff), FONT_WHITE, false);
+				print(1, 0, (unsigned char*)(text + e->titleOff), FONT_WHITE, false);
 			}
 			if (e->pointsOff) {
-				print(0, 2, (unsigned char*)(text + e->pointsOff), FONT_LIGHT_BLUE, false);
-				print(5, 2, (unsigned char*)"points", FONT_LIGHT_GRAY, false);
+				print(1, 2, (unsigned char*)(text + e->pointsOff), FONT_LIGHT_BLUE, false);
+				print(6, 2, (unsigned char*)"points", FONT_LIGHT_GRAY, false);
 			}
+			/*
+			    The same three states as the list, in the same place, so moving between the two
+			    pages does not move the fact. `(sync pending)` rather than a second word for earned:
+			    it is the *sending* that is outstanding, and saying so is what stops a player
+			    wondering whether the achievement itself is in doubt.
+			*/
 			if (e->flags & RA_VIEWER_EARNED) {
 				printRight(31, 2, (unsigned char*)"earned", FONT_LIME, false);
+			} else if (e->flags & RA_VIEWER_QUEUED) {
+				printRight(31, 2, (unsigned char*)"(sync pending)", FONT_RED, false);
 			}
 			if (e->descOff) {
 				/*
-				    Wrapped by hand at 32 columns, because print() does not wrap and a description
-				    is up to 64 characters -- two full lines. Broken at a space where there is one
-				    within reach, so a word is not cut in half.
+				    Wrapped by hand at 30 columns, because print() does not wrap and a description
+				    is up to 64 characters. 30 rather than 32: the text starts at column 1, since
+				    column 0 belongs to drawCursor() everywhere on this page, and the last column is
+				    left clear so a full line does not touch the bezel. Broken at a space where
+				    there is one within reach, so a word is not cut in half.
 				*/
 				const char* d = text + e->descOff;
 				int         line;
 
 				for (line = 0; line < 4 && *d; line++) {
-					unsigned char row[33];
+					unsigned char row[31];
 					int           n = 0;
 					int           cut;
 
-					while (n < 32 && d[n]) {
+					while (n < 30 && d[n]) {
 						n++;
 					}
 					cut = n;
@@ -782,14 +831,14 @@ static void raAchievementsPage(void) {
 						row[n] = (unsigned char)d[n];
 					}
 					row[cut] = 0;
-					print(0, 5 + line, row, FONT_LIGHT_GRAY, false);
+					print(1, 5 + line, row, FONT_LIGHT_GRAY, false);
 					d += cut;
 					while (*d == ' ') {
 						d++;
 					}
 				}
 			}
-			print(0, 23, igmText.bNo, FONT_WHITE, false);
+			print(1, 23, igmText.bNo, FONT_WHITE, false);
 			waitKeys(KEY_B);
 		}
 	}

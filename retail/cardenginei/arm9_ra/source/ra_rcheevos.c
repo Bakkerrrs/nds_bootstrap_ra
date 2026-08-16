@@ -427,6 +427,29 @@ static void ra_rc_queue_unlock(u32 id) {
 	unlockRing[unlockHead] = id;
 	unlockHead = (u8)((unlockHead + 1) % RA_UNLOCK_RING);
 	unlockQueued++;
+
+	/*
+	    And the achievements page learns about it now rather than next boot. The launcher's copy of
+	    the queue is what it read at boot, so an achievement earned since is in neither list -- and
+	    "I just got that, is it safe" is the question a player opens this page to ask.
+	*/
+	{
+		raViewerBlock* const v = (raViewerBlock*)CARDENGINEI_ARM9_RA_VIEWER_LOCATION;
+
+		if (v->magic == RA_VIEWER_MAGIC) {
+			u16 k;
+
+			for (k = 0; k < v->count && k < RA_VIEWER_MAX_ENTRIES; k++) {
+				if (v->entry[k].id == id) {
+					if (!(v->entry[k].flags & RA_VIEWER_QUEUED)) {
+						v->entry[k].flags |= RA_VIEWER_QUEUED;
+						v->queued++;
+					}
+					break;
+				}
+			}
+		}
+	}
 }
 
 /*
@@ -683,6 +706,29 @@ static raViewerEntry* ra_viewer_add(char* base, char* record, u8 flags) {
 		}
 	}
 
+	/*
+	    Earned but not yet sent, which the launcher knows and this binary does not: it read the queue
+	    file at boot and left the ids beside the pending tally. Matched here rather than at display
+	    time so the menu stays a renderer -- and guarded on the tally's own magic, because a boot that
+	    staged nothing leaves that window holding whatever it held.
+	*/
+	if (e->id && !(flags & RA_VIEWER_EARNED)) {
+		const raPendingBlock* const pend =
+			(const raPendingBlock*)CARDENGINEI_ARM9_RA_PENDING_LOCATION;
+
+		if (pend->magic == RA_PENDING_MAGIC) {
+			u16 k;
+
+			for (k = 0; k < pend->queuedCount && k < RA_PENDING_QUEUED_MAX; k++) {
+				if (pend->queued[k] == e->id) {
+					e->flags |= RA_VIEWER_QUEUED;
+					v->queued++;
+					break;
+				}
+			}
+		}
+	}
+
 	v->count++;
 	if (flags & RA_VIEWER_EARNED) {
 		v->earned++;
@@ -705,6 +751,8 @@ static u8 ra_split_definitions(char* text, u32 length, char** lines, const char*
 	viewer->magic  = RA_VIEWER_MAGIC;
 	viewer->count  = 0;
 	viewer->earned = 0;
+	viewer->queued = 0;
+	viewer->pad    = 0;
 
 	while (i < length && count < RA_DEFS_MAX_LINES) {
 		char* start;

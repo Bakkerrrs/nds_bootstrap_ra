@@ -214,6 +214,13 @@
 
 /* This achievement is already held by the account, so it is shown rather than armed. */
 #define RA_VIEWER_EARNED       0x01
+/*
+    ...and this one is earned but not yet sent: it is in the queue file, or it fired this session.
+
+    Distinct from EARNED because the two are different promises. EARNED is the server's answer and
+    survives the card being lost; QUEUED is this console's word for it and does not.
+*/
+#define RA_VIEWER_QUEUED       0x02
 
 typedef struct raViewerEntry {
 	u32 id;
@@ -228,11 +235,20 @@ typedef struct raViewerBlock {
 	u32           magic;        /* RA_VIEWER_MAGIC, so an unwritten window is not read as a set */
 	u16           count;        /* entries below */
 	u16           earned;       /* how many of them carry RA_VIEWER_EARNED */
+	/*
+	    ...and RA_VIEWER_QUEUED, which unlike the other two moves while the game runs: an achievement
+	    that fires this session is queued from that moment. Kept beside the flag rather than counted
+	    by walking the entries at draw time, because the menu should render what it is given.
+	*/
+	u16           queued;
+	u16           pad;
 	raViewerEntry entry[RA_VIEWER_MAX_ENTRIES];
 } raViewerBlock;
 
 #define RA_PENDING_MAGIC       0x31504152u   /* 'RAP1' */
 #define RA_PENDING_GAMES_MAX   8
+/* Queued ids the viewer can mark; see raPendingBlock::queued. */
+#define RA_PENDING_QUEUED_MAX  32
 
 typedef struct raPendingGame {
 	char code[RA_QUEUE_CODE + 1];    /* the ROM's gameCode, NUL-terminated */
@@ -260,6 +276,23 @@ typedef struct raPendingBlock {
 	char thisTitle[RA_QUEUE_TITLE + 1];
 	u16  session;
 	raPendingGame game[RA_PENDING_GAMES_MAX];
+	/*
+	    The ids sitting in the queue file at boot, so the viewer can mark them.
+
+	    The counts above answer "how much is owed"; this answers "is *this* achievement one of them",
+	    which is the question the achievements page asks and the only one a per-game tally cannot.
+
+	    Here rather than in the viewer's own index because of who knows what and when. The launcher
+	    reads the queue file and cardenginei_arm9_ra builds that index, and the two never meet -- but
+	    this block already crosses between them. cardenginei_arm9_ra matches these against the set as
+	    it indexes it.
+
+	    Bounded well under RA_QUEUE_MAX on purpose. A queue deeper than this is a card that has been
+	    offline for a long time, and the honest failure there is a few unmarked rows rather than 256
+	    bytes taken off a 512-byte reservation to cover a case nobody is in.
+	*/
+	u16  queuedCount;
+	u32  queued[RA_PENDING_QUEUED_MAX];
 } raPendingBlock;
 
 /*
