@@ -21,6 +21,28 @@ RetroAchievements' developer channels — the Discord's integration/development 
 direct approach to the RAdmin/DevCompliance team. There is no documented registration form for a
 client that is not an emulator, which is itself the first question.
 
+## Short version, for a first message
+
+The full draft below is right for an email or for a thread once somebody is engaged. It is the wrong
+length for a first message in a Discord channel, where a wall of text gets scrolled past. So there
+are two, and the short one exists only to get a human to ask the second question.
+
+> Hi — I maintain **nds-bootstrap-ra**, a fork of nds-bootstrap that adds RetroAchievements support.
+> nds-bootstrap runs DS ROMs from an SD card on **real DS hardware**, usually a 3DS via TWiLight
+> Menu++, so this is not an emulator: the game runs on the console's own CPUs.
+>
+> Softcore works end to end today — login, `r=patch`, rcheevos evaluating the set on the console,
+> and unlocks the server records. It sends `User-Agent: nds-bootstrap-ra/0.1`, which you don't
+> recognise, so it gets the *Unknown Emulator* notice and `h=1` is filed as softcore.
+>
+> I'd like to get the User-Agent recognised. Two things I'd rather raise than have you find:
+> the console **has no network while a game is running**, so unlocks are queued to the SD card and
+> submitted on a later boot with `o=` carrying the earn time; and I've gone through your hardcore
+> rules against this loader (cheats, savestates, rewind, slowdown, memory editing) and can walk
+> through each one.
+>
+> Who's the right person to talk to, and is deferred submission something you'd accept?
+
 ## Draft
 
 > **Subject: Registering a client User-Agent — nds-bootstrap-ra, a DS ROM loader on real hardware**
