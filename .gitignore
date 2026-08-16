@@ -139,6 +139,11 @@ retail/arm9/include/version.h
 !retail/nitrofiles/dstwo.dldi
 !retail/nitrofiles/esrbOnlineNotice.lz77
 
+# Built by tools/ra_release.sh. The deliverable, and deliberately not in the tree: it is two
+# megabytes that change on every build, and the script prints its md5 and the commit it came from
+# so a ROM can be tied back to a revision without the ROM being stored beside it.
+nds-bootstrap-release.nds
+
 # Built by tools/wifiprobe (a diagnostic, not a deliverable)
 tools/wifiprobe/wifiprobe.nds
 tools/wifiprobe/arm7/build/
