@@ -1522,6 +1522,34 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 		raWifiLog("\x1b[33m, %u dropped for room\x1b[37m", patch.titleNoRoom);
 	}
 	raWifiLog("\n");
+	/*
+	    The two viewer fields on their own line, and the degradation order read left to right: the
+	    description is the first thing traded away when the block fills, points second, the title
+	    last. A run where `desc` reports fewer than `titles` is a run where the block is the binding
+	    constraint on what the in-game viewer can show, which is the number worth having.
+	*/
+	raWifiLog("desc / points    %u / %u with", patch.withDesc, patch.withPoints);
+	if (patch.descCut) {
+		raWifiLog(", %u clipped", patch.descCut);
+	}
+	if (patch.descNoRoom || patch.pointsNoRoom) {
+		raWifiLog("\x1b[33m, %u / %u dropped for room\x1b[37m",
+		          patch.descNoRoom, patch.pointsNoRoom);
+	}
+	raWifiLog("\n");
+	/*
+	    And what the viewer gets for the half of the set the player has already finished. Separate
+	    from `definitions` on purpose: those are armed and these are not, and a set whose armed half
+	    is empty because it has been completed is a very different reading from one whose armed half
+	    is empty because the block overflowed.
+	*/
+	if (patch.earned || patch.earnedNoRoom) {
+		raWifiLog("earned shown     %u", patch.earned);
+		if (patch.earnedNoRoom) {
+			raWifiLog("\x1b[33m, %u with no room\x1b[37m", patch.earnedNoRoom);
+		}
+		raWifiLog("\n");
+	}
 	if (patch.skipCount) {
 		/*
 		    Printed whenever there was a skip list at all, matched or not. A missing line used to mean

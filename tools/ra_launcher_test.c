@@ -897,12 +897,20 @@ static void test_patch(void) {
 		}
 	}
 
-	printf("\nalready-earned definitions never reach the block\n");
+	printf("\nalready-earned definitions are written for the viewer, not armed\n");
 	{
 		/*
-		    Left out rather than staged and ignored, because the block is the scarce resource: 88%
-		    full with this set. A player who has earned half of them gets half the block back, and
-		    the arena and the frame budget follow it down.
+		    Never armed, because that is the whole reason the skip list exists: an achievement the
+		    account holds must not fire again. But it is no longer *dropped* either -- the viewer has
+		    to be able to show it, and it can, because what it costs is what a person reads rather
+		    than a memaddr. The largest real set averages over 500 bytes a line for the memaddr and
+		    about 100 for everything else, so an earned achievement gives the block back four fifths
+		    of its space instead of all of it.
+
+		    The marker is `#!`, and the `#` is not a new convention: ra_split_definitions() in
+		    cardenginei_arm9_ra has skipped `#` lines since it was written, so these are invisible to
+		    rcheevos with nothing changed over there. The `!` separates them from a comment a person
+		    typed in a hand-written file.
 		*/
 		static const u32 earned[] = { 93121 };
 
@@ -910,13 +918,20 @@ static void test_patch(void) {
 		patch.skipIds   = earned;
 		patch.skipCount = 1;
 		patchFeedAll(&patch,
-			"{\"ID\":93121,\"MemAddr\":\"0xH1=1\",\"Flags\":3},"
+			"{\"ID\":93121,\"MemAddr\":\"0xH1=1\",\"Title\":\"Done\",\"Points\":10,\"Flags\":3},"
 			"{\"ID\":93119,\"MemAddr\":\"0xH2=2\",\"Flags\":3}");
 		raPatchFinish(&patch);
-		CHECK(patch.kept == 1 && patch.alreadyDone == 1);
-		CHECK(strcmp(block, "93119:0xH2=2\n") == 0);
-		/* And the one left out costs nothing in the block's accounting. */
-		CHECK(patch.wanted == strlen("93119:0xH2=2\n"));
+		CHECK(patch.kept == 1 && patch.alreadyDone == 1 && patch.earned == 1);
+		CHECK(strcmp(block, "#!93121\tDone\t10\n93119:0xH2=2\n") == 0);
+		CHECK(patch.wanted == strlen("#!93121\tDone\t10\n93119:0xH2=2\n"));
+		/*
+		    And 93119 has no label of its own, which is the assertion that found a bug older than
+		    this change. Every early exit in raPatchCommit() cleared the memaddr and the flags and
+		    not the title, so a definition following a discarded one inherited its label -- and RA
+		    sends unofficial achievements interleaved with published ones, so it was reachable on a
+		    real set. Nothing compared a label to anything until this fixture did.
+		*/
+		CHECK(strstr(block, "93119:0xH2=2\tDone") == NULL);
 
 		/* An empty skip list is the same as none: everything stages. */
 		raPatchReset(&patch, block, sizeof(block) - 1);

@@ -767,7 +767,18 @@ typedef struct raPatch {
 	*/
 	const u32* skipIds;
 	u16   skipCount;
-	u16   alreadyDone;    /* definitions left out because the account has them */
+	u16   alreadyDone;    /* definitions matching one, which are written for the viewer instead */
+	/*
+	    ...and what that writing produced. `earned` is the display-only records in the block,
+	    `earnedNoRoom` is the ones that did not fit even stripped to a bare id.
+
+	    They are not `kept`, and keeping the two counts apart is the point: `kept` is what the game
+	    will run and `earned` is what the menu will show, and a set whose armed half is empty because
+	    the player has finished it is a very different reading from one whose armed half is empty
+	    because the block overflowed.
+	*/
+	u16   earned;
+	u16   earnedNoRoom;
 
 	u16   oddIds;         /* ids at or above RA_ODD_ID_FROM -- see there */
 	u32   oddId;          /* the first of them */

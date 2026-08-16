@@ -152,6 +152,125 @@ static u32 raPatchWriteId(char* out, u32 id) {
 }
 
 /*
+    Drop everything held for the definition being abandoned.
+
+    Written once because it was written three times and one copy was wrong. The early exits -- an
+    unofficial achievement, an odd id, one the account already holds -- each cleared the memaddr and
+    the flags and *not* the title, while the only path that cleared the title was the one at the end
+    of raPatchCommit(). So a definition following a discarded one inherited its label: RA sends
+    unofficial achievements interleaved with published ones, so this was reachable on a real set and
+    would have shown a player the wrong achievement's name on the notification.
+
+    Invisible until the description and points arrived, because a wrong label is a wrong label and
+    nothing compared it to anything. The viewer's fixture compared it to something.
+*/
+static void raPatchForget(raPatch* p) {
+	p->pendingOpen   = 0;
+	p->pendingBad    = 0;
+	p->pendingSeen   = 0;
+	p->pendingLength = 0;
+	p->flagsSeen     = 0;
+	p->flags         = 0;
+	p->pendingId     = 0;
+	p->titleLength   = 0;
+	p->title[0]      = 0;
+	p->titleFull     = 0;
+	p->descLength    = 0;
+	p->desc[0]       = 0;
+	p->descFull      = 0;
+	p->points        = 0;
+	p->pointsSeen    = 0;
+	p->pointsBad     = 0;
+}
+
+/*
+    An achievement the account already holds, written for the viewer and for nothing else.
+
+    The record is `#!<id>\t<title>\t<points>\t<description>` -- **no memaddr at all**, which is
+    what makes this nearly free. An armed definition is dominated by its memaddr: the largest real
+    set averages over 500 bytes a line for them, against about 100 for everything a person reads.
+    So an achievement moving from "to earn" to "earned" gives the block back four fifths of its
+    space, and the worst case for the block is a set where nothing has been earned yet -- which is
+    exactly the case that was already measured at 87% full.
+
+    The `#` is not a new convention. ra_split_definitions() in cardenginei_arm9_ra has skipped lines
+    beginning with one since it was written, so these are invisible to rcheevos without a single
+    line changing over there -- no empty memaddr to refuse, no error counter to move, nothing armed
+    that must not be. The `!` after it distinguishes these from a comment a person typed in a
+    hand-written file, which is the only other thing a `#` line can be.
+
+    Degrades the same way and in the same order as an armed definition, because the fields are the
+    same fields. If not even the bare id fits, the record is dropped and counted: the viewer showing
+    an incomplete list is a smaller failure than the block overflowing, and the count is what says
+    which happened.
+*/
+static void raPatchWriteEarned(raPatch* p) {
+	u32 idLength;
+	u32 titleLength = 0;
+	u32 pointsLength = 0;
+	u32 descLength = 0;
+
+	if (!p->block || !p->pendingId) {
+		return;
+	}
+	idLength = raPatchIdDigits(p->pendingId) + 2;   /* the marker and the digits */
+
+	if (p->titleLength) {
+		titleLength = (u32)p->titleLength + 1;
+	}
+	if (titleLength && p->pointsSeen && !p->pointsBad) {
+		pointsLength = raPatchIdDigits(p->points) + 1;
+	}
+	if (pointsLength && p->descLength) {
+		descLength = (u32)p->descLength + 1;
+	}
+
+	p->wanted += idLength + titleLength + pointsLength + descLength + 1;
+
+	if (p->used + idLength + 1 <= p->blockMax) {
+		u32* const trim[3] = { &descLength, &pointsLength, &titleLength };
+		u16* const count[3] = { &p->descNoRoom, &p->pointsNoRoom, &p->titleNoRoom };
+		int        i;
+
+		for (i = 0; i < 3; i++) {
+			if (p->used + idLength + titleLength + pointsLength + descLength + 1 <= p->blockMax) {
+				break;
+			}
+			if (*trim[i]) {
+				*trim[i] = 0;
+				(*count[i])++;
+			}
+		}
+	}
+
+	if (p->used + idLength + titleLength + pointsLength + descLength + 1 > p->blockMax) {
+		p->earnedNoRoom++;
+		return;
+	}
+
+	p->block[p->used++] = '#';
+	p->block[p->used++] = '!';
+	p->used += raPatchWriteId(p->block + p->used, p->pendingId);
+	if (titleLength) {
+		p->block[p->used++] = '\t';
+		memcpy(p->block + p->used, p->title, p->titleLength);
+		p->used += p->titleLength;
+	}
+	if (pointsLength) {
+		p->block[p->used++] = '\t';
+		p->used += raPatchWriteId(p->block + p->used, p->points);
+	}
+	if (descLength) {
+		p->block[p->used++] = '\t';
+		memcpy(p->block + p->used, p->desc, p->descLength);
+		p->used += p->descLength;
+	}
+	p->block[p->used++] = '\n';
+	p->block[p->used]   = 0;
+	p->earned++;
+}
+
+/*
     Put the held definition in the block, or account for why it did not go.
 
     Every outcome is counted, and that is the point of the function: a set where thirty
@@ -228,13 +347,7 @@ static void raPatchCommit(raPatch* p) {
 			if (p->oddId == 0) {
 				p->oddId = p->pendingId;
 			}
-			p->pendingOpen   = 0;
-			p->pendingBad    = 0;
-			p->pendingSeen   = 0;
-			p->pendingLength = 0;
-			p->flagsSeen     = 0;
-			p->flags         = 0;
-			p->pendingId     = 0;
+			raPatchForget(p);
 			return;
 		}
 		/*
@@ -247,13 +360,8 @@ static void raPatchCommit(raPatch* p) {
 			for (i = 0; i < p->skipCount; i++) {
 				if (p->skipIds[i] == p->pendingId) {
 					p->alreadyDone++;
-					p->pendingOpen   = 0;
-					p->pendingBad    = 0;
-					p->pendingSeen   = 0;
-					p->pendingLength = 0;
-					p->flagsSeen     = 0;
-					p->flags         = 0;
-					p->pendingId     = 0;
+					raPatchWriteEarned(p);
+					raPatchForget(p);
 					return;
 				}
 			}
@@ -379,31 +487,12 @@ static void raPatchCommit(raPatch* p) {
 		}
 	}
 
-	p->pendingOpen   = 0;
-	p->pendingBad    = 0;
-	p->pendingSeen   = 0;
-	p->pendingLength = 0;
-	p->flagsSeen     = 0;
-	p->flags         = 0;
 	/*
-	    Consumed, not carried. See raPatchSayId: the reply's root object has an "ID" of its own and
-	    it precedes every achievement, so a definition that arrived without one must read as
-	    id-less rather than inherit the game's.
+	    Consumed, not carried -- every field of it. See raPatchSayId: the reply's root object has an
+	    "ID" of its own and it precedes every achievement, so a definition that arrived without one
+	    must read as id-less rather than inherit the game's. The same is true of every label.
 	*/
-	p->pendingId     = 0;
-	/*
-	    Cleared here and not on `{`. See raPatch::title in ra_wifi.h for why the id and the title are
-	    treated differently, and for what the difference costs.
-	*/
-	p->titleLength   = 0;
-	p->title[0]      = 0;
-	/* Same rule, same reason: one achievement must never inherit another's. */
-	p->descLength    = 0;
-	p->desc[0]       = 0;
-	p->descFull      = 0;
-	p->points        = 0;
-	p->pointsSeen    = 0;
-	p->pointsBad     = 0;
+	raPatchForget(p);
 }
 
 /*
