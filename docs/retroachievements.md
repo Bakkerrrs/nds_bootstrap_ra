@@ -6790,6 +6790,40 @@ cannot fire. See "The survey learns to read the BG mode".
 What remains is smaller and is written down there: **tile data is still marked as a single 16K block**,
 which is a heuristic and not a reading, because how far a character base reaches is not in any register.
 
+### 6. The in-game achievement viewer — the launcher half is done, the menu half is not
+
+`<id>:<memaddr>\t<title>\t<points>\t<description>` is written, earned achievements are staged as
+`#!<id>\t<title>\t<points>\t<description>`, and `ra_split_definitions()` no longer lets the extra
+fields leak into the notification's title. What is missing is the page itself, and it is blocked on
+one decision that is worth stating rather than discovering.
+
+**The menu cannot parse the block, and the reason is that the block is mutated in place.**
+`ra_split_definitions()` turns a record's newline into a NUL so rcheevos gets C strings, and turns
+the tab after the memaddr and the tab after the title into NULs for the same reason. So by the time
+a player can open the menu, the block looks like
+
+```
+<memaddr>\0<title>\0<points>\t<description>\0
+```
+
+and the NUL that ends the record is indistinguishable from the two that came from tabs. Every scheme
+for recovering the boundaries from the bytes alone is a heuristic -- "a record starts with `#!`, or
+with digits-then-colon, or with something memaddr-shaped" -- and this project has a section about
+what heuristics cost.
+
+**So `cardenginei_arm9_ra` should publish a viewer index**, built at init while the block is still
+pristine, in the definitions' own reservation beside `raPendingBlock`: one entry per achievement
+with the id, the offsets of the three text fields, and a flag for earned. 128 entries at 12 bytes is
+1.5 KB of the 32 KB reservation, it needs no heuristic, and it is the pattern
+`CARDENGINEI_ARM9_RA_PENDING_LOCATION` already established.
+
+Three things then have to move together, and the third is the one that has bitten this project
+twice: the index needs its own constant in `locations.h`, the menu needs its label in `IgmText`, and
+**`sizeof(struct IgmText)` has a hand-written mirror in `arm9_igm/source/card_engine_header.s`** as a
+`.space` directive that no compiler checks. Growing the structure without growing that number is
+what produced the black-screen-then-TWiLight crash the first time the RetroAchievements folder was
+added.
+
 ### 5. The deferred graphical limitations
 
 Catalogued above with what the sprite path changed about each. Items 1 (the in-game menu collision) and
