@@ -1948,7 +1948,45 @@ bool raWifiShutdown(void) {
 	return true;
 }
 
-void raWifiProbe(bool sdFound, const char* ndsPath) {
+/*
+    Everything that disqualifies a hardcore session, in one place, decided before a single request is
+    signed.
+
+    RetroAchievements' hardcore rules forbid cheats, savestates, rewind and slowdown. What this fork
+    can be held to is what it can *observe*, and the honest reading of nds-bootstrap is:
+
+      cheats        a cheat file loaded for this ROM -- conf->cheatSize. Observable, and gated here.
+      savestates    **nds-bootstrap has none.** There is no savestate feature anywhere in the tree,
+                    so there is nothing to switch off and nothing to check. Stated rather than left
+                    as an assumed gap, because "we did not find it" and "it does not exist" are
+                    different claims and only one of them is true here.
+      RAM editing   the in-game menu's RAM viewer *writes* -- see the RAMW message in inGameMenu.c.
+                    That is a cheat device by any reading of the rules, it is live during play rather
+                    than decided at boot, and it is **not gated yet**. It is the piece that has to
+                    move next, and until it does no build here should claim hardcore.
+
+    The rule for what to do about it: **fall back to softcore and say so**, never claim hardcore and
+    hope. An unlock claimed as hardcore under a cheat file is exactly what gets a client's
+    User-Agent refused, and this fork's User-Agent is still trying to be recognised at all.
+*/
+static bool raWifiHardcoreRefused(const raConfig* cfg, bool cheatsOn) {
+	if (!cfg->hardcore) {
+		return false;
+	}
+	if (cheatsOn) {
+		raWifiLog("\x1b[33mhardcore refused: a cheat file is loaded for this ROM\x1b[37m\n");
+		return true;
+	}
+	/*
+	    And refused anyway while the RAM viewer can write. Deliberately unconditional: it is not a
+	    setting a player turns on, it is a page in a menu two button presses away, so there is no
+	    state to consult -- the capability is present in every build that has the menu.
+	*/
+	raWifiLog("\x1b[33mhardcore refused: the in-game menu can write RAM\x1b[37m\n");
+	return true;
+}
+
+void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	raWifiSdFound = sdFound;
 	static raConfig config;
 	int             stage;
@@ -2021,6 +2059,15 @@ void raWifiProbe(bool sdFound, const char* ndsPath) {
 		raWifiLog("username         %s\n", config.username[0] ? config.username : "(empty)");
 		raWifiLog("password         %s\n", raConfigRedact(config.password));
 		raWifiLog("hardcore         %s\n", config.hardcore ? "1" : "0");
+		/*
+		    Decided here, before stage 10, so every request in the ladder is signed with the mode the
+		    session will actually run in. Deciding it later would sign the login one way and the
+		    awards another.
+		*/
+		if (raWifiHardcoreRefused(&config, cheatsOn)) {
+			config.hardcore = 0;
+			raWifiLog("hardcore         falling back to softcore\n");
+		}
 		if (config.notYet) {
 			raWifiLog("%u keys parsed but not acted on yet\n", config.notYet);
 		}

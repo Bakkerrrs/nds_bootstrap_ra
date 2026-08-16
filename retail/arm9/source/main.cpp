@@ -617,7 +617,7 @@ int main(int argc, char** argv) {
 	    run in the launcher, before a game exists to contend for the ARM7.
 	*/
 	myConsoleDemoInit();
-	raWifiProbe(sdFound, conf->ndsPath);
+	raWifiProbe(sdFound, conf->ndsPath, conf->cheatSize != 0);
 #endif
 
 	if (status == 0) {

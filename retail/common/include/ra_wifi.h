@@ -929,7 +929,12 @@ typedef struct raHashInfo {
     The probe itself, on the ARM9 launcher. Never returns: it stops on a summary. See the
     switch above for why that is the design and not a shortcut.
 */
-void raWifiProbe(bool sdFound, const char* ndsPath);
+/*
+    `cheatsOn` is conf->cheatSize != 0. Passed in rather than read here because this file knows
+    nothing about nds-bootstrap's configuration, and because what hardcore requires is a *list* of
+    such facts -- see raWifiHardcoreRefused().
+*/
+void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn);
 
 /*
     The RetroAchievements hash of a DS ROM, as rcheevos computes it. 32 lowercase hex digits
