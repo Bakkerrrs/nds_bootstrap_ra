@@ -235,7 +235,24 @@ typedef struct raResult {
 */
 #define RA_SHARED_UNLOCK_REQ   9
 #define RA_SHARED_UNLOCK_ID    10
-#define RA_SHARED_UNLOCK_MAGIC 0x4C554152u   /* 'RAUL' */
+#define RA_SHARED_UNLOCK_MAGIC 0x4C554152u   /* 'RAUL' -- softcore */
+/*
+    And the same request from a hardcore session. **The mode rides in the magic rather than in a slot
+    of its own**, and that is a deliberate trade rather than a squeeze.
+
+    Slots 11 and 12 are free and either would hold a flag. There are only four slots in total, two of
+    them already spent here, and spending a third on one bit would leave this feature holding half of
+    everything the ARM9 will ever be able to say to the ARM7. The magic is already a word the ARM7
+    compares against a constant, so a second constant costs one more compare and no address space.
+
+    It also makes the wrong thing impossible rather than merely unlikely. With a separate flag slot,
+    a request written without setting it reads as softcore *by omission* -- a missed store in a path
+    added later, a stale value from the previous unlock. Here the mode and the request are the same
+    word: there is no way to raise the request without saying which kind it is.
+
+    Softcore stays 'RAUL' so a new cardengine and an old ARM7 half still agree about the common case.
+*/
+#define RA_SHARED_UNLOCK_HARDCORE 0x48554152u   /* 'RAUH' -- hardcore */
 
 /*
     The snapshot lives in the cardengine's own .bss. That matters for two

@@ -858,7 +858,26 @@ static void raWifiStartSession(const raConfig* cfg) {
     **The file is rewritten in place, same length.** Truncating it could hand its clusters back, and
     the cardengine half of this can only write into clusters that already exist.
 */
-static void raWifiSubmitOne(const raConfig* cfg, u32 id, u32 when, raQueue* q) {
+/*
+    `hardcore` is the record's own, not the configuration's, and that distinction is the whole point
+    of the field existing.
+
+    ra.cfg describes the session about to start. This request is about a session that is already
+    over -- possibly days over, on a different game, in a different mode. Taking `h=` from the file
+    meant a player could earn unlocks in softcore with the in-game menu's RAM editor open, set
+    hardcore=1, boot, and have them submitted as hardcore. Nothing downstream could have noticed:
+    the request is well-formed and correctly signed either way.
+
+    So the record decides, and it decides in both directions. A hardcore unlock is still sent as
+    hardcore on a boot whose ra.cfg has since been set to softcore -- it *was* earned in hardcore, and
+    dating it by the boot that reported it is the same mistake `o=` exists to avoid.
+
+    The one thing that is still the session's to decide is what raWifiHardcoreRefused() rules on, and
+    that already happened before any of these records were written -- which is why this function no
+    longer takes the config at all. It used to, for this one field, and losing the parameter is the
+    clearest statement available that the file no longer has a say here.
+*/
+static void raWifiSubmitOne(u32 id, u32 when, int hardcore, raQueue* q) {
 	static char   response[1024];
 	char          user[3 * sizeof(raUser)];
 	char          path[384];
@@ -906,7 +925,7 @@ static void raWifiSubmitOne(const raConfig* cfg, u32 id, u32 when, raQueue* q) {
 	    and the reason they must is in raQueueSign() -- which also takes `seconds`, because `o=` in the
 	    URL and the two extra fields in the digest have to appear together or the server refuses it.
 	*/
-	raQueueSign(id, raUser, cfg->hardcore ? 1 : 0, seconds, signature);
+	raQueueSign(id, raUser, hardcore, seconds, signature);
 
 	if (!raNetUrlEncode(raUser, user, sizeof(user))) {
 		raWifiLog("\x1b[31musername too long to encode\x1b[37m\n");
@@ -915,7 +934,7 @@ static void raWifiSubmitOne(const raConfig* cfg, u32 id, u32 when, raQueue* q) {
 	}
 	if (sniprintf(path, sizeof(path),
 	              "/dorequest.php?r=awardachievement&u=%s&t=%s&a=%lu&h=%d%s&v=%s",
-	              user, raToken, (unsigned long)id, cfg->hardcore ? 1 : 0, offset, signature)
+	              user, raToken, (unsigned long)id, hardcore, offset, signature)
 	    >= (int)sizeof(path)) {
 		raWifiLog("\x1b[31maward request too long\x1b[37m\n");
 		q->kept++;
@@ -1128,7 +1147,7 @@ static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
 	for (i = 0; i < q.count; i++) {
 		const int before = q.kept;
 
-		raWifiSubmitOne(cfg, q.ids[i], q.times[i], &q);
+		raWifiSubmitOne(q.ids[i], q.times[i], q.hardcore[i], &q);
 		if (q.kept > before) {
 			keep[keepCount++] = i;
 		}
@@ -1140,6 +1159,15 @@ static void raWifiSubmitQueue(const raConfig* cfg, bool sdFound) {
 	verdict.submitKept     = (u16)q.kept;
 
 	raWifiLog("awarded %d, refused %d, still owed %d\n", q.accepted, q.refused, q.kept);
+	/*
+	    Said only when there is something to say, and worth saying because it is the one number in
+	    this pass that ra.cfg does not explain. A boot configured softcore can legitimately submit
+	    hardcore unlocks earned before the setting changed, and a log that did not mention it would
+	    make that look like a bug in the mode handling rather than the point of it.
+	*/
+	if (q.hard) {
+		raWifiLog("%d of them earned in hardcore, per the record\n", q.hard);
+	}
 
 	/*
 	    Rewrite whatever is still owed, over the same length. Done even when keepCount is 0 -- that is

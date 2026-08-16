@@ -223,6 +223,7 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 		u32  stamp;
 		char code[RA_QUEUE_CODE + 1];
 		char title[RA_QUEUE_TITLE + 1];
+		int hardcore;
 		int overflow;
 		int digits;
 		int j;
@@ -280,6 +281,7 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 		stamp = 0;
 		code[0] = 0;
 		title[0] = 0;
+		hardcore = 0;
 		if (i < length && text[i] == '\t') {
 			const int start = ++i;
 
@@ -316,6 +318,24 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 				if (i < length && text[i] == '\t') {
 					i++;
 					i = takeField(text, i, length, title, RA_QUEUE_TITLE);
+
+					/*
+					    And the mode, which is one character and must be consumed for the same reason
+					    the title must: left behind, the outer loop reads `1` as an achievement id
+					    and submits an unlock the player never earned. The field this project already
+					    learned that lesson on was a title ending in a digit.
+
+					    Anything that is not `1` is softcore, including a missing field, a truncated
+					    record and a character a hand edit put there. Only `1` is a claim, and a
+					    claim has to be written to be made.
+					*/
+					if (i < length && text[i] == '\t') {
+						i++;
+						if (i < length && text[i] != '\n' && text[i] != 0) {
+							hardcore = (text[i] == '1');
+							i++;
+						}
+					}
 				}
 			}
 		}
@@ -363,6 +383,10 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 		strcpy(q->titles[q->count], title);
 		if (code[0]) {
 			q->named++;
+		}
+		q->hardcore[q->count] = (u8)(hardcore ? 1 : 0);
+		if (hardcore) {
+			q->hard++;
 		}
 		q->ids[q->count++] = value;
 	}
@@ -420,9 +444,9 @@ int raQueuePack(const raQueue* q, const int* keep, int keepCount, char* out, int
 		    sized, so a record that did not fit would not fail a check -- it would run into the next
 		    record, and on the last one past the end of the buffer entirely.
 
-		    A u32 is at most 10 digits and the longest record is 10+1+14+1+4+1+12+1 = 44 of the 48 a
-		    record holds, so this cannot trigger. It is here because the record size is a tunable and
-		    the failure it would otherwise cause is silent memory corruption.
+		    A u32 is at most 10 digits and the longest record is 10+1+14+1+4+1+12+1+1+1 = 46 of the 48
+		    a record holds, so this cannot trigger. It is here because the record size is a tunable
+		    and the failure it would otherwise cause is silent memory corruption.
 		*/
 		{
 			int need = n + 1;  /* the id and its newline */
@@ -431,7 +455,8 @@ int raQueuePack(const raQueue* q, const int* keep, int keepCount, char* out, int
 				need += 1 + RA_QUEUE_STAMP;
 				if (q->codes[from][0]) {
 					need += 1 + (int)strlen(q->codes[from])
-					      + 1 + (int)strlen(q->titles[from]);
+					      + 1 + (int)strlen(q->titles[from])
+					      + 2;  /* the tab and the mode digit */
 				}
 			}
 			if (need > RA_QUEUE_RECORD) {
@@ -465,6 +490,15 @@ int raQueuePack(const raQueue* q, const int* keep, int keepCount, char* out, int
 				for (k = 0; q->titles[from][k]; k++) {
 					record[at++] = q->titles[from][k];
 				}
+
+				/*
+				    And the mode back out, because a record that is kept must not change what it
+				    claims. A hardcore unlock the server never answered is still a hardcore unlock
+				    next boot, and dropping the field here would quietly downgrade every record that
+				    survived a failed submission -- the one population most likely to be retried.
+				*/
+				record[at++] = '\t';
+				record[at++] = q->hardcore[from] ? '1' : '0';
 			}
 		}
 		record[at++] = '\n';

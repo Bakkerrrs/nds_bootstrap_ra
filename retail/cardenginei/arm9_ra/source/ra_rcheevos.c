@@ -491,7 +491,30 @@ static void ra_rc_offer_unlock(raSnapshot* snapshot) {
 		return;   /* the previous one has not been picked up yet */
 	}
 	shared[RA_SHARED_UNLOCK_ID]  = unlockRing[unlockTail];
-	shared[RA_SHARED_UNLOCK_REQ] = RA_SHARED_UNLOCK_MAGIC;
+	/*
+	    Which mode this was earned in, decided here because this is the only side that can.
+
+	    The ARM7 writes the queue record but has no way to know: the session block lives in this
+	    binary's own window, which the ARM7 does not map. The launcher knows but is long gone. So the
+	    answer crosses with the request, and it crosses in the request rather than beside it -- see
+	    RA_SHARED_UNLOCK_HARDCORE.
+
+	    Read on every request rather than cached in a static, and that is not laziness. Statics in
+	    this binary live in .bss that no crt0 zeroes, so a cached copy would need its own validity
+	    magic to be trusted -- more state, and more of it uninitialised, to save a load and a compare
+	    on the frame an achievement unlocks. The block is a word in memory this binary already owns.
+
+	    An absent block is softcore, which is the same default the in-game menu takes and safe for the
+	    same reason: no launcher staged a session, so no launcher is going to submit one as hardcore.
+	*/
+	{
+		const raSessionBlock* const session =
+			(const raSessionBlock*)CARDENGINEI_ARM9_RA_SESSION_LOCATION;
+		const int hardcore = (session->magic == RA_SESSION_MAGIC && session->hardcore != 0);
+
+		shared[RA_SHARED_UNLOCK_REQ] = hardcore ? RA_SHARED_UNLOCK_HARDCORE
+		                                        : RA_SHARED_UNLOCK_MAGIC;
+	}
 
 	unlockTail = (u8)((unlockTail + 1) % RA_UNLOCK_RING);
 	unlockQueued--;

@@ -1290,6 +1290,78 @@ static void test_queue(void) {
 		CHECK(RA_QUEUE_RECORD >= 11);
 	}
 
+	printf("\na record remembers the mode it was earned in, and the sender cannot overrule it\n");
+	{
+		raQueue q;
+		char    out[RA_QUEUE_BYTES];
+		int     keep[2];
+
+		/*
+		    The bug this whole field exists for: the mode used to come from ra.cfg at submission
+		    time, so earning in softcore and then setting hardcore=1 sent them as hardcore. The
+		    record now says, and the record is what raWifiSubmitOne() signs and sends.
+		*/
+		raQueueScan(&q, "302329\t20260815183300\tYCTE\tCONTRA 4\t1\n"
+		                "302330\t20260815183301\tYCTE\tCONTRA 4\t0\n", 76);
+		CHECK(q.count == 2);
+		CHECK(q.ids[0] == 302329 && q.hardcore[0] == 1);
+		CHECK(q.ids[1] == 302330 && q.hardcore[1] == 0);
+		CHECK(q.hard == 1);
+		/* The fields before it still arrive: appending must not have shifted anything. */
+		CHECK(strcmp(q.titles[0], "CONTRA 4") == 0 && strcmp(q.codes[0], "YCTE") == 0);
+		CHECK(q.stamped == 2 && q.named == 2);
+
+		/*
+		    **The consumption test, and it is the one that matters.** A mode digit left unconsumed is
+		    read by the outer loop as the next record's id -- exactly the failure a title ending in a
+		    digit would have caused, which is why that lesson is written down at takeField(). Two
+		    records must parse as two, not four.
+		*/
+		CHECK(q.dropped == 0);
+		CHECK(q.count == 2);
+
+		/* Absent means softcore: a bare id, and a record from a build before the field existed. */
+		raQueueScan(&q, "93119\n93120\t20260815183300\tYCTE\tCONTRA 4\n", 41);
+		CHECK(q.count == 2);
+		CHECK(q.hardcore[0] == 0 && q.hardcore[1] == 0);
+		CHECK(q.hard == 0);
+
+		/*
+		    Only `1` is a claim. A hand edit that put something else there is not a hardcore unlock,
+		    and the character is still consumed so it cannot become an id.
+		*/
+		raQueueScan(&q, "93119\t20260815183300\tYCTE\tCONTRA 4\tx\n", 37);
+		CHECK(q.count == 1 && q.hardcore[0] == 0 && q.dropped == 0);
+
+		/*
+		    And a kept record does not lose it. This is the population most likely to be retried --
+		    the server never answered -- so a pack that dropped the field would downgrade exactly the
+		    unlocks that get a second chance.
+		*/
+		raQueueScan(&q, "302329\t20260815183300\tYCTE\tCONTRA 4\t1\n"
+		                "302330\t20260815183301\tYCTE\tCONTRA 4\t0\n", 76);
+		keep[0] = 0;
+		keep[1] = 1;
+		CHECK(raQueuePack(&q, keep, 2, out, sizeof(out)) == 2);
+		CHECK(memcmp(out, "302329\t20260815183300\tYCTE\tCONTRA 4\t1\n", 38) == 0);
+		raQueueScan(&q, out, sizeof(out));
+		CHECK(q.count == 2 && q.hardcore[0] == 1 && q.hardcore[1] == 0);
+		CHECK(q.hard == 1);
+
+		/* The longest record the writer can produce still fits, with the field on the end. */
+		CHECK(10 + 1 + RA_QUEUE_STAMP + 1 + RA_QUEUE_CODE + 1 + RA_QUEUE_TITLE + 1 + 1 + 1
+		      <= RA_QUEUE_RECORD);
+
+		/*
+		    The two magics differ, and softcore is still the value an older ARM7 half compares
+		    against. They are read as a pair by cardenginei_arm7 and written as a pair by
+		    cardenginei_arm9_ra, in two binaries that share only this header.
+		*/
+		CHECK(RA_SHARED_UNLOCK_MAGIC != RA_SHARED_UNLOCK_HARDCORE);
+		CHECK(RA_SHARED_UNLOCK_MAGIC == 0x4C554152u);
+		CHECK(RA_SHARED_UNLOCK_HARDCORE != 0);
+	}
+
 	printf("\nand signs r=awardachievement the way rcheevos does\n");
 	{
 		char v[33];
@@ -1463,8 +1535,14 @@ static void test_queue(void) {
 		keepIdx[0] = 0;
 		keepIdx[1] = 1;
 		CHECK(raQueuePack(&q, keepIdx, 2, out, sizeof(out)) == 2);
+		/*
+		    Written back with an explicit `\t0` although the record arrived without one. The packer
+		    always states the mode when the game is present, which normalises an older record rather
+		    than preserving its silence -- and the two mean the same thing, since absent has always
+		    read as softcore.
+		*/
 		CHECK(memcmp(out + 0 * RA_QUEUE_RECORD,
-		             "93119\t20260810142345\tYZ4E\tCONTRA4\n", 34) == 0);
+		             "93119\t20260810142345\tYZ4E\tCONTRA4\t0\n", 36) == 0);
 		/* The unstamped one is written the old way, not with a bogus date or an invented game. */
 		CHECK(memcmp(out + 1 * RA_QUEUE_RECORD, "93121\n", 6) == 0);
 
@@ -1477,8 +1555,11 @@ static void test_queue(void) {
 		CHECK(q.ids[1] == 93121 && q.times[1] == 0);
 		CHECK(q.codes[1][0] == 0);
 
-		/* A record must hold id, stamp, code and title with their delimiters: 10+1+14+1+4+1+12+1. */
-		CHECK(RA_QUEUE_RECORD >= 44);
+		/*
+		    A record must hold id, stamp, code, title and mode with their delimiters:
+		    10+1+14+1+4+1+12+1+1+1.
+		*/
+		CHECK(RA_QUEUE_RECORD >= 46);
 	}
 
 	printf("\na record names the game it came from, straight out of the ROM header\n");

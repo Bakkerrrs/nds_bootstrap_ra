@@ -1053,7 +1053,7 @@ static void raUnlockStamp(char* out) {
 	}
 }
 
-static void raUnlockAppend(u32 id, const char* stamp) {
+static void raUnlockAppend(u32 id, const char* stamp, int hardcore) {
 	char record[RA_QUEUE_RECORD];
 	char digits[11];
 	u32  value = id;
@@ -1159,6 +1159,25 @@ static void raUnlockAppend(u32 id, const char* stamp) {
 		record[at++] = '\t';
 		tonccpy(record + at, raGameTitle, RA_QUEUE_TITLE);
 		at += RA_QUEUE_TITLE;
+
+		/*
+		    And which mode it was earned in, so the boot that sends it cannot decide that for itself.
+
+		    Without this the mode came from ra.cfg at submission time, which meant a player could earn
+		    unlocks in softcore with the menu's RAM editor open, set hardcore=1, boot, and watch them
+		    go out as hardcore. The record is the only place that can hold the truth, because it is
+		    the only thing that survives from the session that earned it to the boot that sends it.
+
+		    Last, because the fields are positional and everything before it already shipped. A record
+		    that lost its stamp has no game either and now has no mode either, and reads as softcore:
+		    the fail-safe direction, and the same thing an older build's records read as.
+
+		    Two characters, and the record was sized for them -- 44 bytes used of 48 before this, 46
+		    after. This binary is the tightest in the tree, so it writes a byte it is handed rather
+		    than deciding anything: `hardcore` came across in the request's own magic.
+		*/
+		record[at++] = '\t';
+		record[at++] = hardcore ? '1' : '0';
 		record[at] = '\n';
 	}
 
@@ -2240,17 +2259,28 @@ void myIrqHandlerVBlank(void) {
 	    The flag is cleared after the append, not before, so a frame that could not do the work leaves
 	    the request standing and the next one retries.
 	*/
-	if (sharedAddr[RA_SHARED_UNLOCK_REQ] == RA_SHARED_UNLOCK_MAGIC) {
-		char stamp[RA_QUEUE_STAMP];
-		int  oldIME;
+	/*
+	    Two magics, one request, and the mode is which of them arrived -- see
+	    RA_SHARED_UNLOCK_HARDCORE. Read once into a local because the ARM9 may not write this word
+	    while it is non-zero, but reading it twice would still be two loads of a volatile for one
+	    answer.
+	*/
+	{
+		const u32 req = sharedAddr[RA_SHARED_UNLOCK_REQ];
 
-		/* Before the section, not inside it: two SPI transactions the section does not need. */
-		raUnlockStamp(stamp);
-		oldIME = enterCriticalSection();
+		if (req == RA_SHARED_UNLOCK_MAGIC || req == RA_SHARED_UNLOCK_HARDCORE) {
+			char stamp[RA_QUEUE_STAMP];
+			int  oldIME;
 
-		raUnlockAppend(sharedAddr[RA_SHARED_UNLOCK_ID], stamp);
-		leaveCriticalSection(oldIME);
-		sharedAddr[RA_SHARED_UNLOCK_REQ] = 0;
+			/* Before the section, not inside it: two SPI transactions the section does not need. */
+			raUnlockStamp(stamp);
+			oldIME = enterCriticalSection();
+
+			raUnlockAppend(sharedAddr[RA_SHARED_UNLOCK_ID], stamp,
+			               req == RA_SHARED_UNLOCK_HARDCORE);
+			leaveCriticalSection(oldIME);
+			sharedAddr[RA_SHARED_UNLOCK_REQ] = 0;
+		}
 	}
 
 	if (sharedAddr[3] == (vu32)0x52534554) {

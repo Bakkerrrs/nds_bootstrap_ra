@@ -149,9 +149,10 @@
     Clearing is done in place, zeros over the same length, for the first reason: truncating the file
     could hand its clusters back and break the allocation the cardengine depends on.
 
-    **A record carries when it was earned and which game it came from, not only what.** The layout is
+    **A record carries when it was earned, which game it came from and which mode it was earned in,
+    not only what.** The layout is
 
-        <id>\t<YYYYMMDDhhmmss>\t<gamecode>\t<gametitle>\n
+        <id>\t<YYYYMMDDhhmmss>\t<gamecode>\t<gametitle>\t<h>\n
 
     NUL-padded to RA_QUEUE_RECORD, and the stamp is local time straight off the console's RTC. It is
     there so `r=awardachievement` can send `o=` -- seconds since the unlock -- instead of letting the
@@ -175,6 +176,23 @@
     The cost is that `gameTitle` is the ROM's internal title: twelve characters, upper case, `CONTRA4`
     rather than `Contra 4`. Recognisable, free, and available with the radio down.
 
+    **`<h>` is the mode the session was in when it fired, and it is here because nothing else lives
+    long enough to hold it.** The mode used to be read from `ra.cfg` at submission time, which meant
+    a player could earn unlocks in softcore with the in-game menu's RAM editor open, set
+    `hardcore=1`, boot, and have them sent as hardcore. The session that earned an unlock is over by
+    then -- the record is the only thing that crosses from it to the boot that sends it.
+
+    `1` or `0`, written by the ARM7 from the mode that crossed in the request's own magic; see
+    RA_SHARED_UNLOCK_HARDCORE. Absent reads as softcore, which covers a bare hand-typed id, a record
+    from a build before this field, and a record whose clock failed so it has no fields at all. That
+    is the fail-safe direction: the failure it allows is a genuine hardcore unlock sent as softcore,
+    where the other direction is a claim the client cannot support.
+
+    One consequence of appending rather than inserting, and it is worth stating because it is
+    invisible until someone hits it: a **downgraded** build reads the mode digit as the next record's
+    id. `0` is dropped as it always was, `1` would be sent once and answered `Unknown achievement`.
+    Only reachable by going back to an older nds-bootstrap-ra after this one has written a queue.
+
     **Every field after the id is optional, and that is load-bearing.** A record that is a bare id --
     one a human typed, or one written by a build from before any of this existed -- parses exactly as
     it always did and is sent without `o=`. That is what keeps the file hand-writable and what makes
@@ -186,7 +204,11 @@
 */
 #define RA_QUEUE_PATH          "sd:/ra_unlocks.txt"
 #define RA_QUEUE_PATH_FAT      "fat:/ra_unlocks.txt"
-/* <id>\t<stamp>\t<code>\t<title>\n is 10+1+14+1+4+1+12+1 = 44 at its longest. ASCII, NUL-padded. */
+/*
+    <id>\t<stamp>\t<code>\t<title>\t<h>\n is 10+1+14+1+4+1+12+1+1+1 = 46 at its longest. ASCII,
+    NUL-padded. The record was already 48 when the mode field went in, so unlike the stamp and the
+    game before it this one cost no migration -- every card in the field was already the right size.
+*/
 #define RA_QUEUE_RECORD        48
 #define RA_QUEUE_STAMP         14                              /* YYYYMMDDhhmmss */
 #define RA_QUEUE_CODE          4                               /* tNDSHeader.gameCode */
@@ -339,7 +361,18 @@ typedef struct raQueue {
 	*/
 	char codes[RA_QUEUE_MAX][RA_QUEUE_CODE + 1];
 	char titles[RA_QUEUE_MAX][RA_QUEUE_TITLE + 1];
+	/*
+	    Which mode each was earned in: 1 for hardcore, 0 for softcore or for a record that did not
+	    say. This is what `h=` is taken from when the unlock is submitted, **not** ra.cfg -- see
+	    RA_QUEUE_PATH for why the record has to be the authority.
+
+	    A u8 rather than sharing a bit with something: 64 bytes against a structure already holding
+	    64 titles, and a flag packed into `ids` would be a flag inside a number this file is careful
+	    to keep meaning exactly one thing.
+	*/
+	u8   hardcore[RA_QUEUE_MAX];
 	int  stamped;            /* how many of those carried a usable stamp */
+	int  hard;               /* how many of those were earned in hardcore */
 	int  named;              /* how many of those named their game */
 	int  count;              /* how many of those */
 	int  dropped;            /* unparseable or out of range, so the file said something we ignored */

@@ -72,17 +72,20 @@ client that is not an emulator, which is itself the first question.
 > Is that acceptable for softcore? For hardcore? If it is not, I would rather know now than build
 > further on it.
 >
-> **3. If deferred submission is acceptable, may a queued unlock be submitted in a mode chosen after
-> it was earned?**
+> **3. Is there anything else about deferred submission I should be handling that I am not?**
 >
-> I ask because mine currently can be, and I do not think it should be. The queued record stores the
-> achievement and when it fired, but not whether the session was hardcore — the mode is read from
-> configuration at submission time. A player could earn unlocks in softcore, switch to hardcore, and
-> have them submitted as hardcore.
+> One thing I found by looking for it, and have already fixed, as an indication of the standard I am
+> trying to hold this to. The queued record used to store the achievement and when it fired, but not
+> whether the session was hardcore — the mode was read from configuration at submission time. That
+> meant a player could earn unlocks in softcore, set hardcore afterwards, and have them submitted as
+> hardcore, correctly signed and indistinguishable from the real thing at your end.
 >
-> The fix is small and I intend to make it: record the mode with the unlock and refuse to upgrade it.
-> I have held off only because your answer to question 2 decides whether that is the right shape of
-> fix at all.
+> The record now carries the mode it was earned in, `h=` and the signature are taken from the record
+> rather than from configuration, and it works in both directions: an unlock earned in hardcore is
+> still submitted as hardcore even if the player has since switched to softcore.
+>
+> If there are other consequences of an offline queue that you have seen go wrong in other
+> integrations, I would rather hear them now.
 >
 > **What is in place for hardcore already**
 >
@@ -97,6 +100,8 @@ client that is not an emulator, which is itself the first question.
 >   it now refuses to enter edit mode; it will still display memory, which I hope is uncontroversial
 >   since the rules are about modifying rather than reading. If you would rather it not display
 >   memory either in hardcore, say so and I will close that too.
+> - **Retroactive mode changes** — an unlock is submitted in the mode it was earned in, recorded
+>   with the unlock itself rather than read from configuration when it is sent. See question 3.
 >
 > Happy to answer anything about the implementation, and happy to hand over source — it is public.
 >
@@ -106,11 +111,8 @@ client that is not an emulator, which is itself the first question.
 
 Write it into `retroachievements.md` rather than only here, and specifically:
 
-- If **deferred submission is sanctioned**, build the mode field on the queue record (question 3 in
-  the draft; the record has 4 spare bytes of 48, so it fits without another migration) and the
-  launcher's refusal to upgrade.
-- If it is **not sanctioned**, the queue's design is what needs revisiting, not the record's fields,
-  and "In-game networking, reopened and then closed by measurement" is the section that has to be
-  reopened with a different question.
+- If deferred submission is **not sanctioned**, the queue's design is what needs revisiting, and
+  "In-game networking, reopened and then closed by measurement" is the section that has to be
+  reopened with a different question. The record's mode field goes with it.
 - If the User-Agent is **registered**, bump `RA_NET_CLIENT_VERSION` deliberately rather than
   incidentally — it is also `l=` on `r=startsession` — and record which string was registered.

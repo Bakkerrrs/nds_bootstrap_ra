@@ -6782,19 +6782,93 @@ the failure this change can plausibly introduce is not a hardcore session that e
 exits the ladder at stage 0c, ten rungs before the pending tally is staged, and the lock must still
 be in force.
 
-### What this does *not* settle, and it is the next real question
+## A queued unlock remembers the mode it was earned in
 
-**The queue does not record which mode an unlock was earned in.** A record is `<id>`, a timestamp
-and the game; the mode is applied at submission, from whatever `ra.cfg` says on the boot that
-happens to have a network. So a player can earn unlocks in a softcore session with the editor open,
-set `hardcore=1`, boot, and watch them go out as `h=1`.
+Closing the RAM viewer exposed the other half of the same problem, and it was worse than the half
+that had just been fixed.
 
-That is exactly the shape of thing that gets a client's User-Agent refused, and it is now reachable
-in a way it was not while the gate refused every session outright. The fix is a fifth field on the
-queue record — it fits: 44 bytes used of 48 — and the launcher refusing to upgrade a record it did
-not earn. It is **deliberately not built yet**, because the deferred-submission question below has
-to be answered first: if RetroAchievements does not sanction sending an unlock on a later boot at
-all, the record's mode field is not the part of this design that needs rethinking.
+**The mode was applied at submission time, from `ra.cfg`.** A record held `<id>`, a timestamp and
+the game — nothing about how it was earned. So the sequence that defeats the whole thing was: play
+softcore with the RAM editor open, earn unlocks, quit, set `hardcore=1`, boot. The launcher drains
+the queue and sends every one of them with `h=1`, correctly signed. Nothing downstream could have
+noticed; the requests are well-formed either way.
+
+This was reachable only in theory while the gate refused every session outright. Lifting the gate
+made it reachable in practice, which is what moved it from a note to a fix.
+
+### The record is the only thing that lives long enough
+
+The session that earned an unlock is over by the time it is sent — possibly days over, on a
+different game, in a different mode. `ra.cfg` describes the session about to *start*. The queue
+record is the only object that crosses from one to the other, so it is where the mode has to live:
+
+```
+<id>\t<YYYYMMDDhhmmss>\t<gamecode>\t<gametitle>\t<h>\n
+```
+
+Appended rather than inserted, which keeps every existing file readable, and it cost no migration:
+the record was already 48 bytes and the longest one went from 44 to 46. Unlike the stamp (16 → 32)
+and the game (32 → 48) before it, no card in the field needs resizing.
+
+`h=` on `r=awardachievement` now comes from that field, and so does the signature. In both
+directions: an unlock genuinely earned in hardcore is still sent as hardcore on a boot whose
+`ra.cfg` has since been set to softcore. Dating it by the boot that reported it would be the same
+mistake `o=` exists to avoid.
+
+`raWifiSubmitOne()` **lost its `const raConfig*` parameter** to this change, which is the clearest
+statement available that the file no longer has a say.
+
+### How the ARM7 learns it, and why it is not a new slot
+
+The ARM7 writes the queue record. It cannot read the session block — that lives in
+`cardenginei_arm9_ra`'s DSi WRAM window, which the ARM7 does not map — and the launcher is long
+gone. So the mode has to cross with the unlock.
+
+`sharedAddr` has **four usable slots**; `RA_SHARED_UNLOCK_REQ` and `_ID` are two of them. Slots 11
+and 12 are free and either would hold a flag, but spending a third on one bit would leave this one
+feature holding three quarters of everything the ARM9 will ever be able to say to the ARM7.
+
+So the mode rides in the **magic**: `RAUL` for softcore, `RAUH` for hardcore. One more compare on
+the ARM7, no address space, and softcore keeps the value it always had.
+
+It also makes the wrong thing impossible rather than merely unlikely. With a separate flag slot, a
+request written without setting it reads as softcore *by omission* — a missed store in a path added
+later, or a stale value from the previous unlock. Here the mode and the request are the same word:
+there is no way to raise a request without saying which kind it is.
+
+### Absent is softcore, and the digit has to be eaten
+
+A record with no mode field reads as softcore. That covers a hand-typed id, a record from a build
+before this field, and a record whose clock failed so it carries no fields at all — the last one
+downgrades a genuine hardcore unlock, which is a loss for the player and the right direction to
+lose in.
+
+The parser **consumes** the digit whether or not it uses it, and that is not bookkeeping. Left
+behind, the outer loop reads `1` as the next record's id and submits an unlock nobody earned. This
+project already learned that lesson on `CONTRA4`, whose trailing `4` did exactly that before the
+title field was consumed properly. The host suite pins it: two records must parse as two, not four.
+
+`raQueuePack()` writes the field back out, because the records it keeps are the ones the server
+never answered — the population most likely to be retried, and the last one that should be
+downgraded on the way.
+
+### What it cost, and the number is small enough to be uncomfortable
+
+**`cardenginei_arm7_twlsdk` is down to 60 bytes of link margin, from 76.** That is the tightest
+binary in the tree and the change spent 16 bytes of it. It links, and the linker is what enforces
+this rather than a review — but the next thing to want a byte on the ARM7 side of the queue should
+read this line first and expect to pay for it somewhere else.
+
+The three other tight variants are unaffected in kind: `dsiware` 2,612 bytes, `cheat` 3,064, the
+plain and `alt` builds 11,844.
+
+### What this still does *not* settle
+
+The mode is now recorded honestly, but **whether a deferred unlock may be submitted at all** is
+still RetroAchievements' call, not ours — see "What is left". If the answer is no, the queue's
+design is what needs revisiting and this field goes with it. It was built ahead of that answer
+because it is correct under either one: a record must not be upgraded after the fact regardless of
+what the rules say about when it may be sent.
 
 ## Status
 
@@ -6851,12 +6925,17 @@ all, the record's mode field is not the part of this design that needs rethinkin
       half of `raWifiHardcoreRefused()`: the gate now refuses for a cheat file and for
       nothing else. **Built and host-tested; not yet confirmed on hardware** — see "What
       to look for on the next run" in that section.
+- [x] **A queued unlock carries the mode it was earned in.** `h=` and the signature come
+      from the record, not from `ra.cfg` at submission time, so earning in softcore with
+      the RAM editor open and then setting `hardcore=1` no longer upgrades anything. The
+      mode crosses to the ARM7 in the unlock request's own magic rather than in a slot of
+      its own, and `raWifiSubmitOne()` lost its config parameter to the change. Cost: the
+      TWL-SDK ARM7 is down to 60 bytes of link margin. **Built and host-tested; not yet
+      confirmed on hardware.**
 - [ ] **Hardcore.** Blocked on nothing in this tree any more. The server injects a
       *"Warning: Unknown Emulator"* notice for an unrecognised User-Agent and blocks
       hardcore only, by its own wording. What it needs is `nds-bootstrap-ra/0.1`
       recognised by RetroAchievements, which is a conversation rather than a commit.
-      The one code-shaped thing left behind it is the queue not recording which mode an
-      unlock was earned in, and that waits on the same conversation.
 - [ ] Phase 4: rich presence, achievement list, login status
 
 ## What is left
@@ -6881,11 +6960,11 @@ gates the third:
   later. `o=` already carries when it was earned rather than when it was sent, so the server dates it
   correctly, but the submission itself is still out of band compared with every emulator
   integration. It is better raised than discovered.
-- **Whether a queued unlock may be submitted in a mode chosen after it was earned.** Ours currently
-  can be, and should not be: the record carries no mode, so flipping `hardcore=1` between the boot
-  that earned it and the boot that sends it upgrades it. The fix is small and known. Whether it is
-  the *right* fix depends entirely on the answer above — if deferred submission is not sanctioned at
-  all, the mode field is not the part that needs rethinking.
+- **Whether a queued unlock may be submitted in a mode chosen after it was earned.** ~~Ours
+  currently can be~~ — fixed, see "A queued unlock remembers the mode it was earned in". The record
+  now carries the mode and `h=` is taken from it, so flipping `hardcore=1` between the boot that
+  earned an unlock and the boot that sends it no longer upgrades it. Worth mentioning to them
+  anyway: it is the sort of thing a client should be able to say it handles, rather than be asked.
 
 A draft of the message is in `docs/ra-registration-request.md`, kept in the tree so the questions
 asked and the answers given end up in the same place as everything else this project has had to
