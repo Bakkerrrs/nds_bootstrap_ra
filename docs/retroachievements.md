@@ -7294,6 +7294,56 @@ design is what needs revisiting and this field goes with it. It was built ahead 
 because it is correct under either one: a record must not be upgraded after the fact regardless of
 what the rules say about when it may be sent.
 
+## Open: the in-game menu freezes some games after it closes, and it is not this feature
+
+Reported on **Chrono Trigger** and **Super Mario 64 DS**. Open the in-game menu, choose Return to
+Game, the bottom screen comes back correctly, the game runs for a few seconds, and then stops
+permanently.
+
+Written down before it is solved, because what has been *ruled out* took four hardware runs and is
+worth more than the hypotheses.
+
+### What it is not
+
+| Ruled out | How |
+| --- | --- |
+| This session's work | The build from before it (`065e944`) freezes identically |
+| The network, the fetch, the queue | Reproduces with `sync=0`, radio never up |
+| The achievements list | Reproduces having opened only the root menu, never the RA pages |
+| **RetroAchievements entirely** | Reproduces with a colour LUT on, which is what stops `cardenginei_arm9_ra` being staged — no reader, no rcheevos, no overlay, no VCOUNT hook |
+| `IgmText`'s hand-written mirror | `ra_release.sh` verifies it against the link, and both IGM variants share one `card_engine_header.s` and one `.space` |
+| `printDec` overrunning on a 3-digit count | It truncates rather than overrunning; a 3-digit set shows the low two digits and writes nothing extra |
+
+The colour-LUT run is the one that settles it. With `colorTable` true the RA binary is never staged,
+the bootloader skips all four block copies, and nothing this project added is executing inside the
+game. The freeze is the same.
+
+**So this is the in-game menu, and the only open question is whether it is ours or upstream's.** Our
+fork has added pages to that menu; the open-and-exit path is upstream code.
+
+### Where suspicion currently points, unverified
+
+The exit path restores `BG_MAP_RAM_SUB`, `BG_PALETTE_SUB`, `BG_GFX_SUB`, the sub display registers,
+`VRAM_C_CR`, `VRAM_H_CR` and `POWERCNT`. Two things it does not:
+
+- **`BG_GFX_SUB` is backed up for `sizeof(igmText.font) * 4` bytes only.** A game using more
+  sub-screen tile graphics than that loses the rest and never gets it back.
+- `REG_MOSAIC_SUB`, `REG_BLDCNT_SUB`, `REG_BLDALPHA_SUB` and `REG_BLDY_SUB` are set to zero and
+  never restored — the source says so, they are write-only and cannot be read back.
+
+Both are corruption of the sub screen rather than a hang, which is why neither is being called the
+cause. The delay before the freeze is the part no hypothesis explains yet: whatever breaks, the game
+survives it for seconds first.
+
+Worth noting that the two games reported are 3D, and *Contra 4* — the game every other measurement in
+this document was taken on — is not, and has not been tested this way.
+
+### The next measurement
+
+An **official nds-bootstrap release**, unmodified, on the same game with the same sequence. It
+separates "our menu" from "the menu", and it is a download rather than a build. Until it is run,
+nothing here should be changed on suspicion.
+
 ## Status
 
 - [x] Baseline: unmodified nds-bootstrap builds
