@@ -2932,6 +2932,38 @@ It also removes work that would otherwise be speculative. The DSi WRAM the separ
 binary needs is guaranteed present on a 3DS with SCFG unlocked, so no fallback has to
 be designed for the case where it is not.
 
+### The test rig, stated once
+
+**Every hardware run in this document was made with TWiLight Menu at its defaults**, on a
+3DS, from the SD card. No colour LUT, no `PHAT_COLORS`, no per-game overrides. Stated
+here because it is a standing fact about every reading in this file, not a detail of any
+one of them, and because it is load-bearing more often than it looks.
+
+Worked example, from the report of an unlock that RA accepted and the in-game menu still
+listed as pending. The menu reads the tally out of `cardenginei_arm9_ra`'s DSi WRAM
+window, so the first question was whether it had been shown a stale block — one the
+bootloader never refreshed because the binary was not staged that boot. Everything that
+decides that is console-level or global, never per-game:
+
+| Gate | Where | Depends on |
+| --- | --- | --- |
+| `dsiFeatures() && !b4dsMode` | `conf_sd.cpp:1338` | the console |
+| `!colorTable` | `conf_sd.cpp:1840` | the LUT selection and `PHAT_COLORS`, both global |
+| `consoleModel > 0` | `conf_sd.cpp:1840` | the console |
+| `dsiWramAccess && !dsiWramMirrored` | `main.arm7.c:2362` | measured by writing `0x03700000` |
+| the staged image magic | `main.arm7.c:2363` | `cardenginei_arm9_ra.bin`, the same file every boot |
+
+The per-game colour-LUT blacklists only ever turn `colorTable` **off**, so no game can
+switch the filter on for itself. A notification had been seen on this console and this
+card, which requires all five to have been true — and since none of them can differ
+between two games on one boot-to-boot pair, they were equally true for the game that
+misbehaved. The block was fresh. The queue file really did still hold the record, and a
+whole branch of the investigation closed without a hardware run.
+
+That deduction is only available because the rig is fixed. On a card where a player had
+set a colour filter, the same symptom would have had a second, entirely different cause,
+and the log would have been the only way to tell them apart.
+
 ### How it is enforced
 
 `consoleModel` is not detected — it comes from `CONSOLE_MODEL` in the configuration
