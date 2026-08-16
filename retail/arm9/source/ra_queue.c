@@ -191,6 +191,37 @@ static int takeField(const char* text, int at, int length, char* out, int max) {
 }
 
 /*
+    Step over the NUL padding *inside* a fixed-width field, so the next delimiter can be found.
+
+    This exists because of a bug that reached a real account, and the shape of it is worth keeping.
+    raUnlockAppend() writes `gameCode` and `gameTitle` as fixed 4 and 12 bytes straight out of the ROM
+    header -- deliberately, because trimming them costs bytes the ARM7 does not have. A header pads
+    with NULs as often as with spaces, and `CONTRA 4` is eight characters in a twelve-byte field. So
+    the record on the card is
+
+        302329<tab>20260815183300<tab>YCTE<tab>CONTRA 4\0\0\0\0<tab>1<newline>
+
+    takeField() stops at the first NUL, which is four bytes short of the tab. That was harmless for as
+    long as the title was the *last* field: nothing followed, so stopping early lost nothing. The
+    moment a field was appended after it, the parser looked for a tab, found a NUL, gave up -- and
+    left the mode digit in front of the outer loop, which read `1` as an achievement id and submitted
+    it. The server accepted it: `AchievementID:1`, from a game the player has never run.
+
+    Only NULs are skipped, and that bound is what makes it safe. Stopping at anything else means a
+    record with no mode field lands on its newline, and a record whose padding runs to the end of the
+    record lands on the next record's first digit -- which the outer loop then reads as an id, exactly
+    as it should. Skipping *any* non-printable, or scanning ahead for a tab, would swallow the record
+    after this one. That is the same failure the stamp's own comment describes, and it is the reason
+    this is a skip rather than a search.
+*/
+static int skipPadding(const char* text, int at, int length) {
+	while (at < length && text[at] == 0) {
+		at++;
+	}
+	return at;
+}
+
+/*
     Read the file.
 
     Deliberately the most forgiving parser in this project. Every non-digit is a separator, NUL
@@ -312,18 +343,28 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 			    player never earned. So these run to their delimiter whatever they contain, which is
 			    also why the delimiter is a character no field can hold.
 			*/
+			/*
+			    Each field is followed by skipPadding(), because the writer's fields are fixed width
+			    and its padding is NUL. Without it the search for the next tab starts on the padding
+			    and fails, and every field after this one is lost -- silently, since a lost field
+			    reads exactly like a record that never had one.
+			*/
+			i = skipPadding(text, i, length);
 			if (i < length && text[i] == '\t') {
 				i++;
 				i = takeField(text, i, length, code, RA_QUEUE_CODE);
+				i = skipPadding(text, i, length);
 				if (i < length && text[i] == '\t') {
 					i++;
 					i = takeField(text, i, length, title, RA_QUEUE_TITLE);
+					i = skipPadding(text, i, length);
 
 					/*
 					    And the mode, which is one character and must be consumed for the same reason
 					    the title must: left behind, the outer loop reads `1` as an achievement id
-					    and submits an unlock the player never earned. The field this project already
-					    learned that lesson on was a title ending in a digit.
+					    and submits an unlock the player never earned. That is not a hypothetical --
+					    it happened, to a real account, on the first hardware run of this field, and
+					    the padding above is why.
 
 					    Anything that is not `1` is softcore, including a missing field, a truncated
 					    record and a character a hand edit put there. Only `1` is a claim, and a
@@ -337,6 +378,33 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 						}
 					}
 				}
+			}
+
+			/*
+			    And then to the end of the line, whatever is left.
+
+			    **A record that carried a stamp is a machine-written record, and nothing else on its
+			    line is an achievement id.** That follows from the format rather than from a guess: a
+			    tab after the id is the thing no hand-typed list could contain, and it is already what
+			    licenses reading the next fourteen digits as a date instead of an unlock.
+
+			    This is the guard that would have made the padding bug harmless rather than expensive.
+			    A field the parser fails to reach -- because a writer padded it, or because a later
+			    version added one this build does not know about -- is discarded here instead of being
+			    handed to the outer loop as a number. Measured, not asserted: with skipPadding()
+			    disabled, the suite's hardware-shaped records still parse as the right *count* with
+			    nothing fabricated, and lose only the mode value they could not reach.
+
+			    The forgiving behaviour is kept exactly where it is wanted. A line with no tab is still
+			    a list of bare ids, which is what makes the file hand-writable and what let the sending
+			    half be tested before the writing half existed.
+
+			    Two gates for one failure, and this is the one worth having: consuming each field
+			    correctly is a rule every future field has to re-earn, while stopping at the newline is
+			    a rule that already holds for fields nobody has written yet.
+			*/
+			while (i < length && text[i] != '\n') {
+				i++;
 			}
 		}
 

@@ -7015,6 +7015,77 @@ would get its RAM editor back with nothing failing to compile.
 Nothing on the ARM7: the cheat total was already computed there for the engine's own sake, and the
 extra work is a compare and a byte store. `cardenginei_arm7_twlsdk` stays at 60 bytes of margin.
 
+### First hardware run: it submitted an achievement that does not exist, and the padding is why
+
+The first boot with `hardcore=1`, `sync=1`, `submit=1` on *Contra 4* sent two unlocks. One of them
+was id **1**.
+
+```
+queue            2 to send
+  302329  earned 355 s ago
+  302329  awarded
+  1  awarded
+award reply:
+  {"Success":true,"AchievementID":1,"AchievementsRemaining":34,"Score":1154,"SoftcoreScore":460}
+```
+
+`AchievementsRemaining: 34` against 44 for the real one — id 1 belongs to a different game entirely,
+and the account now holds it.
+
+**It was the mode field's digit, read as the next record's id.** The exact failure the field's own
+comment warned about, from the exact cause that comment did not think of.
+
+`raUnlockAppend()` writes `gameTitle` as a **fixed twelve bytes** straight out of the ROM header,
+deliberately: trimming it costs bytes the ARM7 does not have, and the comment there says so, in the
+words "this side writes bytes, the side with a host test interprets them". *Contra 4*'s header pads
+`CONTRA 4` with four NULs. `takeField()` stops at the first byte outside printable ASCII, so it
+stopped on the padding — four bytes short of the tab that introduces the mode. The parser looked for
+a tab, found a NUL, gave up, and left `1` in front of the outer loop.
+
+That had been harmless for as long as the title was the **last** field. Nothing followed it, so
+stopping early lost nothing. Appending one field turned a latent flaw into a submitted unlock.
+
+#### The test existed and did not catch it, which is the part worth keeping
+
+There was a test for exactly this — "two records must parse as two, not four" — and it passed. It was
+written against `raQueuePack()`'s output, which trims its fields. **Two writers, one reader, and every
+test in the file exercised the writer that agreed with it.** The cardengine's own record shape had
+never been fed to the parser on a host.
+
+The suite now builds the record byte for byte as the ARM7 does, NUL padding included. Neutered, the
+fix fails it six times.
+
+#### Fixed twice, and the second one is the one to keep
+
+`skipPadding()` steps over the NUL padding inside a fixed-width field so the next delimiter can be
+found. Only NULs, which is what makes it safe: a record with no mode field lands on its newline, and
+one whose padding runs to the end of the record lands on the next record's first digit — which the
+outer loop then reads as an id, exactly as it should. Skipping any non-printable, or scanning ahead
+for a tab, would swallow the record after this one.
+
+The second gate is structural: **a record that carried a stamp is machine-written, and nothing else
+on its line is an id**, so the parser now runs to the newline whatever is left over. A tab after the
+id is the thing no hand-typed list can contain, which is already what licenses reading the next
+fourteen digits as a date. Bare ids on a line with no tab keep the forgiving behaviour that makes the
+file hand-writable.
+
+Measured rather than asserted: with `skipPadding()` disabled and only the newline guard in place, the
+hardware-shaped records parse as the right *count* with nothing fabricated, and lose only the mode
+they could not reach. Six failures become three, and none of the three is an invented unlock.
+
+That is the gate worth having. Consuming each field correctly is a rule every future field has to
+re-earn; stopping at the newline already holds for fields nobody has written yet.
+
+#### What the run cost, and what it did not answer
+
+The account holds achievement id 1, awarded softcore — `SoftcoreScore` went 455 to 460 while `Score`
+stayed at 1154. Removing it is a request to RetroAchievements; nothing in this tree can.
+
+And **the run did not test hardcore at all.** Because the mode was never parsed, both awards went out
+with `h=0`. There is no `N of them earned in hardcore, per the record` line in that log, which is the
+tell. What the server does with `h=1` from an unrecognised client is still exactly as unknown as it
+was before the boot.
+
 ### What turning it on today actually risks, which took two corrections to get right
 
 Setting `hardcore=1` before the User-Agent is recognised has a cost. Naming it correctly took two

@@ -1320,6 +1320,78 @@ static void test_queue(void) {
 		CHECK(q.dropped == 0);
 		CHECK(q.count == 2);
 
+		/*
+		    **The record as the ARM7 actually writes it**, which is not the shape every test above
+		    uses, and that difference cost a real account an achievement it never earned.
+
+		    raUnlockAppend() copies gameCode and gameTitle as fixed 4 and 12 bytes straight out of the
+		    ROM header, padding included, because trimming them costs bytes the ARM7 does not have.
+		    Contra 4's header pads its eight-character title with NULs. takeField() stops at the first
+		    NUL, four bytes short of the tab, so the mode field was never found and its `1` was read by
+		    the outer loop as an achievement id -- and submitted, and accepted.
+
+		    Every other test here was written against raQueuePack()'s output, which trims. Two writers,
+		    one reader, and the tests only ever exercised the writer that agreed with them.
+		*/
+		{
+			static const char arm7[RA_QUEUE_RECORD] = {
+				'3','0','2','3','2','9','\t',
+				'2','0','2','6','0','8','1','5','1','8','3','3','0','0','\t',
+				'Y','C','T','E','\t',
+				'C','O','N','T','R','A',' ','4',0,0,0,0,'\t',
+				'1','\n'
+			};
+
+			raQueueScan(&q, arm7, RA_QUEUE_RECORD);
+			CHECK(q.count == 1);
+			CHECK(q.ids[0] == 302329);
+			CHECK(q.hardcore[0] == 1 && q.hard == 1);
+			CHECK(strcmp(q.titles[0], "CONTRA 4") == 0);
+			CHECK(strcmp(q.codes[0], "YCTE") == 0);
+			/* The one that failed on hardware: the mode digit must not become a second id. */
+			CHECK(q.dropped == 0);
+		}
+
+		/* The same record from a build with no mode field, which must still read as one unlock. */
+		{
+			static const char arm7old[RA_QUEUE_RECORD] = {
+				'3','0','2','3','2','9','\t',
+				'2','0','2','6','0','8','1','5','1','8','3','3','0','0','\t',
+				'Y','C','T','E','\t',
+				'C','O','N','T','R','A',' ','4',0,0,0,0,'\n'
+			};
+
+			raQueueScan(&q, arm7old, RA_QUEUE_RECORD);
+			CHECK(q.count == 1 && q.ids[0] == 302329 && q.hardcore[0] == 0);
+			CHECK(strcmp(q.titles[0], "CONTRA 4") == 0);
+		}
+
+		/*
+		    And two of them back to back, at record boundaries, with padding to the record length --
+		    the file as it exists on a card. Skipping padding must not run into the record after it.
+		*/
+		{
+			static char two[RA_QUEUE_RECORD * 2];
+			static const char a[] = "302329\t20260815183300\tYCTE\tCONTRA 4";
+			static const char b[] = "302330\t20260815183301\tYCTE\tCONTRA 4";
+
+			memset(two, 0, sizeof(two));
+			memcpy(two, a, sizeof(a) - 1);
+			two[sizeof(a) - 1 + 4] = '\t';       /* past the title's four NUL pad bytes */
+			two[sizeof(a) - 1 + 5] = '1';
+			two[sizeof(a) - 1 + 6] = '\n';
+			memcpy(two + RA_QUEUE_RECORD, b, sizeof(b) - 1);
+			two[RA_QUEUE_RECORD + sizeof(b) - 1 + 4] = '\t';
+			two[RA_QUEUE_RECORD + sizeof(b) - 1 + 5] = '0';
+			two[RA_QUEUE_RECORD + sizeof(b) - 1 + 6] = '\n';
+
+			raQueueScan(&q, two, sizeof(two));
+			CHECK(q.count == 2);
+			CHECK(q.ids[0] == 302329 && q.hardcore[0] == 1);
+			CHECK(q.ids[1] == 302330 && q.hardcore[1] == 0);
+			CHECK(q.hard == 1 && q.dropped == 0);
+		}
+
 		/* Absent means softcore: a bare id, and a record from a build before the field existed. */
 		raQueueScan(&q, "93119\n93120\t20260815183300\tYCTE\tCONTRA 4\n", 41);
 		CHECK(q.count == 2);
