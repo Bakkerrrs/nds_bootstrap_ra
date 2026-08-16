@@ -189,6 +189,38 @@
                                                      + CARDENGINEI_ARM9_RA_DEFS_MAX \
                                                      - CARDENGINEI_ARM9_RA_PENDING_MAX)
 
+/*
+    The in-game viewer's index: one entry per achievement, pointing into the definitions block.
+
+    **The menu cannot parse that block, and the reason is that the block is mutated in place.**
+    ra_split_definitions() turns a record's newline into a NUL so rcheevos is handed C strings, and
+    turns the tab after the memaddr and the tab after the title into NULs for the same reason. By the
+    time a player can open the menu, the NUL that ends a record is indistinguishable from the two
+    that came from tabs -- and an earned `#!` record, which that function skips entirely, still has
+    its tabs. Two shapes in one buffer, and no rule that separates them without guessing.
+
+    Every scheme for recovering the boundaries from the bytes alone is a heuristic: "a record starts
+    with `#!`, or with digits-then-colon, or with something memaddr-shaped". This project has a
+    section about what heuristics cost.
+
+    So the offsets are recorded **while the block is still pristine**, by the same pass that is about
+    to mutate it, and the menu reads a table instead of a text. Nothing has to agree about
+    delimiters, and a future field costs the index a member rather than costing the menu a rule.
+
+    Placed below the pending tally, in the same reservation and for the same reason -- the
+    definitions reserve 32K, the heap already stops below them, and the largest real set measured
+    uses 9,662 of it. The launcher's cap comes down by both, so a set can never grow into either.
+
+    2K holds 128 entries of 12 bytes with room over. 128 is the ceiling rcheevos is given elsewhere
+    in this fork, and a set larger than that is one the block would refuse before the index did.
+*/
+#define CARDENGINEI_ARM9_RA_VIEWER_MAGIC             0x31564152   /* 'RAV1' */
+#define CARDENGINEI_ARM9_RA_VIEWER_MAX               0x800
+#define CARDENGINEI_ARM9_RA_VIEWER_LOCATION          (CARDENGINEI_ARM9_RA_DEFS_LOCATION \
+                                                      + CARDENGINEI_ARM9_RA_DEFS_MAX \
+                                                      - CARDENGINEI_ARM9_RA_PENDING_MAX \
+                                                      - CARDENGINEI_ARM9_RA_VIEWER_MAX)
+
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800
 #define COLOR_LUT_BUFFERED_LOCATION                  0x027D0000
 #define CARDENGINEI_ARM9_SDK5_BUFFERED_LOCATION      0x027E0000

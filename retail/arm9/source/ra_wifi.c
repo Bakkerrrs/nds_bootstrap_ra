@@ -1432,9 +1432,15 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	char           path[384];
 	char* const    block = (char*)(CARDENGINEI_ARM9_RA_DEFS_BUFFERED_LOCATION
 	                               + CARDENGINEI_ARM9_RA_DEFS_HEADER);
-	/* Minus the pending tally, which lives in the top of this same reservation. */
+	/*
+	    Minus the two things that live in the top of this same reservation: the pending tally the
+	    menu's Sync Pending page reads, and the viewer's index. Subtracted here rather than trusted
+	    to stay clear -- the block is written by a scanner that fills whatever it is given, so the
+	    only thing standing between a large set and those two structures is this number.
+	*/
 	const u32      blockMax = CARDENGINEI_ARM9_RA_DEFS_MAX
 	                          - CARDENGINEI_ARM9_RA_PENDING_MAX
+	                          - CARDENGINEI_ARM9_RA_VIEWER_MAX
 	                          - CARDENGINEI_ARM9_RA_DEFS_HEADER - 1;
 	raNetProgress  p;
 	int            got;

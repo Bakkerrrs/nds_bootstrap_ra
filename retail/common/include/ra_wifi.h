@@ -194,6 +194,43 @@
 #define RA_QUEUE_MAX           64                              /* a session earning more is not a thing */
 #define RA_QUEUE_BYTES         (RA_QUEUE_RECORD * RA_QUEUE_MAX)
 
+/*
+    The in-game viewer's index -- what the menu reads instead of parsing the definitions block.
+
+    One entry per achievement, in the order the set arrived, with byte offsets into the block rather
+    than pointers: the block sits at a different address in the launcher (where it is staged) and in
+    DSi WRAM (where it is read), so a pointer recorded on one side is meaningless on the other.
+    Offsets survive the copy the bootloader makes.
+
+    Built by cardenginei_arm9_ra while the block is still pristine -- see
+    CARDENGINEI_ARM9_RA_VIEWER_LOCATION for why the menu cannot do it later.
+
+    An offset of 0 means the field is absent, which is unambiguous because offset 0 of the block is
+    the first record's first byte and no field can start there. That is what a record degraded by a
+    full block looks like from here: description gone, then points, then title.
+*/
+#define RA_VIEWER_MAGIC        0x31564152u   /* 'RAV1', and CARDENGINEI_ARM9_RA_VIEWER_MAGIC */
+#define RA_VIEWER_MAX_ENTRIES  128
+
+/* This achievement is already held by the account, so it is shown rather than armed. */
+#define RA_VIEWER_EARNED       0x01
+
+typedef struct raViewerEntry {
+	u32 id;
+	u16 titleOff;
+	u16 pointsOff;
+	u16 descOff;
+	u8  flags;
+	u8  pad;
+} raViewerEntry;
+
+typedef struct raViewerBlock {
+	u32           magic;        /* RA_VIEWER_MAGIC, so an unwritten window is not read as a set */
+	u16           count;        /* entries below */
+	u16           earned;       /* how many of them carry RA_VIEWER_EARNED */
+	raViewerEntry entry[RA_VIEWER_MAX_ENTRIES];
+} raViewerBlock;
+
 #define RA_PENDING_MAGIC       0x31504152u   /* 'RAP1' */
 #define RA_PENDING_GAMES_MAX   8
 

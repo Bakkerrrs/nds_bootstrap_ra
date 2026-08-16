@@ -1633,6 +1633,21 @@ static void test_queue(void) {
 		CHECK(RA_PENDING_MAGIC == CARDENGINEI_ARM9_RA_PENDING_MAGIC);
 		/* And the block has to fit the reservation the heap was shortened to make room for. */
 		CHECK(sizeof(raPendingBlock) <= CARDENGINEI_ARM9_RA_PENDING_MAX);
+		/*
+		    Same pin for the viewer's index, and it earns it more: raViewerEntry is 12 bytes only
+		    because its three offsets are u16, and a field growing to u32 would push 128 entries past
+		    the reservation without a single line failing to compile. What it would overrun is the
+		    pending tally directly above it.
+		*/
+		CHECK(sizeof(raViewerBlock) <= CARDENGINEI_ARM9_RA_VIEWER_MAX);
+		CHECK(RA_VIEWER_MAGIC == CARDENGINEI_ARM9_RA_VIEWER_MAGIC);
+		/*
+		    And the three regions do not overlap: the block ends where the viewer's index begins, and
+		    that begins where the pending tally does not. Stated as arithmetic because the launcher's
+		    blockMax is the only thing keeping the scanner out of both.
+		*/
+		CHECK(CARDENGINEI_ARM9_RA_VIEWER_LOCATION + CARDENGINEI_ARM9_RA_VIEWER_MAX
+		      == CARDENGINEI_ARM9_RA_PENDING_LOCATION);
 	}
 
 	printf("\nand o= changes the signature as well as the URL\n");
