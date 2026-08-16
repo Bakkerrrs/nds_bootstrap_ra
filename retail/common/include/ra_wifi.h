@@ -621,11 +621,26 @@ typedef struct raNetStream {
 */
 #define RA_PATCH_TITLE_MAX 32
 
+/*
+    Bytes kept of an achievement's Description, terminator included -- so 64 characters.
+
+    Sized from the viewer rather than from what RA sends: the in-game menu is 32 columns, so 64
+    characters is two full lines under the title, which is as much as a page can give one entry
+    while still listing others. RA's own descriptions run from about 40 to 120 characters, so this
+    keeps most of them whole and clips the long ones.
+
+    It is the most expensive field in the record and the first one dropped when the block runs out.
+    See the degradation order below.
+*/
+#define RA_PATCH_DESC_MAX 65
+
 #define RA_PATCH_SCAN   0
 #define RA_PATCH_VALUE  1
 #define RA_PATCH_FLAGS  2
 #define RA_PATCH_ID     3
 #define RA_PATCH_TITLE  4
+#define RA_PATCH_DESC   5
+#define RA_PATCH_POINTS 6
 
 /*
     Each staged line is `<id>:<memaddr>`, and the id is the achievement's own number on
@@ -659,6 +674,34 @@ typedef struct raNetStream {
 
     Backward compatible in both directions. A block with no tabs parses as it always did, and a
     hand-written file needs no title.
+
+    **And then two more fields, for the in-game viewer**: the full record is now
+
+        <id>:<memaddr>\t<title>\t<points>\t<description>
+
+    The order is the whole design, and it is chosen so that **degrading the record is truncating
+    it**. Every prefix that ends at a tab boundary is itself a valid record:
+
+    | written | means |
+    | --- | --- |
+    | `<id>:<memaddr>\t<title>\t<points>\t<desc>` | everything fitted |
+    | `<id>:<memaddr>\t<title>\t<points>` | the description did not fit |
+    | `<id>:<memaddr>\t<title>` | **exactly the format before this change** |
+    | `<id>:<memaddr>` | no label at all, the oldest format |
+
+    So the block filling up walks that table upwards, one field at a time, and a reader never has
+    to handle a hole in the middle -- which is what putting the description anywhere but last would
+    have created. A definition with no description and a points value would have needed an empty
+    field, and an empty positional field is the thing this format has already been bitten by: see
+    the note on titles ending in digits in raQueueScan().
+
+    It also means **every file written by an older build still parses**, including a cached set on a
+    card, because "title only" is a state the new format has a name for rather than a shape it has
+    to tolerate.
+
+    Points before description although points is read less often, because points is one to four
+    bytes and the description is up to sixty-four. Dropping the expensive field first is the whole
+    point of the order, and dropping the cheap one would buy almost nothing.
 */
 
 typedef struct raPatch {
@@ -687,6 +730,30 @@ typedef struct raPatch {
 	u16   withTitle;      /* definitions written with one */
 	u16   titleCut;       /* ...and titles clipped to RA_PATCH_TITLE_MAX on the way in */
 	u16   titleNoRoom;    /* ...and labels dropped so the achievement itself could be kept */
+	/*
+	    The Description and the Points, captured the same way and on the same terms as the title.
+
+	    Both arrive before the MemAddr in each object -- `{"ID":1,"Title":"...","Description":"...",
+	    "Points":5,"MemAddr":"..."` -- so neither needs the deferral the flags need, and both are
+	    cleared when a definition commits so one achievement never inherits another's.
+
+	    Points is a *number* rather than a string, which is the one place these two differ from the
+	    title: it has no closing quote to stop at, so it is read to the first character that is not a
+	    digit. `pointsSeen` rather than a zero test, because 0 is a real points value -- the server's
+	    own "Unsupported Game Version" notice carries `"Points":0` -- and "zero points" and "no
+	    Points field" have to stay different facts.
+	*/
+	u8    descLength;
+	u8    descFull;       /* the buffer filled, so descCut is counted only once */
+	char  desc[RA_PATCH_DESC_MAX];
+	u16   withDesc;       /* definitions written with one */
+	u16   descCut;        /* ...and descriptions clipped to RA_PATCH_DESC_MAX on the way in */
+	u16   descNoRoom;     /* ...and descriptions dropped so the achievement itself could be kept */
+	u32   points;
+	u8    pointsSeen;     /* a Points field arrived, which 0 cannot say on its own */
+	u8    pointsBad;      /* ...and it will not fit a u32, so it is treated as absent */
+	u16   withPoints;     /* definitions written with one */
+	u16   pointsNoRoom;   /* ...and points dropped so the achievement itself could be kept */
 	u16   withId;         /* definitions written with a RetroAchievements id */
 	u16   withoutId;      /* ...and without one, which is a set we cannot report on */
 	/*
@@ -725,6 +792,8 @@ typedef struct raPatch {
 	u8    flagsAt;
 	u8    idAt;
 	u8    titleAt;
+	u8    descAt;
+	u8    pointsAt;
 	u8    idBad;          /* the id being read will not fit a u32; treat the line as id-less */
 	u8    oddCapture;     /* copying the reply into oddContext right now */
 	u8    escape;

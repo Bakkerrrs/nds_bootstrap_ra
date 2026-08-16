@@ -73,6 +73,23 @@ static const char raPatchSayId[]      = "\"ID\":";
     which raPatchAdvance's retest already covers -- so the same matcher handles it unchanged.
 */
 static const char raPatchSayTitle[]   = "\"Title\":\"";
+/*
+    ...and its Description and Points, for the in-game viewer rather than for the notification.
+
+    Both sit between the id and the MemAddr in each object, exactly where the Title does, so both
+    are read the same way and need no deferral.
+
+    The same border argument holds for both needles, which is what makes raPatchAdvance's
+    restart-and-retest exact rather than nearly exact. `"Description":"` repeats only `"` (at 0, 12
+    and 14) and `i` (at 6 and 9), and neither gives a proper prefix of length two or more that is
+    also a suffix of a longer one -- the character after each later `"` is `:` and then end, never
+    `D`. `"Points":` repeats only `"`, at 0 and 7, and is followed by `:`.
+
+    Points is the odd one out in this file: it is a JSON *number*, so unlike every other needle here
+    it does not end at a closing quote. It is read to the first byte that is not a digit.
+*/
+static const char raPatchSayDesc[]    = "\"Description\":\"";
+static const char raPatchSayPoints[]  = "\"Points\":";
 
 /* RA's own two values for the field. 3 is published; 5 is unofficial and not scored. */
 #define RA_PATCH_FLAGS_CORE       3
@@ -147,6 +164,8 @@ static void raPatchCommit(raPatch* p) {
 	u32 length;
 	u32 idLength = 0;
 	u32 titleLength = 0;
+	u32 pointsLength = 0;
+	u32 descLength = 0;
 
 	if (!p->pendingOpen) {
 		return;
@@ -256,7 +275,20 @@ static void raPatchCommit(raPatch* p) {
 			titleLength = (u32)p->titleLength + 1;   /* the tab and the text */
 		}
 
-		p->wanted += idLength + length + titleLength + 1;   /* id, memaddr, title, and the newline */
+		/*
+		    Points and description cost a tab each plus their own bytes, and neither can be written
+		    without the field before it: the record is positional and every valid form is a prefix
+		    ending at a tab boundary. See raPatch in ra_wifi.h for the table.
+		*/
+		if (titleLength && p->pointsSeen && !p->pointsBad) {
+			pointsLength = raPatchIdDigits(p->points) + 1;
+		}
+		if (pointsLength && p->descLength) {
+			descLength = (u32)p->descLength + 1;
+		}
+
+		/* id, memaddr, title, points, description, and the newline */
+		p->wanted += idLength + length + titleLength + pointsLength + descLength + 1;
 
 		/*
 		    If the label is what does not fit, drop the label and keep the achievement.
@@ -266,12 +298,39 @@ static void raPatchCommit(raPatch* p) {
 		    would be `dropped` today for the sake of thirty bytes of text. An achievement with no
 		    label still unlocks, still reports to the server, and still shows a notification -- just a
 		    nameless one. That trade only goes one way.
+
+		    Three fields deep now, and it degrades in one direction: **description, then points, then
+		    title**, which is the record read right to left. That order is not a preference either.
+		    The description is up to 64 bytes and points is at most 5, so dropping the cheap field
+		    first would buy almost nothing and cost the same achievement its label a moment later.
+		    And the record is positional, so a field can only be dropped if everything after it is
+		    dropped too -- which is exactly why the expensive one was put last.
+
+		    Written as a loop over the three lengths rather than as three nested tests, because the
+		    question at each step is the same one and stating it three times is how the second and
+		    third get subtly different bounds.
 		*/
-		if (p->block && titleLength
-		 && p->used + idLength + length + titleLength + 1 > p->blockMax
-		 && p->used + idLength + length + 1 <= p->blockMax) {
-			titleLength = 0;
-			p->titleNoRoom++;
+		/*
+		    Only when trimming can actually save the achievement. Without the outer test a definition
+		    that was going to be dropped anyway would still have its label counted as "dropped for
+		    room", which is a different fact and the one the counter exists to report -- the old
+		    single-field guard was precise about this and the loop has to stay precise too.
+		*/
+		if (p->block && p->used + idLength + length + 1 <= p->blockMax) {
+			u32* const trim[3] = { &descLength, &pointsLength, &titleLength };
+			u16* const count[3] = { &p->descNoRoom, &p->pointsNoRoom, &p->titleNoRoom };
+			int        i;
+
+			for (i = 0; i < 3; i++) {
+				if (p->used + idLength + length
+				    + titleLength + pointsLength + descLength + 1 <= p->blockMax) {
+					break;
+				}
+				if (*trim[i]) {
+					*trim[i] = 0;
+					(*count[i])++;
+				}
+			}
 		}
 
 		/*
@@ -282,7 +341,8 @@ static void raPatchCommit(raPatch* p) {
 			p->shortest = length;
 		}
 
-		if (p->block && p->used + idLength + length + titleLength + 1 <= p->blockMax) {
+		if (p->block && p->used + idLength + length
+		    + titleLength + pointsLength + descLength + 1 <= p->blockMax) {
 			if (idLength) {
 				p->used += raPatchWriteId(p->block + p->used, p->pendingId);
 				p->block[p->used++] = ':';
@@ -299,6 +359,17 @@ static void raPatchCommit(raPatch* p) {
 				memcpy(p->block + p->used, p->title, p->titleLength);
 				p->used += p->titleLength;
 				p->withTitle++;
+			}
+			if (pointsLength) {
+				p->block[p->used++] = '\t';
+				p->used += raPatchWriteId(p->block + p->used, p->points);
+				p->withPoints++;
+			}
+			if (descLength) {
+				p->block[p->used++] = '\t';
+				memcpy(p->block + p->used, p->desc, p->descLength);
+				p->used += p->descLength;
+				p->withDesc++;
 			}
 			p->block[p->used++] = '\n';
 			p->block[p->used]   = 0;
@@ -326,6 +397,13 @@ static void raPatchCommit(raPatch* p) {
 	*/
 	p->titleLength   = 0;
 	p->title[0]      = 0;
+	/* Same rule, same reason: one achievement must never inherit another's. */
+	p->descLength    = 0;
+	p->desc[0]       = 0;
+	p->descFull      = 0;
+	p->points        = 0;
+	p->pointsSeen    = 0;
+	p->pointsBad     = 0;
 }
 
 /*
@@ -335,6 +413,23 @@ static void raPatchCommit(raPatch* p) {
     refused. The asymmetry is the point: a clipped memaddr is a *different achievement* and must never
     be kept, while a clipped title is the same achievement with a shorter label.
 */
+/*
+    One decoded byte of the description being read.
+
+    A copy of raPatchTitleByte() rather than a shared helper taking a buffer, a length, a limit and
+    two counters: the parameter list would be longer than the body, and this file runs in a launcher
+    whose every byte of heap is already accounted for.
+*/
+static void raPatchDescByte(raPatch* p, char c) {
+	if (p->descLength < RA_PATCH_DESC_MAX - 1) {
+		p->desc[p->descLength++] = c;
+		p->desc[p->descLength]   = 0;
+	} else if (!p->descFull) {
+		p->descFull = 1;
+		p->descCut++;
+	}
+}
+
 static void raPatchTitleByte(raPatch* p, char c) {
 	if (p->titleLength < RA_PATCH_TITLE_MAX - 1) {
 		p->title[p->titleLength++] = c;
@@ -459,6 +554,72 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			continue;
 		}
 
+		if (p->state == RA_PATCH_DESC) {
+			/* Byte for byte the title's rules; see the note there for why escapes stay escaped. */
+			if (p->escape) {
+				p->escape = 0;
+				if (c == '/' || c == '\\' || c == '"') {
+					raPatchDescByte(p, c);
+				} else {
+					raPatchDescByte(p, '\\');
+					raPatchDescByte(p, c);
+				}
+				continue;
+			}
+			if (c == '\\') {
+				p->escape = 1;
+				continue;
+			}
+			if (c == '"') {
+				p->state    = RA_PATCH_SCAN;
+				p->inString = 0;
+				p->memAt    = 0;
+				p->flagsAt  = 0;
+				p->idAt     = 0;
+				p->titleAt  = 0;
+				p->descAt   = 0;
+				p->pointsAt = 0;
+				continue;
+			}
+			raPatchDescByte(p, c);
+			continue;
+		}
+
+		if (p->state == RA_PATCH_POINTS) {
+			if (c >= '0' && c <= '9') {
+				const u32 digit = (u32)(c - '0');
+
+				/*
+				    Refused on overflow rather than clamped, the same correction the id needed. A
+				    points value that will not fit a u32 is not a points value, and a clamped one
+				    would be a number this fork invented.
+				*/
+				if (p->points > 0xFFFFFFFFu / 10u
+				 || (p->points == 0xFFFFFFFFu / 10u && digit > 0xFFFFFFFFu % 10u)) {
+					p->pointsBad = 1;
+				}
+				if (!p->pointsBad) {
+					p->points = p->points * 10u + digit;
+				}
+				p->pointsSeen = 1;
+				continue;
+			}
+			/*
+			    Anything that is not a digit ends the number -- and the byte is *reprocessed* rather
+			    than swallowed, because unlike every other field here this one has no closing quote.
+			    The character that ends it is a comma or a brace, which is a byte the scanner has to
+			    see: a swallowed `{` is a pending id that never gets cleared.
+			*/
+			p->state    = RA_PATCH_SCAN;
+			p->memAt    = 0;
+			p->flagsAt  = 0;
+			p->idAt     = 0;
+			p->titleAt  = 0;
+			p->descAt   = 0;
+			p->pointsAt = 0;
+			/* fall through to the scan state with this same byte */
+		}
+
 		if (p->state == RA_PATCH_ID) {
 			if (c >= '0' && c <= '9') {
 				const u32 digit = (u32)(c - '0');
@@ -562,10 +723,12 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->pendingId = 0;
 		}
 
-		p->memAt   = raPatchAdvance(raPatchSayMemAddr, p->memAt, c);
-		p->flagsAt = raPatchAdvance(raPatchSayFlags, p->flagsAt, c);
-		p->idAt    = raPatchAdvance(raPatchSayId, p->idAt, c);
-		p->titleAt = raPatchAdvance(raPatchSayTitle, p->titleAt, c);
+		p->memAt    = raPatchAdvance(raPatchSayMemAddr, p->memAt, c);
+		p->flagsAt  = raPatchAdvance(raPatchSayFlags, p->flagsAt, c);
+		p->idAt     = raPatchAdvance(raPatchSayId, p->idAt, c);
+		p->titleAt  = raPatchAdvance(raPatchSayTitle, p->titleAt, c);
+		p->descAt   = raPatchAdvance(raPatchSayDesc, p->descAt, c);
+		p->pointsAt = raPatchAdvance(raPatchSayPoints, p->pointsAt, c);
 
 		if (raPatchSayMemAddr[p->memAt] == 0) {
 			/*
@@ -581,6 +744,8 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->flagsAt     = 0;
 			p->idAt        = 0;
 			p->titleAt     = 0;
+			p->descAt      = 0;
+			p->pointsAt    = 0;
 			continue;
 		}
 		if (raPatchSayFlags[p->flagsAt] == 0) {
@@ -591,6 +756,8 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->flagsAt   = 0;
 			p->idAt      = 0;
 			p->titleAt   = 0;
+			p->descAt    = 0;
+			p->pointsAt  = 0;
 			continue;
 		}
 		if (raPatchSayId[p->idAt] == 0) {
@@ -611,6 +778,8 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->flagsAt   = 0;
 			p->idAt      = 0;
 			p->titleAt   = 0;
+			p->descAt    = 0;
+			p->pointsAt  = 0;
 		}
 		if (raPatchSayTitle[p->titleAt] == 0) {
 			/*
@@ -628,6 +797,36 @@ void raPatchFeed(void* ctx, const char* data, int length) {
 			p->flagsAt     = 0;
 			p->idAt        = 0;
 			p->titleAt     = 0;
+			p->descAt      = 0;
+			p->pointsAt    = 0;
+			continue;
+		}
+		if (raPatchSayDesc[p->descAt] == 0) {
+			/* The title's rules exactly; see the note on that branch. */
+			p->state      = RA_PATCH_DESC;
+			p->descLength = 0;
+			p->desc[0]    = 0;
+			p->descFull   = 0;
+			p->escape     = 0;
+			p->memAt      = 0;
+			p->flagsAt    = 0;
+			p->idAt       = 0;
+			p->titleAt    = 0;
+			p->descAt     = 0;
+			p->pointsAt   = 0;
+			continue;
+		}
+		if (raPatchSayPoints[p->pointsAt] == 0) {
+			p->state      = RA_PATCH_POINTS;
+			p->points     = 0;
+			p->pointsSeen = 0;
+			p->pointsBad  = 0;
+			p->memAt      = 0;
+			p->flagsAt    = 0;
+			p->idAt       = 0;
+			p->titleAt    = 0;
+			p->descAt     = 0;
+			p->pointsAt   = 0;
 			continue;
 		}
 	}

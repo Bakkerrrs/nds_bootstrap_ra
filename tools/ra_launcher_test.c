@@ -624,7 +624,12 @@ static const char patchReply[] =
 */
 #define PATCH_TITLE_1 "First Star"
 #define PATCH_TITLE_3 "They wrote \"MemAddr\":\" in the title"
-#define PATCH_HEAD    "1:0xH0a1b2c=1_d0xH0a1b2c=0\t" PATCH_TITLE_1 \
+/*
+    Achievement 1 carries a Description and Points and so gets the full four-field record;
+    achievement 3 carries neither, so it stops after its title -- which is the same shape every
+    build before the two fields wrote, and the reason the format degrades by truncation.
+*/
+#define PATCH_HEAD    "1:0xH0a1b2c=1_d0xH0a1b2c=0\t" PATCH_TITLE_1 "\t5\tGet it" \
                       "\n3:0xH000010>d0xH000010\t"
 
 static char patchExpect[512];
