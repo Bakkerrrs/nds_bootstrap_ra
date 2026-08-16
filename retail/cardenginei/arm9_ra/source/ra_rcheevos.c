@@ -639,6 +639,27 @@ static u8 ra_split_definitions(char* text, u32 length, char** lines, const char*
 			if (*tab == '\t') {
 				*tab = 0;
 				titles[count] = tab + 1;
+				/*
+					And the title stops at the *next* tab, because the record does not end there any
+					more: it is `<memaddr>\t<title>\t<points>\t<description>` now, and a title that
+					ran to the end of the line would put `Stage 1 clear\t5\tFinish stage one` on the
+					notification. Cutting here rather than in the launcher keeps the block one text
+					the viewer can also read -- see the record format at raPatch in ra_wifi.h.
+
+					Only the first of them is cut. Everything after it belongs to fields this binary
+					has no use for, and leaving them intact is what lets the in-game menu read the
+					same bytes.
+				*/
+				{
+					char* end = titles[count];
+
+					while (*end && *end != '\t') {
+						end++;
+					}
+					if (*end == '\t') {
+						*end = 0;
+					}
+				}
 			} else {
 				titles[count] = 0;
 			}
