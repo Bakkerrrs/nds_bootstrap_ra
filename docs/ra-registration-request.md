@@ -36,6 +36,12 @@ client that is not an emulator, which is itself the first question.
 > `Warning: Unknown Emulator` notice and blocks hardcore. Softcore has been working end to end for
 > some time — logins, unlocks the server records, and sets fetched and evaluated on the console.
 >
+> For completeness, since I tested it rather than assuming: sending `h=1` from this client returns
+> `Success:true` and files the unlock as **softcore**. The hardcore score is unchanged, the softcore
+> score moves, `r=unlocks` returns it in the softcore list and `HardcoreUnlocks` stays empty. I am
+> not reporting that as a bug — it is a reasonable way to enforce the notice — only saying that I
+> know what the current behaviour is and am not going to keep poking at it while I wait.
+>
 > I would like to ask three things.
 >
 > **1. What is the process for registering a client that is not an emulator?**

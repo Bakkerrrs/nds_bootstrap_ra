@@ -6716,6 +6716,89 @@ of the parser by the padding bug. The recurring one, on games the server does no
 Two sources, one wrong id, and the log alone could not have told them apart. The missing timestamp
 could.
 
+## The answer: the server takes `h=1` and files it as softcore
+
+Two boots settle it, and they settle the parser fix at the same time.
+
+**Boot 1** — empty queue, `hardcore=1`, `sync=1`, `submit=1`, then *Contra 4* was played and two
+achievements were earned. **Boot 2** — the same ROM booted only to sync, nothing played.
+
+### First, the queue file, byte for byte
+
+```
+b'302349\t20260816140959\tYCTE\tCONTRA 4\x00\x00\x00\x00\t1\n\x00\x00\x00\x00\x00\x00'
+b'302329\t20260816140959\tYCTE\tCONTRA 4\x00\x00\x00\x00\t1\n\x00\x00\x00\x00\x00\x00'
+```
+
+There is the padding, in the bytes rather than in an argument: `CONTRA 4` in a twelve-byte field,
+four NULs, *then* the tab and the mode. Forty-two bytes of record and six of NUL to the next one. The
+old parser stopped on the first of those four NULs and left the `1` to be read as an id.
+
+And boot 2's stage 13:
+
+```
+queue            2 to send
+  302349  earned 197 s ago
+  302349  awarded
+  302329  earned 197 s ago
+  302329  awarded
+awarded 2, refused 0, still owed 0
+2 of them earned in hardcore, per the record
+```
+
+Two records, two ids, both stamped, both hardcore, **no phantom**. `skipPadding()` and the
+end-of-line guard are confirmed on hardware, on the exact byte pattern that broke them.
+
+### And then the answer
+
+`h=1` really was sent — that last log line is the proof, since it prints `q.hard`, which is what
+`raWifiSubmitOne()` puts in the URL and in the signature. The server said:
+
+```
+{"Success":true,"AchievementID":302349,...,"Score":1154,"SoftcoreScore":462}
+{"Success":true,"AchievementID":302329,...,"Score":1154,"SoftcoreScore":455}
+```
+
+**`Score` does not move. `SoftcoreScore` does.** And three other readings agree:
+
+- `r=startsession` in the same boot: `"HardcoreUnlocks":[]`.
+- `r=unlocks&h=0`, *after* the awards: `"UserUnlocks":[302329,302349,101000001]` — the softcore list
+  now holds both.
+- `"HardcoreMode":false` in that same reply.
+- The next fetch dropped from 45 definitions to **43**, with `#!302329` marked earned. They are out
+  of the set.
+
+So: **the server accepts `h=1` from an unrecognised client, answers `Success:true`, and records a
+softcore unlock.** Not a refusal. Not an error. The notice was telling the truth — "hardcore unlocks
+cannot be earned using this emulator" — and the way it enforces it is silent downgrade.
+
+That is the outcome this document guessed at as one of three, and named as the one with nothing in
+the reply to match on. There is nothing to match on. `Success:true` is what a hardcore award and a
+downgraded one both look like.
+
+### Which corrects the warning again, in the other direction
+
+The `ra.cfg` note called this "the bad case" and framed it as a cost of turning hardcore on. That
+framing was wrong, and the measurement is what shows it: **an unlock is filed softcore whether this
+client sends `h=0` or `h=1`.** Sending `h=1` buys nothing today. It also costs nothing extra.
+
+The property that "an achievement is spent the moment it lands" is not new and is not about
+hardcore. It is the standing behaviour of a softcore client, written down long before any of this,
+and it is the reason `submit=0` exists. A player who wants a set kept fresh for a hardcore run *when
+registration lands* should not be submitting at all — that is `submit=0`, and it always was.
+
+So `hardcore=1` today is neither dangerous nor useful against the server. What it is good for is the
+half that does work: the RAM viewer stays locked, the cheat engine takes it away and says so, and
+every queued record carries the mode it was earned in. All of that is exercised and confirmed by
+these two boots.
+
+### One number not to read too hard
+
+`SoftcoreScore` reads 462 on the first award and 455 on the second — backwards. 302329 is worth 3
+points, from its own definition line, and 455 + 7 = 462 fits 302349 being worth 7. The likeliest
+explanation is a stale read on the server's side between two requests seconds apart, and nothing in
+this client depends on the field. Recorded rather than chased.
+
 ## The RAM viewer closes for a hardcore session
 
 The hardcore gate used to refuse every session, and only one of its two reasons was about the
@@ -7277,17 +7360,27 @@ what the rules say about when it may be sent.
       opened the cheat screen once and turned everything off. It is now the same sum
       nds-bootstrap builds `cheatSizeTotal` from, against the same floor, and the bootloader
       clears the staged session's hardcore flag if it installs the engine after all.
-- [x] **A queued unlock carries the mode it was earned in.** `h=` and the signature come
+- [x] **The queue parser survives the record the cardengine actually writes** —
+      **confirmed on hardware**. `gameTitle` is a fixed twelve bytes with NUL padding, and
+      the parser used to stop on the padding, lose every field after it and hand the
+      leftovers to the outer loop as an achievement id. It submitted one. Two gates now:
+      step over the padding, and never read past a stamped record's newline.
+- [x] **A queued unlock carries the mode it was earned in** — **confirmed on hardware**:
+      two records earned in a hardcore session, both read back as hardcore, both submitted
+      as such. `h=` and the signature come
       from the record, not from `ra.cfg` at submission time, so earning in softcore with
       the RAM editor open and then setting `hardcore=1` no longer upgrades anything. The
       mode crosses to the ARM7 in the unlock request's own magic rather than in a slot of
       its own, and `raWifiSubmitOne()` lost its config parameter to the change. Cost: the
       TWL-SDK ARM7 is down to 60 bytes of link margin. **Built and host-tested; not yet
       confirmed on hardware.**
-- [ ] **Hardcore.** Blocked on nothing in this tree any more. The server injects a
-      *"Warning: Unknown Emulator"* notice for an unrecognised User-Agent and blocks
-      hardcore only, by its own wording. What it needs is `nds-bootstrap-ra/0.1`
-      recognised by RetroAchievements, which is a conversation rather than a commit.
+- [ ] **Hardcore.** Blocked on nothing in this tree any more, and now measured rather
+      than inferred: `h=1` from this client returns `Success:true` and is filed as a
+      **softcore** unlock — hardcore score unchanged, `HardcoreUnlocks` empty,
+      `r=unlocks&h=0` returning it. The *"Warning: Unknown Emulator"* notice is telling
+      the truth and enforces it by silent downgrade. What it needs is
+      `nds-bootstrap-ra/0.1` recognised by RetroAchievements, which is a conversation
+      rather than a commit.
 - [ ] Phase 4: rich presence, achievement list, login status
 
 ## What is left
