@@ -7376,14 +7376,17 @@ None of those hangs a CPU on its own, which is why none is being claimed.
 
 ### What this fork should do about it
 
-Nothing on suspicion, and nothing that pretends to fix somebody else's bug. Two things are honest:
+Nothing on suspicion, and nothing that pretends to fix somebody else's bug.
 
-- **Report it upstream** with the characterisation above. The valuable parts are that it is
-  rate-based rather than deterministic, that the rate tracks how hard the game uses the ROM cache,
-  and that the failure is in the resume rather than in the menu.
-- **Know that this fork raises the rate**, because it adds per-frame ARM9 work and takes DSi WRAM
-  that would otherwise cache the ROM. That is a cost of the feature, it is real, and a player who
-  uses the in-game menu heavily will meet it sooner here than on a stock build.
+**Deliberately not reported upstream yet.** Recorded here so that a later reader does not mistake
+that for having been forgotten: it is a decision, and it can be revisited whenever the
+characterisation above is worth somebody else's time. What would go in such a report is already
+written: that it is rate-based rather than deterministic, that the rate tracks how hard the game
+leans on the ROM cache, and that the failure is in the resume rather than in the menu.
+
+What is worth carrying regardless is that **this fork raises the rate**, because it adds per-frame
+ARM9 work and takes DSi WRAM that would otherwise cache the ROM. That is a real cost of the feature,
+and a player who uses the in-game menu heavily will meet it sooner here than on a stock build.
 
 ## Status
 
