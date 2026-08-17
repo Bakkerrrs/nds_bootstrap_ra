@@ -7294,55 +7294,96 @@ design is what needs revisiting and this field goes with it. It was built ahead 
 because it is correct under either one: a record must not be upgraded after the fact regardless of
 what the rules say about when it may be sent.
 
-## Open: the in-game menu freezes some games after it closes, and it is not this feature
+## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
-Reported on **Chrono Trigger** and **Super Mario 64 DS**. Open the in-game menu, choose Return to
-Game, the bottom screen comes back correctly, the game runs for a few seconds, and then stops
-permanently.
+Reported on **Chrono Trigger** and **Super Mario 64 DS**: open the in-game menu, navigate it, choose
+Return to Game, the bottom screen comes back to the game, and one to three seconds later the last
+sound stretches out and the picture stops for good.
 
-Written down before it is solved, because what has been *ruled out* took four hardware runs and is
-worth more than the hypotheses.
+**It is nds-bootstrap's, not this fork's.** An unmodified official release does it too. This fork
+raises the rate, which is why it looked like ours for a dozen flash cycles.
 
-### What it is not
+### What it is
+
+The ARM9 dies and the ARM7 lives — the stretched, endlessly repeating last sample is the ARM7 still
+running while nothing feeds it. No red exception screen, so it is a hang rather than a fault.
+
+The trigger is exclusively the menu. Playing for a quarter of an hour without opening it does
+nothing. The menu itself is fine: it opens, it can be navigated, it exits, and the game's picture
+comes back before anything goes wrong.
+
+`INGAME_MENU_LOCATION` is not free memory. `loadInGameMenu()` on the ARM7 writes 0xA000 bytes of
+what is there to the page file, reads the menu in over it, and `unloadInGameMenu()` reverses that on
+the way out. The two to three seconds of stretched audio are that SD traffic, during which the ARM9
+is spinning with `IME` at zero — that part is normal and the official release does it too. What is
+not normal is failing to recover afterwards.
+
+That region is inside what nds-bootstrap uses to cache the ROM, which fits the delay: the game
+resumes, runs on restored memory, and dies when it reaches whatever did not come back the same.
+
+### It is a rate, not a switch, and that is what cost the investigation
+
+Every game fails. **Chrono Trigger and SM64DS take two or three menu cycles; Contra 4 takes many
+more**, and when it goes it goes differently — the menu stays on screen and the game never returns.
+One failure, two presentations, and a per-cycle probability that varies by how hard the game leans
+on the ROM cache.
+
+A bisect was run over 225 commits and converged, confidently, on `67b28dd` — a commit whose only
+additions are `clampAddress()` and a range table that **cannot execute unless the RAM viewer is
+opened**, which it was not. Rebuilding the previous commit with 176 bytes of dead weight, matching
+that commit's size exactly, did not reproduce it.
+
+That contradiction was the tell and it was misread twice: first as a false negative somewhere in the
+bisect, then as layout sensitivity. Both were wrong in the same way. **A short negative on a
+probabilistic failure is not a negative.** Every "clean" verdict was six to eight menu cycles on a
+build whose real rate needed twenty, and the bisect was measuring a gradient — each commit that
+added per-frame ARM9 work nudged the probability up. `67b28dd` did not introduce anything; it was
+where the rate crossed what six cycles could see.
+
+The same mistake made "it is not upstream" look settled. The official release was tried early, with
+the few cycles that were enough for SM64DS on this fork, and passed. It fails at twenty.
+
+### What was ruled out, and none of it was wasted
 
 | Ruled out | How |
 | --- | --- |
-| This session's work | The build from before it (`065e944`) freezes identically |
+| This session's work | `065e944`, before any of it, fails identically |
 | The network, the fetch, the queue | Reproduces with `sync=0`, radio never up |
-| The achievements list | Reproduces having opened only the root menu, never the RA pages |
-| **RetroAchievements entirely** | Reproduces with a colour LUT on, which is what stops `cardenginei_arm9_ra` being staged — no reader, no rcheevos, no overlay, no VCOUNT hook |
-| `IgmText`'s hand-written mirror | `ra_release.sh` verifies it against the link, and both IGM variants share one `card_engine_header.s` and one `.space` |
-| `printDec` overrunning on a 3-digit count | It truncates rather than overrunning; a 3-digit set shows the low two digits and writes nothing extra |
+| The achievements pages | Reproduces having opened only the root menu |
+| `cardenginei_arm9_ra` | Reproduces with a colour LUT on, which stops it being staged |
+| The reader's VBlank hook | Reproduces with `raRearmVBlank()` returning immediately, so no RA code runs in-game at all |
+| `IgmText`, `IGM_ENTRY`, `IGM_PALS` | All three verified against the linked ELF; both IGM variants share one `.space` |
+| `menuItems[9]` | Nine entries maximum, and it holds nine |
+| `printDec` on a 3-digit count | Truncates rather than overrunning |
+| The IGM binary's size | +176 bytes of dead weight on a passing build changes nothing |
+| The IGM's `.bss` reaching its stack | 10.8 KB of margin either side of the culprit commit |
+| Symbol alignment | No symbol changes its 4-byte alignment across that commit |
+| The ARM9/ARM7 menu handshake | Bounding all four unbounded waits does not stop it |
 
-The colour-LUT run is the one that settles it. With `colorTable` true the RA binary is never staged,
-the bootloader skips all four block copies, and nothing this project added is executing inside the
-game. The freeze is the same.
+### Where it points, unverified
 
-**So this is the in-game menu, and the only open question is whether it is ours or upstream's.** Our
-fork has added pages to that menu; the open-and-exit path is upstream code.
-
-### Where suspicion currently points, unverified
-
-The exit path restores `BG_MAP_RAM_SUB`, `BG_PALETTE_SUB`, `BG_GFX_SUB`, the sub display registers,
-`VRAM_C_CR`, `VRAM_H_CR` and `POWERCNT`. Two things it does not:
+Two things the exit path does not put back, both noted without being called the cause:
 
 - **`BG_GFX_SUB` is backed up for `sizeof(igmText.font) * 4` bytes only.** A game using more
-  sub-screen tile graphics than that loses the rest and never gets it back.
-- `REG_MOSAIC_SUB`, `REG_BLDCNT_SUB`, `REG_BLDALPHA_SUB` and `REG_BLDY_SUB` are set to zero and
-  never restored — the source says so, they are write-only and cannot be read back.
+  sub-screen tile graphics than that loses the rest permanently.
+- `REG_MOSAIC_SUB`, `REG_BLDCNT_SUB`, `REG_BLDALPHA_SUB` and `REG_BLDY_SUB` are zeroed and never
+  restored; the source says they are write-only and cannot be read back.
+- `bgBak` links at an address that is **not word-aligned** — `0x02F8CF67`, three past a boundary —
+  and is the source of a `tonccpy` into VRAM. DS VRAM ignores byte writes, a lesson this project
+  already paid for once in the overlay.
 
-Both are corruption of the sub screen rather than a hang, which is why neither is being called the
-cause. The delay before the freeze is the part no hypothesis explains yet: whatever breaks, the game
-survives it for seconds first.
+None of those hangs a CPU on its own, which is why none is being claimed.
 
-Worth noting that the two games reported are 3D, and *Contra 4* — the game every other measurement in
-this document was taken on — is not, and has not been tested this way.
+### What this fork should do about it
 
-### The next measurement
+Nothing on suspicion, and nothing that pretends to fix somebody else's bug. Two things are honest:
 
-An **official nds-bootstrap release**, unmodified, on the same game with the same sequence. It
-separates "our menu" from "the menu", and it is a download rather than a build. Until it is run,
-nothing here should be changed on suspicion.
+- **Report it upstream** with the characterisation above. The valuable parts are that it is
+  rate-based rather than deterministic, that the rate tracks how hard the game uses the ROM cache,
+  and that the failure is in the resume rather than in the menu.
+- **Know that this fork raises the rate**, because it adds per-frame ARM9 work and takes DSi WRAM
+  that would otherwise cache the ROM. That is a cost of the feature, it is real, and a player who
+  uses the in-game menu heavily will meet it sooner here than on a stock build.
 
 ## Status
 
