@@ -6930,6 +6930,9 @@ Menu**. The log should say `hardcore refused: the cheat engine runs for this ROM
 TWiLight and boot again — `cheatData.bin` is still on the card at that point, which is exactly the
 case the old `!= 0` check got wrong — and hardcore should come back.
 
+Both halves are **confirmed on hardware**: the viewer refuses the edit, and the menu reports the
+mode.
+
 **The menu answers all of this without the log**, which is the cheapest way to read the result: open
 `Achievements...` and the line above `RetroAchievements` says `Hardcore -- RAM editing locked`,
 `Softcore -- cheats are on` or `Softcore`. If it says `No session this boot` on a 3DS boot that
@@ -7441,13 +7444,14 @@ and a player who uses the in-game menu heavily will meet it sooner here than on 
       only the ones that reach stage 13, and the in-game menu refuses to enter edit mode
       when it reads hardcore. Reading memory is untouched. This retired the *unconditional*
       half of `raWifiHardcoreRefused()`: the gate now refuses for a cheat file and for
-      nothing else. **Built and host-tested; not yet confirmed on hardware** — see "What
-      to look for on the next run" in that section.
+      nothing else. **Confirmed on hardware**: with `hardcore=1` the viewer refuses to
+      edit, and the menu's own line reports the mode.
 - [x] **The menu says which mode the session is in, and why.** A line in the
       RetroAchievements folder: `Hardcore -- RAM editing locked`,
       `Softcore -- cheats are on`, `Softcore`, or `No session this boot`. The reason is the
       half that earns it — before this, a player who asked for hardcore and got softcore
-      could only find out why by reading the launcher's log on a PC.
+      could only find out why by reading the launcher's log on a PC. **Confirmed on
+      hardware.**
 - [x] **The cheat check asks whether cheats are *on*, not whether a file exists.** It was
       `conf->cheatSize != 0`, which missed wide cheats and AP patches that are really cheat
       files — both of which run the engine — and which refused hardcore to a player who had
