@@ -7297,6 +7297,88 @@ design is what needs revisiting and this field goes with it. It was built ahead 
 because it is correct under either one: a record must not be upgraded after the fact regardless of
 what the rules say about when it may be sent.
 
+## The reader spends too much of the game's VBlank, and two games say so
+
+**Confirmed.** Two symptoms, one cause, and it is ours.
+
+*Chrono Trigger* freezes on entering Leene Square — always, at the same screen, with no menu
+involved, whether you talk to NPCs, play the strength minigame or walk straight there. And the same
+build tears visibly on the world map.
+
+Both disappear when `raRearmVBlank()` is made to return immediately. **In that build the binary is
+still staged**, so the memory accounting is identical and only the execution is gone. Memory is
+exonerated; the per-frame work is the cause.
+
+### The three measurements that pin it
+
+| Build | ROM cache | Reader running | Leene Square | World map |
+| --- | --- | --- | --- | --- |
+| Official release | 512 KB | no | passes | no tearing |
+| Ours, colour LUT on | 205 KB | no | passes | no tearing |
+| Ours | 256 KB | **yes** | freezes | **tears** |
+| Ours, VBlank hook off | 256 KB | no | passes | no tearing |
+
+The cache column is what kills the memory explanations. **A smaller cache passes and a larger one
+freezes** — 205 KB is fine, 256 KB is not. That is not a size effect, and it took out both
+`dsiWramCacheSize()` and the `isROMLoadableInRAM()` threshold in one reading. The window is not
+oversized either: rcheevos links to 68 KB and its runtime arena measures 91.8% full on a real set,
+128,352 bytes of 139,756, with 11 KB to spare. There is nothing to reclaim there.
+
+What is left correlates perfectly with the reader executing.
+
+### Why VBlank is the expensive place to be
+
+`raVblankHandler` chains to the game's own handler first and runs our work after it, so the game's
+VBlank work is not delayed by us — but the interrupt is still open. Everything the game does *after*
+that interrupt returns is pushed later by however long we took, and VBlank is a few dozen scanlines.
+Spill past it and the game's next display work lands inside the visible frame. That is tearing.
+
+Where the game has slack it is ugly. Where it does not, it is fatal, and Leene Square is where
+*Chrono Trigger* has none.
+
+**The cost scales with the set.** Contra 4 has 45 definitions and has never torn, on any build, in
+any test. That is the same axis the init path already respects: `RA_RC_INIT_BUDGET_LINES` is 120 of
+263 scanlines, chosen because the most expensive single definition measured 27.
+
+### And the steady-state frame has no budget at all
+
+The init path is budgeted. The per-frame path measures and does not cap:
+
+```c
+startLine = RA_VCOUNT;
+ra_rc_step(ra_rc_frame_step, snapshot);
+lines = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
+```
+
+`lines` and `linesMax` go into the snapshot and nothing acts on them. A set large enough to cost more
+than the blanking period costs it every frame, forever.
+
+### Running less often is already known to be acceptable
+
+This is the part that makes a throttle cheap rather than a compromise. Before the hook moved to
+VBlank, it chained onto VCOUNT with a Y-trigger, and *Contra 4* cleared `DISP_YTRIGGER_IRQ`
+constantly: measured at the time, **the reader ran on about 8% of frames and achievements still
+fired correctly**. Evaluation at a fraction of the frame rate is not a new risk here — it is what
+this project shipped for a while without noticing a missed unlock.
+
+What it does cost is latency on a notification, measured in tens of milliseconds, which nobody can
+perceive.
+
+### The fix, not yet built
+
+Cap the steady-state frame the way init is capped, and make it self-tuning rather than configured:
+measure what the evaluation cost, and if it exceeded the budget, sit out proportionally many frames
+before the next one. A cheap set runs every frame and is unaffected; an expensive set runs every
+second or third frame and stops stealing the game's time.
+
+Skipping whole frames rather than splitting the set matters: rcheevos updates its memrefs and
+evaluates its triggers in one call, and a set half-evaluated on one frame and half on the next would
+give delta operators two different notions of "previous". Skipping is just a lower sample rate,
+which is the case already proven above.
+
+One hazard to respect when it is written: this binary's `.bss` is never zeroed, so a skip counter
+must be initialised where the rest of the state is, not left to whatever the window held.
+
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
 Reported on **Chrono Trigger** and **Super Mario 64 DS**: open the in-game menu, navigate it, choose
