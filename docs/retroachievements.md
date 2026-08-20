@@ -7364,20 +7364,50 @@ this project shipped for a while without noticing a missed unlock.
 What it does cost is latency on a notification, measured in tens of milliseconds, which nobody can
 perceive.
 
-### The fix, not yet built
+### The fix: the frame budget is what is left of blanking, measured
 
-Cap the steady-state frame the way init is capped, and make it self-tuning rather than configured:
-measure what the evaluation cost, and if it exceeded the budget, sit out proportionally many frames
-before the next one. A cheap set runs every frame and is unaffected; an expensive set runs every
-second or third frame and stops stealing the game's time.
+The steady-state frame is capped the way init already is, and **the budget is not a constant**. It
+is how much blanking is actually left when the evaluation starts:
 
-Skipping whole frames rather than splitting the set matters: rcheevos updates its memrefs and
-evaluates its triggers in one call, and a set half-evaluated on one frame and half on the next would
-give delta operators two different notions of "previous". Skipping is just a lower sample rate,
-which is the case already proven above.
+```c
+startLine = RA_VCOUNT;
+room = (startLine >= RA_VBLANK_FIRST_LINE) ? RA_SCANLINES_PER_FRAME - startLine : 0;
+```
 
-One hazard to respect when it is written: this binary's `.bss` is never zeroed, so a skip counter
-must be initialised where the rest of the state is, not left to whatever the window held.
+That matters because the reader is chained *after* the game's own VBlank handler, so what remains
+depends on what the game just did. Measuring the room rather than assuming it is what makes this
+right on a game nobody has tested — which, given the two games that exposed this, is the case that
+counts.
+
+`ra_rc_frame_skip(lines, room)` then says how many frames to sit out so the average lands inside that
+room. A set costing less than the room is never throttled at all, which is why Contra 4 is
+unaffected: 28–31 against 71.
+
+**Whole frames are skipped, never a partial set.** `rc_runtime_do_frame()` updates every memref and
+evaluates every trigger in one call, so half a set on this frame and half on the next would hand the
+delta operators two different notions of "previous". Skipping is only a lower sample rate, and the
+8% figure above is this project's own evidence that it is survivable.
+
+Three things the writing of it turned up:
+
+- **A cost of zero must never throttle**, whatever the room says. Work that consumed no measurable
+  scanline cannot have overrun anything. This is not a nicety: on a host `RA_VCOUNT` never advances,
+  so every frame measures free, and the first version — which throttled to the floor whenever `room`
+  was zero — silently stopped the suite's own frame ticks from evaluating. One test caught it.
+- **The decision is a pure function**, for the reason `ra_queue.c` is pure: the arithmetic is the part
+  with the logic and the part a host can check, while the thing it depends on is the one thing a host
+  does not have. The suite drives `ra_rc_frame_skip()` directly.
+- **`.bss` needs no ceremony after all.** An earlier note here warned that a skip counter would have
+  to be initialised by hand. It does not: `ra_startup()` zeroes this binary's `.bss` on its first
+  call, which is the same guarantee `stateMagic` already depends on in `cardengine.c`.
+
+The floor is `RA_RC_FRAME_SKIP_MAX = 3` — evaluation at worst every fourth frame, about 15 Hz —
+bounding the throttle rather than the cost so a pathological reading cannot stall detection for
+seconds.
+
+**Not yet confirmed on hardware.** What to look for: the world-map tearing gone in *Chrono Trigger*,
+Leene Square survivable, and `rcLinesMax` still reporting the real peak cost — the throttle changes
+how often the work runs, not how much it costs when it does.
 
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 

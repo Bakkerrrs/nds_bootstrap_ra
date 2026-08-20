@@ -1131,6 +1131,32 @@ int main(void) {
 	    address translation lands on the right word, and whether the peek path refuses
 	    anything it should not.
 	*/
+	printf("\nthe frame throttle keeps the reader inside the blanking period\n");
+	{
+		/*
+		    The steady-state cost was measured at 28-31 scanlines for 45 definitions against 71 of
+		    blanking, and Chrono Trigger's larger set spilled past it -- tearing on the world map, and
+		    a dead ARM9 entering Leene Square where the game had no slack. This is the arithmetic that
+		    keeps the average inside whatever room was actually left.
+		*/
+		CHECK(ra_rc_frame_skip(30, 40) == 0);    /* fits, so every frame */
+		CHECK(ra_rc_frame_skip(40, 40) == 0);    /* exactly fits */
+		CHECK(ra_rc_frame_skip(41, 40) == 1);    /* just over: every other frame */
+		CHECK(ra_rc_frame_skip(80, 40) == 2);    /* twice the room: every third */
+		CHECK(ra_rc_frame_skip(200, 40) == RA_RC_FRAME_SKIP_MAX);   /* capped, not stalled */
+		/*
+		    A zero cost never throttles whatever the room says -- and this is the case the host runs
+		    in, since RA_VCOUNT never advances here. Get it wrong and the suite's own frame ticks stop
+		    evaluating, which is exactly how this was caught.
+		*/
+		CHECK(ra_rc_frame_skip(0, 0) == 0);
+		CHECK(ra_rc_frame_skip(0, 40) == 0);
+		/* Started outside blanking with real work done: over budget, and no denominator. */
+		CHECK(ra_rc_frame_skip(10, 0) == RA_RC_FRAME_SKIP_MAX);
+		/* The floor is well inside what the old VCOUNT hook shipped, which ran on 8% of frames. */
+		CHECK(RA_RC_FRAME_SKIP_MAX <= 11);
+	}
+
 	printf("\nthe self-test's own id is one the unlock guard refuses\n");
 	{
 		/*

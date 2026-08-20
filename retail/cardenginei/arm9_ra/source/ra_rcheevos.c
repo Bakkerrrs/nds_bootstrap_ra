@@ -68,6 +68,24 @@ extern void ra_watch_clear(void);
 /* VCOUNT, read directly -- the game owns every hardware timer. See raSnapshot.linesLast. */
 #define RA_VCOUNT            (*(const vu16*)0x04000006)
 #define RA_SCANLINES_PER_FRAME 263
+/*
+    The first scanline of the vertical blanking period, and the ceiling on how long the reader may
+    sit in the game's VBlank interrupt.
+
+    **This is the constraint the tearing came from.** The steady-state cost was measured at 28-31
+    scanlines for 45 definitions, against 71 scanlines of blanking, and the note that recorded it
+    said what made that affordable: the work fits inside the blanking period and touches no visible
+    line. A larger set does not fit. Chrono Trigger spills past line 262 into drawn pixels, which is
+    tearing on a good frame and a dead ARM9 on a frame where the game had no slack -- entering Leene
+    Square, every time.
+
+    RA_RC_FRAME_SKIP_MAX bounds the throttle rather than the cost, so a pathological reading cannot
+    stall detection for seconds. Three means the set is evaluated at worst every fourth frame, about
+    15 Hz. The old VCOUNT hook ran on 8% of frames -- nearer 5 Hz -- and achievements still fired, so
+    this floor is well inside what this project has already shipped.
+*/
+#define RA_VBLANK_FIRST_LINE   192
+#define RA_RC_FRAME_SKIP_MAX   3
 
 /*
     The RetroAchievements memory map for the Nintendo DS, which is the part of
@@ -224,6 +242,46 @@ static u8  initMaxLines;
 static u32 initTotalLines;
 static u8  rcStage;
 static u8  linesMax;
+/*
+    Frames left to sit out before the next evaluation, and the deepest throttle reached.
+
+    Zero-initialised for free: ra_startup() zeroes this binary's .bss on its first call, which is
+    the same guarantee stateMagic depends on in cardengine.c.
+*/
+static u8  frameSkip;
+static u8  frameSkipMax;
+
+/*
+    How many frames to sit out after an evaluation that cost `lines` scanlines with `room` scanlines
+    of blanking available when it started.
+
+    Pure, and its own function, for the reason ra_queue.c is pure: the decision is the part with the
+    logic and the part a host can check, while the thing it depends on -- VCOUNT advancing -- is the
+    one thing a host does not have. tools/ra_reader_test.c drives this directly.
+
+    **A cost of zero never throttles, whatever the room says.** Work that consumed no measurable
+    scanline cannot have overrun anything, and treating a zero as an overrun would be throttling on a
+    measurement rather than on a cost. That is also what lets the suite exercise the frame path at
+    all: on a host RA_VCOUNT is a mapped register that never advances, so every frame measures free.
+
+    `room` is zero on hardware only if the evaluation began outside the blanking period, meaning the
+    game's own handler had already run past it. Real work there is over budget by definition and
+    there is no denominator to scale by, so it throttles to the floor.
+*/
+static u8 ra_rc_frame_skip(u16 lines, u16 room) {
+	if (lines == 0) {
+		return 0;
+	}
+	if (room == 0) {
+		return RA_RC_FRAME_SKIP_MAX;
+	}
+	if (lines > room) {
+		const u16 want = (u16)(lines / room);
+
+		return (want > RA_RC_FRAME_SKIP_MAX) ? RA_RC_FRAME_SKIP_MAX : (u8)want;
+	}
+	return 0;
+}
 
 /*
     128, raised from 8 when `r=patch` arrived.
@@ -1201,7 +1259,7 @@ static u8 ra_rc_prepare(raSnapshot* snapshot) {
 
 static u8 ra_rc_activate_next(raSnapshot* snapshot) {
 	int one;
-	u16 startLine;
+	u16 startLine = 0;
 	u16 spent;
 	u16 spentThisFrame = 0;
 	u8  line;
@@ -1351,7 +1409,7 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	const rc_trigger_t* trigger;
 	unsigned measured = 0;
 	unsigned target   = 0;
-	u16 startLine;
+	u16 startLine = 0;
 	u16 lines;
 
 	/*
@@ -1383,15 +1441,47 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	    peek() is called from in here, so it runs on our stack as well -- which it should, since
 	    it is rcheevos that decides how deep to call it from.
 	*/
-	startLine = RA_VCOUNT;
-	ra_rc_step(ra_rc_frame_step, snapshot);
-	lines = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
+	/*
+	    Evaluate, unless the last evaluation overran the blanking period and this frame is one of
+	    the ones being sat out to pay for it.
 
-	if (lines > 255) {
-		lines = 255;
-	}
-	if ((u8)lines > linesMax) {
-		linesMax = (u8)lines;
+	    The budget is not a constant: it is **how much blanking is actually left** when this runs.
+	    We are chained after the game's own VBlank handler, so what remains depends on what the game
+	    just did, and startLine is already sampled. Measuring the room rather than assuming it is
+	    what makes this correct on a game nobody has tested.
+
+	    Whole frames are skipped rather than the set being split across them. rc_runtime_do_frame()
+	    updates every memref and evaluates every trigger in one call, so half a set on this frame and
+	    half on the next would hand the delta operators two different notions of "previous". Skipping
+	    is only a lower sample rate, and this project has already shipped one: on the old VCOUNT hook
+	    the reader ran on about 8% of frames and achievements still fired.
+	*/
+	lines = 0;
+	if (frameSkip) {
+		frameSkip--;
+	} else {
+		u16 room;
+
+		startLine = RA_VCOUNT;
+		room = (startLine >= RA_VBLANK_FIRST_LINE)
+		       ? (u16)(RA_SCANLINES_PER_FRAME - startLine)
+		       : 0;
+
+		ra_rc_step(ra_rc_frame_step, snapshot);
+		lines = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
+
+		if (lines > 255) {
+			lines = 255;
+		}
+		if ((u8)lines > linesMax) {
+			linesMax = (u8)lines;
+		}
+
+		/* Sit out enough frames that the average lands inside the room we had. */
+		frameSkip = ra_rc_frame_skip(lines, room);
+		if (frameSkip > frameSkipMax) {
+			frameSkipMax = frameSkip;
+		}
 	}
 
 	rcStage = RA_RC_FRAME;
