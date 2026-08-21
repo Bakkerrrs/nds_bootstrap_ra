@@ -45,6 +45,8 @@
 
 #include "rc_runtime.h"
 #include "rc_error.h"
+/* For the memref list walk below -- rc_memrefs_t is not in the public headers. */
+#include "rcheevos/rc_internal.h"
 #include "locations.h"
 
 /*
@@ -288,6 +290,41 @@ int main(void) {
 		rc_runtime_do_frame(&runtime, discarding_event_handler, counting_peek, NULL, NULL);
 		framePeeks = peeks;
 
+		/*
+		    And how many entries the loop actually walks, which is the assumption the whole cycle
+		    arithmetic rested on and which nothing had checked. rc_update_memref_values() steps over
+		    every memref in the list and only calls peek for those whose value has a type -- so the
+		    iteration count and the read count are not the same number, and if they differ by an
+		    order of magnitude then 845 cycles per *read* is really a much smaller figure per *entry*.
+		*/
+		{
+			const rc_memref_list_t* list = &runtime.memrefs->memrefs;
+			long entries = 0, typed = 0, modified = 0;
+
+			do {
+				unsigned k;
+
+				for (k = 0; k < list->count; k++) {
+					entries++;
+					if (list->items[k].value.type != RC_VALUE_TYPE_NONE) {
+						typed++;
+					}
+				}
+				list = list->next;
+			} while (list);
+
+			{
+				const rc_modified_memref_list_t* mlist = &runtime.memrefs->modified_memrefs;
+
+				do {
+					modified += mlist->count;
+					mlist = mlist->next;
+				} while (mlist);
+			}
+
+			printf("        memref list    %ld entries, %ld typed, %ld modified\n",
+			       entries, typed, modified);
+		}
 		printf("        memref pass    %ld reads\n", memrefPeeks);
 		printf("        whole frame    %ld reads (%ld in trigger evaluation)\n",
 		       framePeeks, framePeeks - memrefPeeks);

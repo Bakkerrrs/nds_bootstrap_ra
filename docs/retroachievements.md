@@ -7617,8 +7617,9 @@ whatever the slice, so 53 of the 70 available scanlines are spent before a singl
 at, and dividing the trigger list can only ever recover the other 48. That is why `rcParts` 8 wins so
 little over `rcParts` 4, and it is the ceiling on this whole approach.
 
-It also gives a figure worth staring at. 237 peeks in ~53 scanlines is about **950 ARM9 cycles per
-memory read** (measured directly one section below: 47 scanlines, ~840 cycles) — a translate, a range check and a load. Nothing in `ra_rc_peek()`,
+It also gives a figure that looked alarming and turned out to be a bad division: 237 peeks in ~53
+scanlines reads as ~950 ARM9 cycles per memory read, and the section on the memref pass below shows
+why that denominator is the wrong one — the pass walks about 3.5× more entries than it reads — a translate, a range check and a load. Nothing in `ra_rc_peek()`,
 `ra_readable()` or `ra_read()` accounts for two orders of magnitude more than that costs. The same
 ratio shows up in the trigger loop: 48 scanlines for 98 definitions is ~2,000 cycles each. Both
 halves are uniformly slow by a similar factor, which points at how the code executes rather than at
@@ -7760,27 +7761,65 @@ timings, one rate explains both:
 range checks and a load is not — and `ra_rc_translate()` is four instructions, `ra_readable()` two
 comparisons, `ra_read()` a compare and a load. The code is not where it goes.
 
-**What is left is the read itself.** These are main RAM addresses, scattered, so each is a fresh cache
-line fill on the external bus — taken from inside the game's VBlank interrupt, which is exactly when
-a DS game's DMA channels are moving VRAM and OAM and hold that bus. The CPU gets a slot when it is
-given one. And the same explanation says why the trigger loop is fast: it reads updated memref values
-out of cached DSi WRAM, which is not on the contended bus at all.
+One candidate was the bus: scattered main RAM addresses are cache line fills on the external bus,
+taken from inside VBlank where a DS game's DMA channels are moving VRAM and OAM and hold that bus.
 
-It also explains, retroactively, why the cost tracks *distinct addresses* rather than conditions, and
-why Contra 4 has never torn on any build in any test. Its set reads 69 addresses. Chrono Trigger's
-reads 237.
+### `rcMemrefMin` 45 against `rcMemrefLines` 47 kills that, and the denominator was wrong
 
-### `rcMemrefMin` at `+0x27` decides it, on any play session
+Stable to 4% over a play session. Bus contention varies with what the game is transferring;
+deterministic arithmetic does not. **It is fixed work.**
 
-One byte, the last reserved one, and the pair with `rcMemrefLines` is a single discriminator:
+And then the host counted the thing the whole calculation had assumed. For Contra 4's set:
 
-- **min far below max** — the cost is contention and varies with what the game is transferring. Then
-  the blanking period is the *worst* place to do this work, not the best, and the whole placement is
-  worth reopening.
-- **min equal to max** — it is fixed work, the bus is exonerated, and 845 cycles per read needs a
-  third explanation.
+```
+memref list    68 entries, 68 typed, 173 modified
+memref pass    69 reads
+```
 
-No dedicated run needed: it accumulates on whatever is being played.
+**The pass walks 241 entries and reads 69 of them.** `rc_update_memref_values()` has two loops, and
+only the first does reads. The second walks `modified_memrefs` and calls
+`rc_get_modified_memref_value()`, which does no memory access at all in the common case — it
+evaluates two operands, converts types and combines them. That is where `AddSource`, `SubSource`,
+`AddAddress` and the arithmetic operators live.
+
+On the ARM9 that arithmetic is not cheap. There is **no integer divide instruction**, so an operator
+of `/` or `%` is a libgcc call of a few hundred cycles; `rc_typed_value_t` carries a float variant, and
+there is no FPU either, so any definition using a float promotes the whole combine into soft-float.
+
+Redone with the real denominator, scaling Contra 4's ratio onto Chrono Trigger's 237 reads:
+
+| | entries walked | reads | cycles per entry |
+| --- | --- | --- | --- |
+| Contra 4 | 241 | 69 | — |
+| Chrono Trigger | ~839 | 237 | 47 lines → **~239** |
+
+**239 cycles for two operand evaluations, a type conversion and a combine is a normal number.** There
+was never a 20× anomaly. The reader is doing a great deal of work at an ordinary rate, and the whole
+"845 cycles per read" figure was an artefact of dividing the pass's cost by the wrong count — reads
+instead of entries.
+
+### Which closes the investigation, and makes slicing the fix rather than a workaround
+
+Three hypotheses, all dead, and each died to a measurement rather than an argument: the window was
+never uncached (`raMpuBits` 0xD9), the bus is not the bottleneck (`rcMemrefMin` 45 of 47), and the
+per-entry cost is not anomalous (239 cycles for what that entry does). There is no large win sitting
+here. The cost is the work.
+
+So there is nothing left to make cheaper, only less of it to do per frame — which is what `rcParts`
+already does. Note precisely what it does and does not reach: slicing divides the **trigger loop**,
+which is why the measured total is 47 fixed plus 11 for triggers. The dominant term is untouched by
+it, because every memref and every modified memref is updated on every call.
+
+**And slicing the memref pass as well is not available, for a reason worth writing down.** Whole-frame
+skipping was uniform: everything went stale by the same amount, so a trigger comparing two addresses
+still compared two values sampled at the same instant. Per-memref slicing is not uniform. A trigger
+in slice *k* would read some addresses updated this frame and others up to eight frames old, and a
+condition comparing two of them would be comparing different moments. That is a correctness change,
+not a sample-rate change, and it is the line this project has not crossed anywhere else.
+
+The number to watch for a future set is therefore **not the achievement count** — it is the count of
+memrefs and modified memrefs, which is what `rcPeeks` and the host's list walk report. A set of a
+hundred simple definitions is cheaper than fifty full of `AddSource` arithmetic.
 
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
