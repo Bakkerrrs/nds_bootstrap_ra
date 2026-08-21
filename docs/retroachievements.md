@@ -7405,9 +7405,79 @@ The floor is `RA_RC_FRAME_SKIP_MAX = 3` — evaluation at worst every fourth fra
 bounding the throttle rather than the cost so a pathological reading cannot stall detection for
 seconds.
 
-**Not yet confirmed on hardware.** What to look for: the world-map tearing gone in *Chrono Trigger*,
-Leene Square survivable, and `rcLinesMax` still reporting the real peak cost — the throttle changes
-how often the work runs, not how much it costs when it does.
+### Hardware: half of it worked, and the half that did not was predictable
+
+| Symptom | Before the throttle | After |
+| --- | --- | --- |
+| Leene Square | freezes, every time | **passable** — play continues past it and further into the story |
+| World map | tears | **still tears** |
+| Character text region, Crono low on screen | trembles | still trembles |
+
+The freeze is gone and the visual artefacts are not, and that split is not bad luck — it follows from
+what a reactive throttle is. **Skipping frames lowers the average cost and leaves the peak exactly
+where it was.** The frame that does run still spills past line 262 by however much it always did; the
+only thing that changed is how often. Cumulative starvation is an average problem, so Leene Square
+was cured. A tear is a single-frame problem, so it was not: it went from every frame to one frame in
+four, and one frame in four is what a visible periodic wobble is made of.
+
+The trembling text region deserves its own line because it was reported as **pre-existing on the RA
+build** rather than introduced here, and it is the same shape as the tearing: *Chrono Trigger* draws
+character text two different ways depending on where the main character stands, and the placement
+that trembles is the one whose split lands late. A raster split arriving on the wrong scanline is
+what a late interrupt looks like.
+
+### The gate: decide before the work, not after it
+
+`ra_rc_frame_skip()` answers "how much do I owe for what I just did". The question it cannot answer is
+"should I have done it", and that is the one the peak needs. `ra_rc_frame_fits()` is asked first:
+
+```c
+static u8 ra_rc_frame_fits(u8 cost, u8 room, u8 declined) {
+	if (cost == 0)                              return 1;
+	if (declined >= RA_RC_FRAME_STARVE_MAX)     return 1;
+	return (room >= cost) ? 1 : 0;
+}
+```
+
+`room` is measured this frame, as before. `cost` is **the last evaluation's cost, not `linesMax`** —
+and that choice is the one that keeps this from starving. `linesMax` is raised for good by a single
+expensive frame, such as the one where a trigger fires and its events are delivered, so predicting
+from a high-water mark would decline every ordinary frame for the rest of the session.
+
+Both escapes are load-bearing:
+
+- **A cost of zero always runs**, for the same reason it never throttles: nothing has been measured
+  yet, or the work is free. This is also the case the host suite runs in, where `RA_VCOUNT` never
+  advances and both inputs are zero forever.
+- **Starvation always runs.** `RA_RC_FRAME_STARVE_MAX = 16`, so a game whose own handler never leaves
+  room still gets an evaluation about every seventeenth frame — 3.7 Hz at worst, against the 8% of
+  frames the old VCOUNT hook shipped on without missing an unlock. A reader that never evaluates is a
+  worse bug than a visible one, and the floor is where that gets decided rather than left to a game.
+
+The reactive throttle stays alongside it. The gate stops the overruns nobody had to take; the throttle
+pays back the ones starvation forced.
+
+### `rcRoomMax` is the number that says whether this can work at all
+
+One byte, at `+0x87`, taking the reserved byte that has been sitting there since the struct was
+written — so no offset moves and the hardware checklist stays valid. It is the most blanking the
+reader has ever found still unspent when its turn came, and it is read **against `rcLinesMax`**:
+
+- `rcRoomMax` comfortably above `rcLinesMax` — there are frames with room to spare, and declining
+  the rest costs nothing but sample rate. The gate is the whole fix.
+- `rcRoomMax` at or below `rcLinesMax` — no frame in the session could hold the work. Then only
+  starvation-forced runs ever happen, the artefacts thin out by 16× rather than vanishing, and the
+  thing left to attack is the cost itself rather than the schedule.
+- `rcRoomMax` **zero** — every evaluation began outside the blanking period, meaning the game's own
+  VBlank handler had already run past line 262 before ours started. That is the worst reading
+  available here, and it is a reading rather than a missing measurement.
+
+Which of the three *Chrono Trigger* gives is the next thing worth knowing, and the RAM viewer can
+answer it directly: `rcLinesMax` at `+0x85`, `rcRoomMax` at `+0x87`, adjacent bytes in the snapshot.
+
+**What to look for on hardware.** Leene Square still passable — the gate must not have cost the fix
+that worked. The world-map tearing gone, or visibly rarer. The text region steady when Crono is low.
+And the two adjacent bytes above, which say whether a clean pass was ever available.
 
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 

@@ -84,8 +84,16 @@ extern void ra_watch_clear(void);
     15 Hz. The old VCOUNT hook ran on 8% of frames -- nearer 5 Hz -- and achievements still fired, so
     this floor is well inside what this project has already shipped.
 */
+/*
+    RA_RC_FRAME_STARVE_MAX bounds the *refusals* the same way RA_RC_FRAME_SKIP_MAX bounds the
+    payback: after this many frames declined for want of room, the evaluation runs anyway. Sixteen
+    is about 3.7 Hz at worst, and it is chosen against this project's own evidence rather than a
+    feeling -- the old VCOUNT hook ran on roughly 8% of frames, one in twelve, and achievements
+    still fired correctly.
+*/
 #define RA_VBLANK_FIRST_LINE   192
 #define RA_RC_FRAME_SKIP_MAX   3
+#define RA_RC_FRAME_STARVE_MAX 16
 
 /*
     The RetroAchievements memory map for the Nintendo DS, which is the part of
@@ -250,6 +258,16 @@ static u8  linesMax;
 */
 static u8  frameSkip;
 static u8  frameSkipMax;
+/*
+    What the last evaluation actually cost, the best blanking ever left to us, and how many frames
+    in a row have been declined because the two did not fit together.
+
+    linesLastRun is deliberately not snapshot->rcLines: that field is zero on a frame the reader sat
+    out, which is the right thing to report and the wrong thing to predict from.
+*/
+static u8  linesLastRun;
+static u8  roomMax;
+static u8  starve;
 
 /*
     How many frames to sit out after an evaluation that cost `lines` scanlines with `room` scanlines
@@ -281,6 +299,42 @@ static u8 ra_rc_frame_skip(u16 lines, u16 room) {
 		return (want > RA_RC_FRAME_SKIP_MAX) ? RA_RC_FRAME_SKIP_MAX : (u8)want;
 	}
 	return 0;
+}
+
+/*
+    Whether to start an evaluation at all this frame, given what the last one cost, how much blanking
+    is left right now, and how long it has been since one was allowed to run.
+
+    This is the half ra_rc_frame_skip() cannot do, and hardware said so. Skipping frames lowers the
+    *average* cost and leaves the *peak* exactly where it was: the frame that does run still spills
+    past line 262 by however much it always did. That is enough to cure a game the accumulated cost
+    was killing -- Leene Square stopped freezing -- and it cannot cure an artefact caused by one
+    overrunning frame. A tear or a wobble every fourth frame is what a bounded reactive throttle
+    looks like on screen, which is what Chrono Trigger's world map kept showing.
+
+    So the decision moves in front of the work: run when the room measured *this* frame can hold what
+    the last one cost, and otherwise do not start. The predictor is the last cost rather than the
+    worst-ever cost on purpose -- linesMax is raised for good by a single expensive frame, such as the
+    one where a trigger fires and events are delivered, and predicting from a high-water mark would
+    starve every ordinary frame after it.
+
+    Two escapes, both required:
+
+      - **A cost of zero always runs.** Nothing has been measured yet, or the work is free; either
+        way there is nothing to schedule around. This is also what keeps the host suite honest, since
+        on a host RA_VCOUNT never advances and every frame measures both free and roomless.
+      - **Starvation always runs.** A game whose own VBlank handler leaves nothing behind would
+        otherwise stop the reader for the session, and a reader that never evaluates is a worse bug
+        than a visible one.
+*/
+static u8 ra_rc_frame_fits(u8 cost, u8 room, u8 declined) {
+	if (cost == 0) {
+		return 1;
+	}
+	if (declined >= RA_RC_FRAME_STARVE_MAX) {
+		return 1;
+	}
+	return (room >= cost) ? 1 : 0;
 }
 
 /*
@@ -1466,21 +1520,38 @@ void ra_rc_tick(raSnapshot* snapshot) {
 		room = (startLine >= RA_VBLANK_FIRST_LINE)
 		       ? (u16)(RA_SCANLINES_PER_FRAME - startLine)
 		       : 0;
-
-		ra_rc_step(ra_rc_frame_step, snapshot);
-		lines = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
-
-		if (lines > 255) {
-			lines = 255;
-		}
-		if ((u8)lines > linesMax) {
-			linesMax = (u8)lines;
+		if ((u8)room > roomMax) {
+			roomMax = (u8)room;
 		}
 
-		/* Sit out enough frames that the average lands inside the room we had. */
-		frameSkip = ra_rc_frame_skip(lines, room);
-		if (frameSkip > frameSkipMax) {
-			frameSkipMax = frameSkip;
+		if (!ra_rc_frame_fits(linesLastRun, (u8)room, starve)) {
+			/* Not enough blanking left this frame to hold what the last one cost. */
+			if (starve < 255) {
+				starve++;
+			}
+		} else {
+			starve = 0;
+
+			ra_rc_step(ra_rc_frame_step, snapshot);
+			lines = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
+
+			if (lines > 255) {
+				lines = 255;
+			}
+			linesLastRun = (u8)lines;
+			if ((u8)lines > linesMax) {
+				linesMax = (u8)lines;
+			}
+
+			/*
+			    Sit out enough frames that the average lands inside the room we had. Kept
+			    alongside the gate above rather than replaced by it: the gate stops the
+			    overruns nobody had to take, and this pays back the ones starvation forced.
+			*/
+			frameSkip = ra_rc_frame_skip(lines, room);
+			if (frameSkip > frameSkipMax) {
+				frameSkipMax = frameSkip;
+			}
 		}
 	}
 
@@ -1524,5 +1595,6 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	snapshot->rcPeeksRejected = peeksRejected;
 	snapshot->rcLines         = (u8)lines;
 	snapshot->rcLinesMax      = linesMax;
+	snapshot->rcRoomMax       = roomMax;
 	snapshot->rcEvents        = (u8)((eventCount > 255) ? 255 : eventCount);
 }

@@ -858,6 +858,9 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, rcPeeks) == 0x7C);
 	CHECK(__builtin_offsetof(raSnapshot, rcPeeksRejected) == 0x80);
 	CHECK(__builtin_offsetof(raSnapshot, rcLines) == 0x84);
+	CHECK(__builtin_offsetof(raSnapshot, rcLinesMax) == 0x85);
+	/* Took the byte that had been reserved at 0x87 since the struct was written. */
+	CHECK(__builtin_offsetof(raSnapshot, rcRoomMax) == 0x87);
 	CHECK(__builtin_offsetof(raSnapshot, heapBreak) == 0x88);
 	CHECK(__builtin_offsetof(raSnapshot, heapTop) == 0x8C);
 	CHECK(__builtin_offsetof(raSnapshot, mallocProbe) == 0x90);
@@ -1155,6 +1158,37 @@ int main(void) {
 		CHECK(ra_rc_frame_skip(10, 0) == RA_RC_FRAME_SKIP_MAX);
 		/* The floor is well inside what the old VCOUNT hook shipped, which ran on 8% of frames. */
 		CHECK(RA_RC_FRAME_SKIP_MAX <= 11);
+
+		/*
+		    ...and the half the throttle above could not do, because hardware said so: skipping frames
+		    lowers the average and leaves the peak alone, so the frame that does run still overruns by
+		    exactly as much as it always did. Leene Square stopped freezing and the world map went on
+		    tearing, which is what a bounded reactive throttle looks like -- the same glitch, one frame
+		    in four instead of every frame.
+
+		    ra_rc_frame_fits() decides *before* the work whether there is room for it.
+		*/
+		CHECK(ra_rc_frame_fits(30, 40, 0) == 1);   /* room to spare */
+		CHECK(ra_rc_frame_fits(40, 40, 0) == 1);   /* exactly fits, so take it */
+		CHECK(ra_rc_frame_fits(41, 40, 0) == 0);   /* one scanline over is one scanline of tearing */
+		CHECK(ra_rc_frame_fits(200, 40, 0) == 0);
+		CHECK(ra_rc_frame_fits(10, 0, 0) == 0);    /* began outside blanking: no room at all */
+		/*
+		    A cost of zero always runs, for the same reason it never throttles above -- and again this
+		    is the case the host runs in. Both of this function's inputs are zero here forever, so
+		    getting it wrong stops the suite's own frame ticks silently.
+		*/
+		CHECK(ra_rc_frame_fits(0, 0, 0) == 1);
+		CHECK(ra_rc_frame_fits(0, 40, 0) == 1);
+		/*
+		    Starvation always runs. A game whose own handler leaves nothing behind would otherwise stop
+		    the reader for the whole session, and a reader that never evaluates is the worse bug.
+		*/
+		CHECK(ra_rc_frame_fits(200, 0, RA_RC_FRAME_STARVE_MAX) == 1);
+		CHECK(ra_rc_frame_fits(200, 0, RA_RC_FRAME_STARVE_MAX - 1) == 0);
+		CHECK(ra_rc_frame_fits(200, 0, 255) == 1);
+		/* And the forced run is rare enough to be worth forcing: 1 in 17 frames, near the 8% shipped. */
+		CHECK(RA_RC_FRAME_STARVE_MAX >= 8 && RA_RC_FRAME_STARVE_MAX <= 32);
 	}
 
 	printf("\nthe self-test's own id is one the unlock guard refuses\n");

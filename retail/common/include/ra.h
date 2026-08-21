@@ -414,7 +414,25 @@ typedef struct raSnapshot {
 	u8  rcLines;         /* +0x84  scanlines rc_runtime_do_frame() cost, last tick */
 	u8  rcLinesMax;      /* +0x85  worst seen, excluding the init frame */
 	u8  rcEvents;        /* +0x86  events of any kind delivered, clamped at 255 */
-	u8  reserved3;       /* +0x87 */
+	/*
+	    The most blanking the reader has ever found still unspent when its turn came, and it is
+	    read *against* rcLinesMax rather than on its own.
+
+	    The reader is chained after the game's own VBlank handler, so what is left is the game's
+	    decision, not ours. That makes this the number that says whether the per-frame cost can be
+	    scheduled around at all: a rcRoomMax comfortably above rcLinesMax means there are frames
+	    with room to spare and declining the others costs only sample rate, while a rcRoomMax at or
+	    below it means no frame in the session could hold the work and the cost itself is the only
+	    thing left to attack.
+
+	    Zero means every evaluation began outside the blanking period -- the game's own handler had
+	    already run past line 262 before ours started -- which is the worst reading available here
+	    and not a missing measurement.
+
+	    Costs the byte that has been reserved at this offset since the struct was written, so no
+	    existing offset moves and the hardware checklist stays valid.
+	*/
+	u8  rcRoomMax;       /* +0x87  blanking left when the reader ran, best seen, of 71 */
 	/*
 	    The allocator, reported separately from the arena. Added after a reading that could
 	    not be diagnosed: rcheevos failed to allocate 32 bytes while heapSize said 189K was
