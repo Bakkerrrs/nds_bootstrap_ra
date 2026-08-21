@@ -7299,6 +7299,45 @@ what the rules say about when it may be sent.
 
 ## The reader spends too much of the game's VBlank, and two games say so
 
+### The outcome first, because the sections below are the archaeology
+
+*Chrono Trigger* went from **unplayable to playable** on this fork. It froze on entering Leene
+Square — always, at the same screen, with no menu involved — and it now passes it and continues into
+the story. The world-map tearing that came with it is down to what the official release does, and
+the character-text region that trembled with Crono low on screen is legible. That is a compatibility
+gain on a game this fork previously could not run, and it was won by measurement rather than by
+guessing: every step below is a number read off a 3DS with the RAM viewer.
+
+**What it cost:** one setting, self-tuning, and a documented reduction in how often a trigger is
+looked at. Nothing was disabled, no achievement is lost, and no other game changed.
+
+**What was learned, in the order it was learned, and three of the five were wrong:**
+
+| Step | Claim | Verdict |
+| --- | --- | --- |
+| 1 | The reader overruns the game's blanking period | **right** — and `raRearmVBlank()` returning early removed both symptoms with the binary still staged, so memory was exonerated and execution was the cause |
+| 2 | Throttle it: skip frames to pay back an overrun | **half right** — cured the freeze, left the tearing. Skipping lowers the average and leaves the peak, and a tear is a one-frame event |
+| 3 | Then the peak has to fit: `rcLinesMax` 101 against `rcRoomMax` 70 | **right, and it ended the whole approach** — 70 of a possible 71 means the game leaves nearly all its blanking and the work still needs 40% more than the console has |
+| 4 | So divide the set: evaluate the trigger loop in slices | **right, and it is the fix** — `rcLines` 58 of 70, and the picture came back |
+| 5 | The remaining cost is 845 cycles per memory read, so the window must be executing uncached | **wrong twice over** — `raMpuBits` 0xD9 said the window was already both instruction- and data-cached, and `rcMemrefMin` 45 of 47 said the bus was not stalling either |
+| 6 | ...and the 845 was a bad division | **the real answer** — the memref pass walks 3.5× more entries than it reads, most of them arithmetic rather than memory, and per *entry* the cost is an ordinary 239 cycles |
+
+Step 6 is why this stops here rather than continuing. There is no anomaly and therefore no large win
+waiting: the reader is doing a great deal of work at a normal speed, and the only lever is to do less
+of it per frame, which is exactly what step 4 does.
+
+**Three things a future reader should take from this rather than from any one section:**
+
+- **The cost of a set is its memrefs, not its achievements.** Contra 4's 45 definitions read 69
+  addresses and have never torn on any build, in any test. Chrono Trigger's 98 read 237 and broke the
+  game. A hundred simple definitions are cheaper than fifty full of `AddSource` arithmetic.
+- **A snapshot field that is a running maximum can describe a configuration that no longer exists.**
+  `rcLinesMax` said 100 for a whole session after the tuner had brought the real cost to 58, and it
+  was read as evidence of failure once. `rcLines` was the field that was telling the truth.
+- **A short negative on a probabilistic failure is not a negative** — the lesson the menu-freeze
+  bisect below cost, and the reason every verdict in the table above is a number rather than an
+  impression.
+
 **Confirmed.** Two symptoms, one cause, and it is ours.
 
 *Chrono Trigger* freezes on entering Leene Square — always, at the same screen, with no menu
@@ -7996,6 +8035,17 @@ and a player who uses the in-game menu heavily will meet it sooner here than on 
       its own, and `raWifiSubmitOne()` lost its config parameter to the change. Cost: the
       TWL-SDK ARM7 is down to 60 bytes of link margin. **Built and host-tested; not yet
       confirmed on hardware.**
+- [x] **Chrono Trigger runs** — **confirmed on hardware**, and it is a compatibility gain rather
+      than an RA feature. It froze on entering Leene Square, every time, with no menu involved; it
+      now passes it and continues into the story, the world-map tearing is down to what the official
+      release does, and the character-text region is legible. The reader's per-frame evaluation was
+      overrunning the game's blanking period — `rcLinesMax` 101 against a hardware ceiling of 71 —
+      and the fix is to evaluate the trigger loop in self-tuning slices (`rcParts`) rather than to
+      schedule work that fits no schedule. Three hypotheses died to measurements on the way: the
+      window was never uncached (`raMpuBits` 0xD9), the bus was not stalling (`rcMemrefMin` 45 of
+      47), and the alarming "845 cycles per read" was a division by the wrong count. Cost: a trigger
+      is visited every eighth frame, which is inside the 8% of frames this project already shipped
+      on without missing an unlock. No other game changed, and nothing was disabled.
 - [ ] **Hardcore.** Blocked on nothing in this tree any more, and now measured rather
       than inferred: `h=1` from this client returns `Success:true` and is filed as a
       **softcore** unlock — hardcore score unchanged, `HardcoreUnlocks` empty,
