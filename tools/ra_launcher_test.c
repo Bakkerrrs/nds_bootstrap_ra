@@ -326,6 +326,30 @@ static void test_config(void) {
 		/* A bare ESC with no bracket is one cell, not the start of anything. */
 		CHECK(raWifiVisible("\x1b") == 1);
 
+		/*
+		    The spinner is one cell that pulses. A wrong mask here shows a space, and a spinner that
+		    stops is exactly what it exists to rule out -- a stalled run looking identical to a
+		    waiting one.
+		*/
+		{
+			u8 t;
+
+			CHECK(raWifiSpinFrame(0) == '.');
+			CHECK(raWifiSpinFrame(1) == 'o');
+			CHECK(raWifiSpinFrame(2) == 'O');
+			/* Symmetric: it returns through 'o' rather than snapping back, so it breathes. */
+			CHECK(raWifiSpinFrame(3) == 'o');
+			CHECK(raWifiSpinFrame(4) == '.');
+			/* Every tick in a byte prints something, including the wrap. */
+			for (t = 0; t < 255; t++) {
+				if (raWifiSpinFrame(t) <= ' ') {
+					break;
+				}
+			}
+			CHECK(t == 255);
+			CHECK(raWifiSpinFrame(255) > ' ');
+		}
+
 		/* Too small a buffer terminates rather than writing what it cannot fit. */
 		{
 			char small[8];

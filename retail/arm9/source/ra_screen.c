@@ -34,6 +34,28 @@
     escape consumes the rest of the string, which is the safe reading: there is nothing after it that
     could be printed.
 */
+/*
+    The character that says "still working", as one cell that changes in place.
+
+    A rotating `- \ | /` was the first version and it reads as noise at this resolution: four glyphs
+    of different widths flickering next to a word, which looks like corruption rather than progress.
+    This pulses one dot instead -- `.` `o` `O` `o` -- so the thing that changes is the *size* of a
+    mark that never moves, which is the shape of a progress animation rather than of a spinning
+    stick.
+
+    Symmetric on purpose: the sequence returns through `o` rather than snapping from `O` back to `.`,
+    so it breathes instead of ticking.
+
+    Pure and pinned on the host because a wrong mask here shows a space, and a spinner that stops is
+    precisely the thing this exists to rule out -- a stalled run would look identical to a waiting one
+    again, which is the bug it was added for.
+*/
+char raWifiSpinFrame(u8 tick) {
+	static const char face[4] = { '.', 'o', 'O', 'o' };
+
+	return face[tick & 3];
+}
+
 u32 raWifiVisible(const char* text) {
 	u32 cells = 0;
 

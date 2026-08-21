@@ -317,17 +317,19 @@ static void raWifiStep(u8 step, const char* caption) {
     still. A run that has stopped and a run that is waiting look identical without this.
 */
 static void raWifiSpin(void) {
-	static const char face[4] = { '-', '\\', '|', '/' };
-
 	if (raVerbose) {
 		return;
 	}
 	raSpin++;
-	if ((raSpin & 7) != 0) {
+	/*
+	    Every sixteenth frame, so the full pulse takes about a second. Faster reads as flicker, which
+	    is the thing that made the first version look like corruption rather than progress.
+	*/
+	if ((raSpin & 15) != 0) {
 		return;
 	}
 	raWifiCursor(31, raRowBase + RA_ROW_CAPTION);
-	iprintf("%c", face[(raSpin >> 3) & 3]);
+	iprintf("%c", raWifiSpinFrame((u8)(raSpin >> 4)));
 }
 
 /*

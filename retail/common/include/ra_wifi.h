@@ -652,6 +652,10 @@ void raWifiBar(char* out, u32 size, u8 step, u8 steps);
     note on the definition: the quiet screen pads rather than erasing, so this is what it pads by.
 */
 u32 raWifiVisible(const char* text);
+/*
+    One cell of "still working", pulsing rather than spinning. See the note on the definition.
+*/
+char raWifiSpinFrame(u8 tick);
 
 #define RA_NET_HOST           "retroachievements.org"
 

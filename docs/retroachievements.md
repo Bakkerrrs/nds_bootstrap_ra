@@ -7903,9 +7903,17 @@ the same structure the verbose summary is written from, so the two cannot disagr
 happened. They are ordered by what a *failing* boot needs first: "Could not sign in" at the top of
 that block is the whole diagnosis for the most common problem this loader will ever have.
 
-A spinner turns at the end of the caption line while a rung blocks. It earns its place: association
-can take forty seconds and DHCP ten more, during which the bar and the caption are both correct and
-both still, and a run that has stopped looks exactly like a run that is waiting.
+A single cell at the end of the caption line pulses while a rung blocks — `.` `o` `O` `o`, about one
+breath a second. It earns its place: association can take forty seconds and DHCP ten more, during
+which the bar and the caption are both correct and both still, and a run that has stopped looks
+exactly like a run that is waiting.
+
+**It was a rotating `- \ | /` first, and that was the wrong shape.** Four glyphs of different widths
+flickering next to a word reads as corruption at this resolution rather than as progress. Pulsing one
+dot changes the *size* of a mark that never moves, which is what a progress animation looks like; a
+spinning stick is what a terminal looks like. The sequence returns through `o` rather than snapping
+from `O` back to `.`, so it breathes instead of ticking, and it runs every sixteenth frame because
+faster reads as flicker again.
 
 ### Four things about drawing on a DS console that cost more thought than the feature
 
