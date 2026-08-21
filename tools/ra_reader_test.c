@@ -835,6 +835,10 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, ticks) == 0x04);
 	CHECK(__builtin_offsetof(raSnapshot, deniedNoLayer) == 0x14);
 	CHECK(__builtin_offsetof(raSnapshot, watchCount) == 0x18);
+	/* Took one of the three bytes reserved at 0x25; the bytes beside rcLinesMax are spent. */
+	CHECK(__builtin_offsetof(raSnapshot, rcMemrefLines) == 0x25);
+	CHECK(__builtin_offsetof(raSnapshot, raMpuBits) == 0x26);
+	CHECK(__builtin_offsetof(raSnapshot, rcMemrefMin) == 0x27);
 	CHECK(__builtin_offsetof(raSnapshot, linesMax) == 0x1B);
 	CHECK(__builtin_offsetof(raSnapshot, wramMagic) == 0x1C);
 	CHECK(__builtin_offsetof(raSnapshot, wramTicks) == 0x20);
@@ -850,6 +854,7 @@ int main(void) {
 	    are untouched. It is the field that says how deep rcheevos went on the stack this binary
 	    now gives it -- see the note in ra.h about the IRQ stack it was borrowing before.
 	*/
+	CHECK(__builtin_offsetof(raSnapshot, rcParts) == 0x69);
 	CHECK(__builtin_offsetof(raSnapshot, rcStackUsed) == 0x6A);
 	CHECK(__builtin_offsetof(raSnapshot, rcStage) == 0x6C);
 	CHECK(__builtin_offsetof(raSnapshot, rcTriggered) == 0x70);
@@ -858,6 +863,9 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, rcPeeks) == 0x7C);
 	CHECK(__builtin_offsetof(raSnapshot, rcPeeksRejected) == 0x80);
 	CHECK(__builtin_offsetof(raSnapshot, rcLines) == 0x84);
+	CHECK(__builtin_offsetof(raSnapshot, rcLinesMax) == 0x85);
+	/* Took the byte that had been reserved at 0x87 since the struct was written. */
+	CHECK(__builtin_offsetof(raSnapshot, rcRoomMax) == 0x87);
 	CHECK(__builtin_offsetof(raSnapshot, heapBreak) == 0x88);
 	CHECK(__builtin_offsetof(raSnapshot, heapTop) == 0x8C);
 	CHECK(__builtin_offsetof(raSnapshot, mallocProbe) == 0x90);
@@ -1131,6 +1139,160 @@ int main(void) {
 	    address translation lands on the right word, and whether the peek path refuses
 	    anything it should not.
 	*/
+	printf("\nthe frame throttle keeps the reader inside the blanking period\n");
+	{
+		/*
+		    The steady-state cost was measured at 28-31 scanlines for 45 definitions against 71 of
+		    blanking, and Chrono Trigger's larger set spilled past it -- tearing on the world map, and
+		    a dead ARM9 entering Leene Square where the game had no slack. This is the arithmetic that
+		    keeps the average inside whatever room was actually left.
+		*/
+		CHECK(ra_rc_frame_skip(30, 40) == 0);    /* fits, so every frame */
+		CHECK(ra_rc_frame_skip(40, 40) == 0);    /* exactly fits */
+		CHECK(ra_rc_frame_skip(41, 40) == 1);    /* just over: every other frame */
+		CHECK(ra_rc_frame_skip(80, 40) == 2);    /* twice the room: every third */
+		CHECK(ra_rc_frame_skip(200, 40) == RA_RC_FRAME_SKIP_MAX);   /* capped, not stalled */
+		/*
+		    A zero cost never throttles whatever the room says -- and this is the case the host runs
+		    in, since RA_VCOUNT never advances here. Get it wrong and the suite's own frame ticks stop
+		    evaluating, which is exactly how this was caught.
+		*/
+		CHECK(ra_rc_frame_skip(0, 0) == 0);
+		CHECK(ra_rc_frame_skip(0, 40) == 0);
+		/* Started outside blanking with real work done: over budget, and no denominator. */
+		CHECK(ra_rc_frame_skip(10, 0) == RA_RC_FRAME_SKIP_MAX);
+		/* The floor is well inside what the old VCOUNT hook shipped, which ran on 8% of frames. */
+		CHECK(RA_RC_FRAME_SKIP_MAX <= 11);
+
+		/*
+		    ...and the half the throttle above could not do, because hardware said so: skipping frames
+		    lowers the average and leaves the peak alone, so the frame that does run still overruns by
+		    exactly as much as it always did. Leene Square stopped freezing and the world map went on
+		    tearing, which is what a bounded reactive throttle looks like -- the same glitch, one frame
+		    in four instead of every frame.
+
+		    ra_rc_frame_fits() decides *before* the work whether there is room for it.
+		*/
+		CHECK(ra_rc_frame_fits(30, 40, 0) == 1);   /* room to spare */
+		CHECK(ra_rc_frame_fits(40, 40, 0) == 1);   /* exactly fits, so take it */
+		CHECK(ra_rc_frame_fits(41, 40, 0) == 0);   /* one scanline over is one scanline of tearing */
+		CHECK(ra_rc_frame_fits(200, 40, 0) == 0);
+		CHECK(ra_rc_frame_fits(10, 0, 0) == 0);    /* began outside blanking: no room at all */
+		/*
+		    A cost of zero always runs, for the same reason it never throttles above -- and again this
+		    is the case the host runs in. Both of this function's inputs are zero here forever, so
+		    getting it wrong stops the suite's own frame ticks silently.
+		*/
+		CHECK(ra_rc_frame_fits(0, 0, 0) == 1);
+		CHECK(ra_rc_frame_fits(0, 40, 0) == 1);
+		/*
+		    Starvation always runs. A game whose own handler leaves nothing behind would otherwise stop
+		    the reader for the whole session, and a reader that never evaluates is the worse bug.
+		*/
+		CHECK(ra_rc_frame_fits(200, 0, RA_RC_FRAME_STARVE_MAX) == 1);
+		CHECK(ra_rc_frame_fits(200, 0, RA_RC_FRAME_STARVE_MAX - 1) == 0);
+		CHECK(ra_rc_frame_fits(200, 0, 255) == 1);
+		/* And the forced run is rare enough to be worth forcing: 1 in 17 frames, near the 8% shipped. */
+		CHECK(RA_RC_FRAME_STARVE_MAX >= 8 && RA_RC_FRAME_STARVE_MAX <= 32);
+
+		/*
+		    ...and then hardware said neither of the two above can work on this set, with two numbers
+		    read off the snapshot on Chrono Trigger's world map: rcLinesMax 101, rcRoomMax 70.
+
+		    70 of a possible 71 means the game leaves the reader essentially the whole blanking period
+		    and the work still needs 40% more than the hardware has. There is no schedule for a job
+		    that exceeds the budget on its cheapest frame, so the set is divided instead.
+		*/
+		CHECK(ra_rc_frame_parts(1, 101, 70) == 2);   /* the measurement that forced this */
+		CHECK(ra_rc_frame_parts(2, 69, 70) == 2);    /* fits now: settle here */
+		CHECK(ra_rc_frame_parts(2, 71, 70) == 3);    /* one over is still over */
+		/* It only rises, so a piece that fits is never enlarged on a guess about the memref pass. */
+		CHECK(ra_rc_frame_parts(4, 10, 70) == 4);
+		CHECK(ra_rc_frame_parts(1, 10, 70) == 1);
+		/* Pinned at the ceiling is a reading, not a loop: no division of triggers fits, so stop. */
+		CHECK(ra_rc_frame_parts(RA_RC_PARTS_MAX, 200, 70) == RA_RC_PARTS_MAX);
+		/* Zero either side says nothing, which is the case the host lives in. */
+		CHECK(ra_rc_frame_parts(3, 0, 70) == 3);
+		CHECK(ra_rc_frame_parts(3, 200, 0) == 3);
+		/* A zero parts is 1, because ra_rc_do_frame_slice() treats it that way too. */
+		CHECK(ra_rc_frame_parts(0, 0, 0) == 1);
+		/* The floor on sample rate stays inside the 8% of frames the old VCOUNT hook shipped on. */
+		CHECK(RA_RC_PARTS_MAX <= 12);
+	}
+
+	printf("\nthe MPU report names the region and refuses the one holding the game's code\n");
+	{
+		/*
+		    47 of 70 scanlines go on the memref pass -- ~840 ARM9 cycles for a translate, a range
+		    check and a load -- and the trigger loop shows the same ratio. Two unrelated halves slow
+		    by the same factor is a property of how the code executes, not of what it does: this
+		    binary runs from DSi WRAM at 0x03740000, which a DS game's MPU has no reason to have
+		    marked cacheable. This is the region arithmetic that finds out.
+		*/
+		u32 regs[8];
+		u32 base = 0;
+		u8  n;
+
+		for (n = 0; n < 8; n++) {
+			regs[n] = 0;
+		}
+		/* Region 1: main RAM, 4M at 0x02000000. Size 21 -> 2^22. */
+		regs[1] = 0x02000000 | (21 << 1) | 1;
+		/* Region 2: the 0x03000000 page, 16M -> covers our window and the I/O registers with it. */
+		regs[2] = 0x03000000 | (23 << 1) | 1;
+
+		CHECK(ra_mpu_region_pick(regs, 0x03740000, &base) == 2);
+		CHECK(base == 0x03000000);
+		CHECK(ra_mpu_region_pick(regs, 0x02000000, &base) == 1);
+		CHECK(base == 0x02000000);
+		/* Nothing maps this, and that would be a surprise worth reporting rather than assuming. */
+		CHECK(ra_mpu_region_pick(regs, 0x06000000, &base) == -1);
+
+		/* The highest matching region wins, whatever order they are declared in. */
+		regs[5] = 0x03740000 | (17 << 1) | 1;   /* 256K, exactly our window */
+		CHECK(ra_mpu_region_pick(regs, 0x03740000, &base) == 5);
+		CHECK(base == 0x03740000);
+
+		/* A disabled region does not win, however well it matches. */
+		regs[5] &= ~1u;
+		CHECK(ra_mpu_region_pick(regs, 0x03740000, &base) == 2);
+
+		/* Below the 4 KB minimum is not a region. */
+		regs[5] = 0x03740000 | (8 << 1) | 1;
+		CHECK(ra_mpu_region_pick(regs, 0x03740000, &base) == 2);
+
+		/*
+		    Size 31 is the whole address space and its length cannot be shifted for -- 1u << 32 is
+		    undefined, and getting it wrong here would mean picking a background region for every
+		    address or for none.
+		*/
+		for (n = 0; n < 8; n++) {
+			regs[n] = 0;
+		}
+		regs[0] = 0x00000000 | (31 << 1) | 1;
+		CHECK(ra_mpu_region_pick(regs, 0x03740000, &base) == 0);
+		CHECK(base == 0);
+
+		/* The report. Region 2, instruction cache off for it, globally on, data cache off. */
+		CHECK(ra_mpu_report(2, 0, 0, 1u << 12, 0) == (2 | RA_MPU_ICACHE_GLOBAL));
+		CHECK(ra_mpu_report(2, 1u << 2, 0, 1u << 12, 0)
+		      == (2 | RA_MPU_ICACHE_WAS_ON | RA_MPU_ICACHE_GLOBAL));
+		CHECK(ra_mpu_report(2, 0, 1u << 2, 1u << 12, 0)
+		      == (2 | RA_MPU_DCACHE_ON | RA_MPU_ICACHE_GLOBAL));
+		/*
+		    The safety case. A region that reaches main RAM governs how the *game's* code is
+		    fetched, and a loader that DMAs overlays into main RAM is the last program that should
+		    have an instruction cache switched on underneath it.
+		*/
+		CHECK(ra_mpu_report(1, 0, 0, 1u << 12, 1)
+		      == (1 | RA_MPU_SPANS_MAIN_RAM | RA_MPU_ICACHE_GLOBAL));
+		/* Bit 6 clear makes every other bit moot, and it is the first thing to read. */
+		CHECK((ra_mpu_report(2, 0, 0, 0, 0) & RA_MPU_ICACHE_GLOBAL) == 0);
+		/* No region at all is a sentinel, not a bit, and cannot be confused with a real report. */
+		CHECK(ra_mpu_report(-1, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 1) == RA_MPU_NO_REGION);
+		CHECK(ra_mpu_report(7, 1u << 7, 1u << 7, 1u << 12, 1) != RA_MPU_NO_REGION);
+	}
+
 	printf("\nthe self-test's own id is one the unlock guard refuses\n");
 	{
 		/*

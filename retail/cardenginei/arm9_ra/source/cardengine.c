@@ -77,6 +77,8 @@ typedef char raTicksOffsetCheck[
 */
 static u32     stateMagic;
 static u32     frames;
+/* ra_icache_claim()'s report, kept because it is written once and reported every tick. */
+static u8      mpuBits;
 static u8      watchCount;
 static raWatch watches[RA_WATCH_MAX];
 
@@ -150,6 +152,164 @@ u32 ra_read(u32 addr, u8 size) {
 		return value;
 	}
 }
+
+/*
+    Make this binary's own window instruction-cacheable, once, and report what was found.
+
+    **Why there is anything to do here at all.** 47 of the 70 available scanlines go on
+    rc_update_memref_values(), which is 237 reads -- about 840 ARM9 cycles for a translate, a range
+    check and a load. The trigger loop shows the same ratio, ~2,000 cycles per definition. Nothing in
+    either does work of that order, and two unrelated halves being slow by the same factor is not a
+    property of what the code does but of how it executes. This binary runs from DSi WRAM at
+    0x03740000, and a DS game's own MPU setup has no reason to have marked that region cacheable --
+    on a retail DS there is nothing there.
+
+    **Instruction cache only, and that asymmetry is the whole safety argument.** Cacheability is per
+    MPU region, and the region that happens to cover 0x03740000 may well cover much more: I/O
+    registers at 0x04000000, and the ROM cache below us at 0x03700000 which the card DMAs into. A
+    data cache over either of those is fatal -- VCOUNT would stop advancing and cached ROM would go
+    stale. An *instruction* cache over them is inert, because nothing is ever executed from an I/O
+    register or from a ROM cache line. Only code is fetched, and the only code in this region is
+    ours, written once by the bootloader before we ever run and never modified afterwards.
+
+    **And it declines to touch a region that covers main RAM.** If the winning region for our address
+    turns out to be one that also spans 0x02000000 -- which nds-bootstrap's own MPU patch can produce,
+    it widens a region to PAGE_128M at base 0 -- then flipping this bit would change how the *game's*
+    code is fetched, and a loader that DMAs overlays into main RAM is exactly the program that must
+    not have an instruction cache switched on underneath it. In practice such a region already has
+    the bit set, because no DS game gives up its instruction cache; either way the decision belongs
+    to a measurement rather than to this function, so it reports and leaves it alone.
+
+    The returned byte is that report, and it is the only output. See raSnapshot.raMpuBits.
+*/
+/*
+    Which of the eight regions wins for `addr`, and what its base is, from the eight raw region
+    registers -- and it is a pure function taking them as an array for the reason ra_rc_frame_skip()
+    is one: the arithmetic is the part with the logic, the coprocessor read is the part a host does
+    not have, and tools/ra_reader_test.c drives this directly.
+
+    Region format on the ARM946: bits 31-12 the base, bits 5-1 the size as 2^(N+1), bit 0 the enable.
+    Regions are priority-ordered with the highest number winning, so iterating upward and overwriting
+    on each match leaves the winner. A size field below 11 is under the 4 KB minimum and is not a
+    region; 31 is the whole address space, whose length cannot be shifted for without overflowing.
+
+    Returns -1 if no enabled region covers the address, and writes the winner's base to *base.
+*/
+int ra_mpu_region_pick(const u32* regs, u32 addr, u32* base) {
+	int best = -1;
+	u8  n;
+
+	*base = 0;
+	for (n = 0; n < 8; n++) {
+		const u32 r = regs[n];
+		u32 sz, regionBase;
+
+		if (!(r & 1)) {
+			continue;
+		}
+		sz         = (r >> 1) & 0x1F;
+		regionBase = r & 0xFFFFF000;
+		if (sz < 11) {
+			continue;
+		}
+		if (sz >= 31) {
+			best  = n;
+			*base = 0;
+			continue;
+		}
+		if (addr >= regionBase && (addr - regionBase) < (1u << (sz + 1))) {
+			best  = n;
+			*base = regionBase;
+		}
+	}
+	return best;
+}
+
+/*
+    ...and the report itself, from the region choice and the three CP15 words. Pure for the same
+    reason, so every branch of the decision is exercised on a host rather than only on a 3DS.
+
+    `spansMainRam` is the caller's, not decided here, because "does this region reach main RAM" is
+    one comparison and passing the answer keeps this function about the bits.
+*/
+u8 ra_mpu_report(int region, u32 icfg, u32 dcfg, u32 control, u8 spansMainRam) {
+	u8 bits;
+
+	if (region < 0) {
+		return RA_MPU_NO_REGION;
+	}
+
+	bits = (u8)region;
+	if (icfg & (1u << region)) {
+		bits |= RA_MPU_ICACHE_WAS_ON;
+	}
+	if (dcfg & (1u << region)) {
+		bits |= RA_MPU_DCACHE_ON;
+	}
+	if (control & (1u << 12)) {
+		bits |= RA_MPU_ICACHE_GLOBAL;
+	}
+	if (spansMainRam) {
+		bits |= RA_MPU_SPANS_MAIN_RAM;
+	}
+	return bits;
+}
+
+#ifdef __arm__
+static u32 ra_mpu_region_reg(u8 n) {
+	u32 v = 0;
+
+	switch (n) {
+		case 0: asm volatile("mrc p15,0,%0,c6,c0,0" : "=r"(v)); break;
+		case 1: asm volatile("mrc p15,0,%0,c6,c1,0" : "=r"(v)); break;
+		case 2: asm volatile("mrc p15,0,%0,c6,c2,0" : "=r"(v)); break;
+		case 3: asm volatile("mrc p15,0,%0,c6,c3,0" : "=r"(v)); break;
+		case 4: asm volatile("mrc p15,0,%0,c6,c4,0" : "=r"(v)); break;
+		case 5: asm volatile("mrc p15,0,%0,c6,c5,0" : "=r"(v)); break;
+		case 6: asm volatile("mrc p15,0,%0,c6,c6,0" : "=r"(v)); break;
+		case 7: asm volatile("mrc p15,0,%0,c6,c7,0" : "=r"(v)); break;
+	}
+	return v;
+}
+
+u8 ra_icache_claim(u32 addr) {
+	u32 regs[8];
+	u32 icfg = 0, dcfg = 0, control = 0;
+	u32 base = 0;
+	int best;
+	u8  n;
+	u8  bits;
+
+	for (n = 0; n < 8; n++) {
+		regs[n] = ra_mpu_region_reg(n);
+	}
+	best = ra_mpu_region_pick(regs, addr, &base);
+
+	asm volatile("mrc p15,0,%0,c2,c0,1" : "=r"(icfg));
+	asm volatile("mrc p15,0,%0,c2,c0,0" : "=r"(dcfg));
+	asm volatile("mrc p15,0,%0,c1,c0,0" : "=r"(control));
+
+	/* A base at or below main RAM means the region reaches from there to us, so it holds the
+	   game's own code. Reported and left alone -- see the note above. */
+	bits = ra_mpu_report(best, icfg, dcfg, control, (u8)(best >= 0 && base <= RA_MAIN_RAM_START));
+
+	if (best >= 0
+	 && !(bits & (RA_MPU_ICACHE_WAS_ON | RA_MPU_SPANS_MAIN_RAM))) {
+		icfg |= 1u << best;
+		asm volatile("mcr p15,0,%0,c2,c0,1" :: "r"(icfg));
+		asm volatile("mcr p15,0,%0,c7,c5,0" :: "r"(0));   /* invalidate the instruction cache */
+		bits |= RA_MPU_ICACHE_SET;
+	}
+
+	return bits;
+}
+#else
+/* No coprocessor on the host. The two functions above are what the suite exercises. */
+u8 ra_icache_claim(u32 addr) {
+	(void)addr;
+	return RA_MPU_NO_REGION;
+}
+#endif
 
 /*
     Add a watch, returning its index or -1 if the list is full or the request is
@@ -328,7 +488,16 @@ void ra_wram_tick(raSnapshot* snapshot) {
 		frames     = 0;
 		watchCount = 0;
 		ra_install_defaults(snapshot);
+		/*
+		    Once per session, and here rather than in ra_startup() because this is the first place
+		    that runs after .bss is up and is already the one-time hook. The MPU is the game's and
+		    does not change under us; if it did, re-asserting every frame would cost an I-cache
+		    invalidate every frame, which is the opposite of the point.
+		*/
+		mpuBits = ra_icache_claim(CARDENGINEI_ARM9_RA_LOCATION);
 	}
+
+	snapshot->raMpuBits = mpuBits;
 
 	frames++;
 

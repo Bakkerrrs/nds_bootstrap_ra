@@ -68,6 +68,46 @@ extern void ra_watch_clear(void);
 /* VCOUNT, read directly -- the game owns every hardware timer. See raSnapshot.linesLast. */
 #define RA_VCOUNT            (*(const vu16*)0x04000006)
 #define RA_SCANLINES_PER_FRAME 263
+/*
+    The first scanline of the vertical blanking period, and the ceiling on how long the reader may
+    sit in the game's VBlank interrupt.
+
+    **This is the constraint the tearing came from.** The steady-state cost was measured at 28-31
+    scanlines for 45 definitions, against 71 scanlines of blanking, and the note that recorded it
+    said what made that affordable: the work fits inside the blanking period and touches no visible
+    line. A larger set does not fit. Chrono Trigger spills past line 262 into drawn pixels, which is
+    tearing on a good frame and a dead ARM9 on a frame where the game had no slack -- entering Leene
+    Square, every time.
+
+    RA_RC_FRAME_SKIP_MAX bounds the throttle rather than the cost, so a pathological reading cannot
+    stall detection for seconds. Three means the set is evaluated at worst every fourth frame, about
+    15 Hz. The old VCOUNT hook ran on 8% of frames -- nearer 5 Hz -- and achievements still fired, so
+    this floor is well inside what this project has already shipped.
+*/
+/*
+    RA_RC_FRAME_STARVE_MAX bounds the *refusals* the same way RA_RC_FRAME_SKIP_MAX bounds the
+    payback: after this many frames declined for want of room, the evaluation runs anyway. Sixteen
+    is about 3.7 Hz at worst, and it is chosen against this project's own evidence rather than a
+    feeling -- the old VCOUNT hook ran on roughly 8% of frames, one in twelve, and achievements
+    still fired correctly.
+*/
+/*
+    ...and RA_RC_PARTS_MAX bounds the *division of the set*, which is the fix hardware asked for after
+    the two above turned out to be scheduling a job that does not fit any schedule.
+
+    Measured on Chrono Trigger: `rcLinesMax` 101, `rcRoomMax` 70. The second number is the most
+    blanking the reader ever found unspent, and it is one line short of the 71 that exist -- so the
+    game leaves essentially all of it and the work still needs 40% more than the hardware has. No
+    gate and no throttle can place 101 lines inside 71. The set has to be evaluated in pieces.
+
+    Eight is the floor on sample rate rather than a guess: a trigger visited every eighth frame is
+    7.5 Hz, and this project measured the old VCOUNT hook running on 8% of frames -- one in twelve --
+    without missing an unlock.
+*/
+#define RA_VBLANK_FIRST_LINE   192
+#define RA_RC_FRAME_SKIP_MAX   3
+#define RA_RC_FRAME_STARVE_MAX 16
+#define RA_RC_PARTS_MAX        8
 
 /*
     The RetroAchievements memory map for the Nintendo DS, which is the part of
@@ -224,6 +264,142 @@ static u8  initMaxLines;
 static u32 initTotalLines;
 static u8  rcStage;
 static u8  linesMax;
+/*
+    Frames left to sit out before the next evaluation, and the deepest throttle reached.
+
+    Zero-initialised for free: ra_startup() zeroes this binary's .bss on its first call, which is
+    the same guarantee stateMagic depends on in cardengine.c.
+*/
+static u8  frameSkip;
+static u8  frameSkipMax;
+/*
+    What the last evaluation actually cost, the best blanking ever left to us, and how many frames
+    in a row have been declined because the two did not fit together.
+
+    linesLastRun is deliberately not snapshot->rcLines: that field is zero on a frame the reader sat
+    out, which is the right thing to report and the wrong thing to predict from.
+*/
+static u8  linesLastRun;
+static u8  roomMax;
+static u8  starve;
+/*
+    How many pieces the trigger list is evaluated in, and which piece is next. rcParts is 1 until a
+    measurement says otherwise -- an untuned reader behaves exactly as it did before this existed,
+    which is what makes a game that never needed the division pay nothing for it.
+*/
+static u8  rcParts = 1;
+static u8  rcSlice;
+/*
+    What the memref pass costs on its own, worst seen. The fixed term of the per-frame cost, and
+    therefore the ceiling on what dividing the trigger list can ever recover.
+*/
+static u8  memrefLinesMax;
+/*
+    ...and the cheapest. Zero means "none seen yet" rather than being initialised to 0xFF, because
+    this binary has no crt0: ra_startup() zeroes .bss and nothing copies a .data initialiser here.
+    A genuine cost of zero reading as unset is harmless -- 237 reads do not come free.
+*/
+static u8  memrefLinesMin;
+
+/*
+    How many frames to sit out after an evaluation that cost `lines` scanlines with `room` scanlines
+    of blanking available when it started.
+
+    Pure, and its own function, for the reason ra_queue.c is pure: the decision is the part with the
+    logic and the part a host can check, while the thing it depends on -- VCOUNT advancing -- is the
+    one thing a host does not have. tools/ra_reader_test.c drives this directly.
+
+    **A cost of zero never throttles, whatever the room says.** Work that consumed no measurable
+    scanline cannot have overrun anything, and treating a zero as an overrun would be throttling on a
+    measurement rather than on a cost. That is also what lets the suite exercise the frame path at
+    all: on a host RA_VCOUNT is a mapped register that never advances, so every frame measures free.
+
+    `room` is zero on hardware only if the evaluation began outside the blanking period, meaning the
+    game's own handler had already run past it. Real work there is over budget by definition and
+    there is no denominator to scale by, so it throttles to the floor.
+*/
+static u8 ra_rc_frame_skip(u16 lines, u16 room) {
+	if (lines == 0) {
+		return 0;
+	}
+	if (room == 0) {
+		return RA_RC_FRAME_SKIP_MAX;
+	}
+	if (lines > room) {
+		const u16 want = (u16)(lines / room);
+
+		return (want > RA_RC_FRAME_SKIP_MAX) ? RA_RC_FRAME_SKIP_MAX : (u8)want;
+	}
+	return 0;
+}
+
+/*
+    Whether to start an evaluation at all this frame, given what the last one cost, how much blanking
+    is left right now, and how long it has been since one was allowed to run.
+
+    This is the half ra_rc_frame_skip() cannot do, and hardware said so. Skipping frames lowers the
+    *average* cost and leaves the *peak* exactly where it was: the frame that does run still spills
+    past line 262 by however much it always did. That is enough to cure a game the accumulated cost
+    was killing -- Leene Square stopped freezing -- and it cannot cure an artefact caused by one
+    overrunning frame. A tear or a wobble every fourth frame is what a bounded reactive throttle
+    looks like on screen, which is what Chrono Trigger's world map kept showing.
+
+    So the decision moves in front of the work: run when the room measured *this* frame can hold what
+    the last one cost, and otherwise do not start. The predictor is the last cost rather than the
+    worst-ever cost on purpose -- linesMax is raised for good by a single expensive frame, such as the
+    one where a trigger fires and events are delivered, and predicting from a high-water mark would
+    starve every ordinary frame after it.
+
+    Two escapes, both required:
+
+      - **A cost of zero always runs.** Nothing has been measured yet, or the work is free; either
+        way there is nothing to schedule around. This is also what keeps the host suite honest, since
+        on a host RA_VCOUNT never advances and every frame measures both free and roomless.
+      - **Starvation always runs.** A game whose own VBlank handler leaves nothing behind would
+        otherwise stop the reader for the session, and a reader that never evaluates is a worse bug
+        than a visible one.
+*/
+static u8 ra_rc_frame_fits(u8 cost, u8 room, u8 declined) {
+	if (cost == 0) {
+		return 1;
+	}
+	if (declined >= RA_RC_FRAME_STARVE_MAX) {
+		return 1;
+	}
+	return (room >= cost) ? 1 : 0;
+}
+
+/*
+    How many pieces the trigger list should be evaluated in, given how many it is being evaluated in
+    now and what that last piece cost against the room it had.
+
+    **It only ever rises.** Not for want of ambition: a step down would have to predict the cost of a
+    larger piece, and the cost is not proportional to the piece -- rc_update_memref_values() runs on
+    every call whatever the slice, so a fixed share of every measurement belongs to work that dividing
+    cannot reduce. Guessing that share wrong in the optimistic direction produces exactly the
+    oscillation this is here to end. Rising only is monotone, converges in at most seven frames, and
+    what a spurious step costs is sample rate rather than correctness.
+
+    It also *reports* the thing no separate measurement had to be taken for. If rcParts settles below
+    the ceiling, the division worked and the fixed share is small. If it pins at RA_RC_PARTS_MAX and
+    the reader is still over the room, then the memref pass alone does not fit and no division of the
+    triggers ever will -- which is a different problem, and this is how it announces itself.
+
+    A cost of zero or a room of zero says nothing either way and changes nothing, for the reason it
+    does in the two functions above: on a host neither number ever moves.
+*/
+static u8 ra_rc_frame_parts(u8 parts, u8 cost, u8 room) {
+	if (parts == 0) {
+		parts = 1;
+	}
+	if (cost == 0 || room == 0) {
+		return parts;
+	}
+	if (cost > room && parts < RA_RC_PARTS_MAX) {
+		return (u8)(parts + 1);
+	}
+	return parts;
+}
 
 /*
     128, raised from 8 when `r=patch` arrived.
@@ -1201,7 +1377,7 @@ static u8 ra_rc_prepare(raSnapshot* snapshot) {
 
 static u8 ra_rc_activate_next(raSnapshot* snapshot) {
 	int one;
-	u16 startLine;
+	u16 startLine = 0;
 	u16 spent;
 	u16 spentThisFrame = 0;
 	u8  line;
@@ -1311,8 +1487,104 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
     than an asm call to rc_runtime_do_frame() directly, because the callbacks it needs are static
     to this file and the trampoline takes one argument.
 */
+/*
+    rc_runtime_do_frame(), with the trigger loop divided into `parts` slices and only slice `slice`
+    evaluated. Memrefs are updated on every call regardless.
+
+    **Reimplemented here rather than patched into rcheevos, because rcheevos is a submodule** pinned
+    at RetroAchievements' own v12.4.0. A change to its working tree belongs to no commit this project
+    can make: the parent records a gitlink, so the edit would build on this machine and vanish from a
+    fresh clone. The first version of this was exactly that mistake.
+
+    What is lost by not calling upstream's function is the part of it this fork has no use for. Its
+    loop raises nine event types; ra_rc_event_handler() acts on one, RC_RUNTIME_EVENT_ACHIEVEMENT_
+    TRIGGERED, and counts the rest. There are no leaderboards and no rich presence here, so those two
+    loops iterate zero times. What is kept is everything that changes behaviour: memrefs updated
+    first, triggers skipped when null or holding an invalid memref, RESET read back off the trigger
+    rather than treated as a state, and events raised only on a real transition.
+
+    `eventCount` therefore counts state transitions rather than upstream's nine event kinds, which is
+    a narrowing of what raSnapshot.rcEvents means and is why it is written down here.
+
+    Modulo rather than a contiguous range, so a change of `parts` mid-session cannot leave a band of
+    triggers unvisited for a whole cycle.
+*/
+static void ra_rc_do_frame_slice(u8 slice, u8 parts) {
+	rc_runtime_event_t ev;
+	int32_t i;
+
+	if (parts == 0) {
+		parts = 1;
+	}
+
+	/*
+	    Timed on its own, because it is the one part of this function no slice count can shrink: every
+	    memref is updated on every call. Whole-frame readings on two games put this at roughly half
+	    the cost and that was arithmetic on two data points -- this is the measurement.
+	*/
+	{
+		const u16 mrStart = RA_VCOUNT;
+		u16 mrLines;
+
+		rc_update_memref_values(runtime.memrefs, ra_rc_peek, 0);
+
+		mrLines = (RA_VCOUNT - mrStart + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
+		if (mrLines > 255) {
+			mrLines = 255;
+		}
+		if ((u8)mrLines > memrefLinesMax) {
+			memrefLinesMax = (u8)mrLines;
+		}
+		if (memrefLinesMin == 0 || (u8)mrLines < memrefLinesMin) {
+			memrefLinesMin = (u8)mrLines;
+		}
+	}
+
+	ev.value = 0;
+
+	for (i = (int32_t)runtime.trigger_count - 1; i >= 0; --i) {
+		rc_trigger_t* trigger = runtime.triggers[i].trigger;
+		int old_state, new_state;
+
+		if (!trigger || runtime.triggers[i].invalid_memref) {
+			continue;
+		}
+		if (parts > 1 && ((u32)i % parts) != slice) {
+			continue;
+		}
+
+		old_state = trigger->state;
+		new_state = rc_evaluate_trigger(trigger, ra_rc_peek, 0, 0);
+		/*
+		    RESET is a notification rather than a state -- upstream raises an event for it and then
+		    reads the real state back off the trigger. Nothing here consumes the notification, so
+		    only the read-back is kept.
+		*/
+		if (new_state == RC_TRIGGER_STATE_RESET) {
+			new_state = trigger->state;
+		}
+
+		if (new_state == old_state) {
+			continue;
+		}
+
+		if (new_state == RC_TRIGGER_STATE_TRIGGERED) {
+			ev.type = RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED;
+			ev.id   = runtime.triggers[i].id;
+			ra_rc_event_handler(&ev);   /* counts itself */
+		} else {
+			eventCount++;
+		}
+	}
+}
+
 static u8 ra_rc_frame_step(raSnapshot* snapshot) {
-	rc_runtime_do_frame(&runtime, ra_rc_event_handler, ra_rc_peek, 0, 0);
+	/*
+	    One slice of the trigger list, and every memref. rcParts is 1 until a measurement raises it,
+	    so on a set that fits inside the game's blanking period this evaluates everything, every
+	    frame, exactly as rc_runtime_do_frame() did.
+	*/
+	ra_rc_do_frame_slice(rcSlice, rcParts);
 
 	/*
 	    After the frame, not inside the event handler. The handler runs deep inside rcheevos with the
@@ -1351,7 +1623,7 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	const rc_trigger_t* trigger;
 	unsigned measured = 0;
 	unsigned target   = 0;
-	u16 startLine;
+	u16 startLine = 0;
 	u16 lines;
 
 	/*
@@ -1383,15 +1655,84 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	    peek() is called from in here, so it runs on our stack as well -- which it should, since
 	    it is rcheevos that decides how deep to call it from.
 	*/
-	startLine = RA_VCOUNT;
-	ra_rc_step(ra_rc_frame_step, snapshot);
-	lines = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
+	/*
+	    Evaluate, unless the last evaluation overran the blanking period and this frame is one of
+	    the ones being sat out to pay for it.
 
-	if (lines > 255) {
-		lines = 255;
-	}
-	if ((u8)lines > linesMax) {
-		linesMax = (u8)lines;
+	    The budget is not a constant: it is **how much blanking is actually left** when this runs.
+	    We are chained after the game's own VBlank handler, so what remains depends on what the game
+	    just did, and startLine is already sampled. Measuring the room rather than assuming it is
+	    what makes this correct on a game nobody has tested.
+
+	    Whole frames are skipped rather than the set being split across them. rc_runtime_do_frame()
+	    updates every memref and evaluates every trigger in one call, so half a set on this frame and
+	    half on the next would hand the delta operators two different notions of "previous". Skipping
+	    is only a lower sample rate, and this project has already shipped one: on the old VCOUNT hook
+	    the reader ran on about 8% of frames and achievements still fired.
+	*/
+	lines = 0;
+	if (frameSkip) {
+		frameSkip--;
+	} else {
+		u16 room;
+
+		startLine = RA_VCOUNT;
+		room = (startLine >= RA_VBLANK_FIRST_LINE)
+		       ? (u16)(RA_SCANLINES_PER_FRAME - startLine)
+		       : 0;
+		if ((u8)room > roomMax) {
+			roomMax = (u8)room;
+		}
+
+		if (!ra_rc_frame_fits(linesLastRun, (u8)room, starve)) {
+			/* Not enough blanking left this frame to hold what the last one cost. */
+			if (starve < 255) {
+				starve++;
+			}
+		} else {
+			starve = 0;
+
+			ra_rc_step(ra_rc_frame_step, snapshot);
+			lines = (RA_VCOUNT - startLine + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
+
+			if (lines > 255) {
+				lines = 255;
+			}
+			linesLastRun = (u8)lines;
+			if ((u8)lines > linesMax) {
+				linesMax = (u8)lines;
+			}
+
+			/*
+			    Advance to the next slice, and divide the set further if this one did not fit.
+
+			    linesLastRun is thrown away on a change of rcParts rather than scaled: what a
+			    smaller slice will cost is exactly the thing that cannot be predicted from a
+			    larger one, and a zero is already defined everywhere here as "not measured, so
+			    run" -- which is what makes the next frame a measurement instead of a refusal.
+			    Convergence is one frame per step and there are at most seven.
+			*/
+			rcSlice = (u8)((rcSlice + 1) % rcParts);
+			{
+				const u8 want = ra_rc_frame_parts(rcParts, (u8)lines, (u8)room);
+
+				if (want != rcParts) {
+					rcParts = want;
+					rcSlice = 0;
+					linesLastRun = 0;
+				}
+			}
+
+			/*
+			    Sit out enough frames that the average lands inside the room we had. Kept
+			    alongside the gate above rather than replaced by it: the gate stops the
+			    overruns nobody had to take, and this pays back the ones starvation forced.
+			*/
+			frameSkip = ra_rc_frame_skip(lines, room);
+			if (frameSkip > frameSkipMax) {
+				frameSkipMax = frameSkip;
+			}
+		}
 	}
 
 	rcStage = RA_RC_FRAME;
@@ -1434,5 +1775,9 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	snapshot->rcPeeksRejected = peeksRejected;
 	snapshot->rcLines         = (u8)lines;
 	snapshot->rcLinesMax      = linesMax;
+	snapshot->rcRoomMax       = roomMax;
+	snapshot->rcParts         = rcParts;
+	snapshot->rcMemrefLines   = memrefLinesMax;
+	snapshot->rcMemrefMin     = memrefLinesMin;
 	snapshot->rcEvents        = (u8)((eventCount > 255) ? 255 : eventCount);
 }

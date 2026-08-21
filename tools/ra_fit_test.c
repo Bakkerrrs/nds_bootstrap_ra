@@ -45,6 +45,8 @@
 
 #include "rc_runtime.h"
 #include "rc_error.h"
+/* For the memref list walk below -- rc_memrefs_t is not in the public headers. */
+#include "rcheevos/rc_internal.h"
 #include "locations.h"
 
 /*
@@ -145,6 +147,28 @@ void* calloc(size_t count, size_t size) {
 	return p;
 }
 
+/*
+    A counting peek, so the same set that is measured for memory is measured for *traffic*.
+
+    Hardware said the memref pass costs 47 of the 70 available scanlines and that ra_rc_peek() was
+    called 237 times in a frame -- roughly 845 ARM9 cycles per read for a translate, a range check
+    and a load, which is an order of magnitude more than that code can spend. Reading it did not
+    explain it and neither did the instruction cache, which turned out to be on already. So the next
+    thing to establish is the denominator: how many reads a real set actually makes, split between
+    the memref pass and trigger evaluation, on a set whose hardware cost is also known.
+
+    Returns a value that changes every call. A constant would leave every delta at zero and every
+    trigger permanently in the same state, which is not the traffic a running game produces.
+*/
+static long peeks;
+static unsigned peekTick;
+
+static unsigned counting_peek(unsigned address, unsigned numBytes, void* ud) {
+	(void)ud;
+	peeks++;
+	return (address + peekTick) & ((numBytes >= 4) ? 0xFFFFFFFFu : ((1u << (numBytes * 8)) - 1));
+}
+
 static int failures;
 
 #define CHECK(cond) do { \
@@ -165,6 +189,10 @@ static int failures;
     packet boundary would produce 55 valid definitions and no complaint anywhere.
 */
 #define RA_SET_DEFINITIONS 56
+
+static void discarding_event_handler(const rc_runtime_event_t* e) {
+	(void)e;
+}
 
 int main(void) {
 	static char  text[CARDENGINEI_ARM9_RA_DEFS_MAX];
@@ -243,6 +271,72 @@ int main(void) {
 	}
 	CHECK(activated == RA_SET_DEFINITIONS);
 	CHECK(refused == 0);
+
+	/*
+	    What one frame of this set costs in reads, which is the denominator the hardware timing had
+	    to be divided by and did not have. Measured on the same runtime the arena figures come from.
+	*/
+	printf("\nand what one frame of it asks of memory\n");
+	{
+		long memrefPeeks, framePeeks;
+
+		peeks = 0;
+		peekTick = 1;
+		rc_update_memref_values(runtime.memrefs, counting_peek, NULL);
+		memrefPeeks = peeks;
+
+		peeks = 0;
+		peekTick = 2;
+		rc_runtime_do_frame(&runtime, discarding_event_handler, counting_peek, NULL, NULL);
+		framePeeks = peeks;
+
+		/*
+		    And how many entries the loop actually walks, which is the assumption the whole cycle
+		    arithmetic rested on and which nothing had checked. rc_update_memref_values() steps over
+		    every memref in the list and only calls peek for those whose value has a type -- so the
+		    iteration count and the read count are not the same number, and if they differ by an
+		    order of magnitude then 845 cycles per *read* is really a much smaller figure per *entry*.
+		*/
+		{
+			const rc_memref_list_t* list = &runtime.memrefs->memrefs;
+			long entries = 0, typed = 0, modified = 0;
+
+			do {
+				unsigned k;
+
+				for (k = 0; k < list->count; k++) {
+					entries++;
+					if (list->items[k].value.type != RC_VALUE_TYPE_NONE) {
+						typed++;
+					}
+				}
+				list = list->next;
+			} while (list);
+
+			{
+				const rc_modified_memref_list_t* mlist = &runtime.memrefs->modified_memrefs;
+
+				do {
+					modified += mlist->count;
+					mlist = mlist->next;
+				} while (mlist);
+			}
+
+			printf("        memref list    %ld entries, %ld typed, %ld modified\n",
+			       entries, typed, modified);
+		}
+		printf("        memref pass    %ld reads\n", memrefPeeks);
+		printf("        whole frame    %ld reads (%ld in trigger evaluation)\n",
+		       framePeeks, framePeeks - memrefPeeks);
+		/*
+		    The memref pass is where nearly all of it should be: rcheevos updates every memref once
+		    per frame and conditions then read the updated values rather than memory. A trigger-side
+		    count of the same order would mean the definitions are full of AddAddress indirection,
+		    which is read at evaluation time and would put the cost somewhere else entirely.
+		*/
+		CHECK(memrefPeeks > 0);
+		CHECK(framePeeks >= memrefPeeks);
+	}
 
 	printf("\nand the whole set fits the arena\n");
 	{

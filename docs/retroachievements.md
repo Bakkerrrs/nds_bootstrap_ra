@@ -7299,6 +7299,45 @@ what the rules say about when it may be sent.
 
 ## The reader spends too much of the game's VBlank, and two games say so
 
+### The outcome first, because the sections below are the archaeology
+
+*Chrono Trigger* went from **unplayable to playable** on this fork. It froze on entering Leene
+Square — always, at the same screen, with no menu involved — and it now passes it and continues into
+the story. The world-map tearing that came with it is down to what the official release does, and
+the character-text region that trembled with Crono low on screen is legible. That is a compatibility
+gain on a game this fork previously could not run, and it was won by measurement rather than by
+guessing: every step below is a number read off a 3DS with the RAM viewer.
+
+**What it cost:** one setting, self-tuning, and a documented reduction in how often a trigger is
+looked at. Nothing was disabled, no achievement is lost, and no other game changed.
+
+**What was learned, in the order it was learned, and three of the five were wrong:**
+
+| Step | Claim | Verdict |
+| --- | --- | --- |
+| 1 | The reader overruns the game's blanking period | **right** — and `raRearmVBlank()` returning early removed both symptoms with the binary still staged, so memory was exonerated and execution was the cause |
+| 2 | Throttle it: skip frames to pay back an overrun | **half right** — cured the freeze, left the tearing. Skipping lowers the average and leaves the peak, and a tear is a one-frame event |
+| 3 | Then the peak has to fit: `rcLinesMax` 101 against `rcRoomMax` 70 | **right, and it ended the whole approach** — 70 of a possible 71 means the game leaves nearly all its blanking and the work still needs 40% more than the console has |
+| 4 | So divide the set: evaluate the trigger loop in slices | **right, and it is the fix** — `rcLines` 58 of 70, and the picture came back |
+| 5 | The remaining cost is 845 cycles per memory read, so the window must be executing uncached | **wrong twice over** — `raMpuBits` 0xD9 said the window was already both instruction- and data-cached, and `rcMemrefMin` 45 of 47 said the bus was not stalling either |
+| 6 | ...and the 845 was a bad division | **the real answer** — the memref pass walks 3.5× more entries than it reads, most of them arithmetic rather than memory, and per *entry* the cost is an ordinary 239 cycles |
+
+Step 6 is why this stops here rather than continuing. There is no anomaly and therefore no large win
+waiting: the reader is doing a great deal of work at a normal speed, and the only lever is to do less
+of it per frame, which is exactly what step 4 does.
+
+**Three things a future reader should take from this rather than from any one section:**
+
+- **The cost of a set is its memrefs, not its achievements.** Contra 4's 45 definitions read 69
+  addresses and have never torn on any build, in any test. Chrono Trigger's 98 read 237 and broke the
+  game. A hundred simple definitions are cheaper than fifty full of `AddSource` arithmetic.
+- **A snapshot field that is a running maximum can describe a configuration that no longer exists.**
+  `rcLinesMax` said 100 for a whole session after the tuner had brought the real cost to 58, and it
+  was read as evidence of failure once. `rcLines` was the field that was telling the truth.
+- **A short negative on a probabilistic failure is not a negative** — the lesson the menu-freeze
+  bisect below cost, and the reason every verdict in the table above is a number rather than an
+  impression.
+
 **Confirmed.** Two symptoms, one cause, and it is ours.
 
 *Chrono Trigger* freezes on entering Leene Square — always, at the same screen, with no menu
@@ -7364,20 +7403,462 @@ this project shipped for a while without noticing a missed unlock.
 What it does cost is latency on a notification, measured in tens of milliseconds, which nobody can
 perceive.
 
-### The fix, not yet built
+### The fix: the frame budget is what is left of blanking, measured
 
-Cap the steady-state frame the way init is capped, and make it self-tuning rather than configured:
-measure what the evaluation cost, and if it exceeded the budget, sit out proportionally many frames
-before the next one. A cheap set runs every frame and is unaffected; an expensive set runs every
-second or third frame and stops stealing the game's time.
+The steady-state frame is capped the way init already is, and **the budget is not a constant**. It
+is how much blanking is actually left when the evaluation starts:
 
-Skipping whole frames rather than splitting the set matters: rcheevos updates its memrefs and
-evaluates its triggers in one call, and a set half-evaluated on one frame and half on the next would
-give delta operators two different notions of "previous". Skipping is just a lower sample rate,
-which is the case already proven above.
+```c
+startLine = RA_VCOUNT;
+room = (startLine >= RA_VBLANK_FIRST_LINE) ? RA_SCANLINES_PER_FRAME - startLine : 0;
+```
 
-One hazard to respect when it is written: this binary's `.bss` is never zeroed, so a skip counter
-must be initialised where the rest of the state is, not left to whatever the window held.
+That matters because the reader is chained *after* the game's own VBlank handler, so what remains
+depends on what the game just did. Measuring the room rather than assuming it is what makes this
+right on a game nobody has tested — which, given the two games that exposed this, is the case that
+counts.
+
+`ra_rc_frame_skip(lines, room)` then says how many frames to sit out so the average lands inside that
+room. A set costing less than the room is never throttled at all, which is why Contra 4 is
+unaffected: 28–31 against 71.
+
+**Whole frames are skipped, never a partial set.** `rc_runtime_do_frame()` updates every memref and
+evaluates every trigger in one call, so half a set on this frame and half on the next would hand the
+delta operators two different notions of "previous". Skipping is only a lower sample rate, and the
+8% figure above is this project's own evidence that it is survivable.
+
+Three things the writing of it turned up:
+
+- **A cost of zero must never throttle**, whatever the room says. Work that consumed no measurable
+  scanline cannot have overrun anything. This is not a nicety: on a host `RA_VCOUNT` never advances,
+  so every frame measures free, and the first version — which throttled to the floor whenever `room`
+  was zero — silently stopped the suite's own frame ticks from evaluating. One test caught it.
+- **The decision is a pure function**, for the reason `ra_queue.c` is pure: the arithmetic is the part
+  with the logic and the part a host can check, while the thing it depends on is the one thing a host
+  does not have. The suite drives `ra_rc_frame_skip()` directly.
+- **`.bss` needs no ceremony after all.** An earlier note here warned that a skip counter would have
+  to be initialised by hand. It does not: `ra_startup()` zeroes this binary's `.bss` on its first
+  call, which is the same guarantee `stateMagic` already depends on in `cardengine.c`.
+
+The floor is `RA_RC_FRAME_SKIP_MAX = 3` — evaluation at worst every fourth frame, about 15 Hz —
+bounding the throttle rather than the cost so a pathological reading cannot stall detection for
+seconds.
+
+### Hardware: half of it worked, and the half that did not was predictable
+
+| Symptom | Before the throttle | After |
+| --- | --- | --- |
+| Leene Square | freezes, every time | **passable** — play continues past it and further into the story |
+| World map | tears | **still tears** |
+| Character text region, Crono low on screen | trembles | still trembles |
+
+The freeze is gone and the visual artefacts are not, and that split is not bad luck — it follows from
+what a reactive throttle is. **Skipping frames lowers the average cost and leaves the peak exactly
+where it was.** The frame that does run still spills past line 262 by however much it always did; the
+only thing that changed is how often. Cumulative starvation is an average problem, so Leene Square
+was cured. A tear is a single-frame problem, so it was not: it went from every frame to one frame in
+four, and one frame in four is what a visible periodic wobble is made of.
+
+The trembling text region deserves its own line because it was reported as **pre-existing on the RA
+build** rather than introduced here, and it is the same shape as the tearing: *Chrono Trigger* draws
+character text two different ways depending on where the main character stands, and the placement
+that trembles is the one whose split lands late. A raster split arriving on the wrong scanline is
+what a late interrupt looks like.
+
+### The gate: decide before the work, not after it
+
+`ra_rc_frame_skip()` answers "how much do I owe for what I just did". The question it cannot answer is
+"should I have done it", and that is the one the peak needs. `ra_rc_frame_fits()` is asked first:
+
+```c
+static u8 ra_rc_frame_fits(u8 cost, u8 room, u8 declined) {
+	if (cost == 0)                              return 1;
+	if (declined >= RA_RC_FRAME_STARVE_MAX)     return 1;
+	return (room >= cost) ? 1 : 0;
+}
+```
+
+`room` is measured this frame, as before. `cost` is **the last evaluation's cost, not `linesMax`** —
+and that choice is the one that keeps this from starving. `linesMax` is raised for good by a single
+expensive frame, such as the one where a trigger fires and its events are delivered, so predicting
+from a high-water mark would decline every ordinary frame for the rest of the session.
+
+Both escapes are load-bearing:
+
+- **A cost of zero always runs**, for the same reason it never throttles: nothing has been measured
+  yet, or the work is free. This is also the case the host suite runs in, where `RA_VCOUNT` never
+  advances and both inputs are zero forever.
+- **Starvation always runs.** `RA_RC_FRAME_STARVE_MAX = 16`, so a game whose own handler never leaves
+  room still gets an evaluation about every seventeenth frame — 3.7 Hz at worst, against the 8% of
+  frames the old VCOUNT hook shipped on without missing an unlock. A reader that never evaluates is a
+  worse bug than a visible one, and the floor is where that gets decided rather than left to a game.
+
+The reactive throttle stays alongside it. The gate stops the overruns nobody had to take; the throttle
+pays back the ones starvation forced.
+
+### `rcRoomMax` is the number that says whether this can work at all
+
+One byte, at `+0x87`, taking the reserved byte that has been sitting there since the struct was
+written — so no offset moves and the hardware checklist stays valid. It is the most blanking the
+reader has ever found still unspent when its turn came, and it is read **against `rcLinesMax`**:
+
+- `rcRoomMax` comfortably above `rcLinesMax` — there are frames with room to spare, and declining
+  the rest costs nothing but sample rate. The gate is the whole fix.
+- `rcRoomMax` at or below `rcLinesMax` — no frame in the session could hold the work. Then only
+  starvation-forced runs ever happen, the artefacts thin out by 16× rather than vanishing, and the
+  thing left to attack is the cost itself rather than the schedule.
+- `rcRoomMax` **zero** — every evaluation began outside the blanking period, meaning the game's own
+  VBlank handler had already run past line 262 before ours started. That is the worst reading
+  available here, and it is a reading rather than a missing measurement.
+
+Which of the three *Chrono Trigger* gives is the next thing worth knowing, and the RAM viewer can
+answer it directly: `rcLinesMax` at `+0x85`, `rcRoomMax` at `+0x87`, adjacent bytes in the snapshot.
+
+### Hardware: `rcLinesMax` 101, `rcRoomMax` 70 — and that ends the scheduling approach
+
+Read off the snapshot on *Chrono Trigger*'s world map, at `0x027FEA85` and `0x027FEA87`:
+
+| Field | Offset | Value |
+| --- | --- | --- |
+| `rcLinesMax` | `+0x85` | **101** of 263 |
+| `rcRoomMax` | `+0x87` | **70** of 71 |
+| `rcActivated` | `+0x99` | 98 definitions |
+| `rcInitLines` | `+0x6F` | 249 — the slowest single activation |
+| `rcInitTotal` | `+0x9E` | 3,487 scanlines, 13 frames to parse the set |
+
+**70 of a possible 71.** The blanking period is 71 scanlines and the reader found 70 of them
+unspent, so the game's own VBlank handler returns almost immediately and leaves the reader
+essentially all of it. There was no room being stolen and none to reclaim: the third bullet above
+is the reading, and it is the bad one.
+
+The work needs **101 lines against a hardware ceiling of 71** — 40% more than the console has, on
+the reader's *best* frame. That is not a schedule that was chosen badly. No gate, no throttle and no
+skip counter can place 101 lines inside 71, because the budget is not a policy: it is how many
+scanlines a Nintendo DS frame spends not drawing. Everything above this section was solving the
+wrong problem correctly.
+
+And it is not a *Chrono Trigger* quirk. Contra 4's 45 definitions cost 67 lines and this set's 98
+cost 101, so the cost tracks the set size, and any set past roughly seventy definitions is over the
+ceiling on any game. Contra 4 has never torn on any build because it is the last size that fits.
+
+### The fix: divide the set, not the calendar
+
+`rc_runtime_do_frame()` is a memref pass followed by a loop over every trigger. The loop is now
+divided:
+
+```c
+if (parts > 1 && ((u32)i % parts) != slice)
+	continue;
+```
+
+**Reimplemented in `ra_rcheevos.c` as `ra_rc_do_frame_slice()`, not patched into rcheevos** — and the
+first version of this was patched into rcheevos, which was wrong for a structural reason worth
+recording. **rcheevos is a submodule**, pinned at RetroAchievements' own v12.4.0 (`2ad0b867`). The
+parent repository records a gitlink, not the files, so an edit to the submodule's working tree
+belongs to no commit this project can make: it builds on the machine that made it and is absent from
+every fresh clone. The host suite would not have caught it and the release script would not have
+caught it; the only thing that did was the working tree refusing to come clean.
+
+What is lost by not calling upstream's function is the part this fork has no use for. Its loop raises
+nine event types and `ra_rc_event_handler()` acts on exactly one, `ACHIEVEMENT_TRIGGERED`, counting
+the rest; there are no leaderboards and no rich presence here, so those two loops iterate zero times.
+What is kept is everything that changes behaviour — memrefs updated first, triggers skipped when null
+or holding an invalid memref, `RESET` read back off the trigger rather than treated as a state, and
+events raised only on a real transition.
+
+One narrowing, written down because it changes a snapshot field's meaning: `rcEvents` now counts
+trigger **state transitions** rather than upstream's nine event kinds.
+
+Modulo rather than a contiguous range, so a change of `parts` mid-session cannot leave a band of
+triggers unvisited for a whole cycle.
+
+**Memrefs are updated on every call, and only the trigger loop is divided.** That is the half that
+decides whether this is honest. Each trigger still sees a true one-frame delta whenever it is looked
+at, rather than a stale one from its own last visit — which is more than whole-frame skipping ever
+gave it, since skipping updates no memrefs at all on the frames it sits out. What the division costs
+is sample rate: a trigger is evaluated every `parts` frames. That is the cost this project already
+measured as survivable, when the old VCOUNT hook ran on 8% of frames without missing an unlock.
+
+**An earlier note here rejected this, and the rejection was wrong.** It said splitting a set across
+frames "would hand the delta operators two different notions of previous". Updating every memref
+every frame is what makes that false — per trigger, the split is a lower sample rate and nothing
+else, which is exactly what the throttle already was. The difference is that the split bounds the
+peak and the throttle only bounded the average.
+
+### `rcParts` tunes itself, and reports the one thing left to measure
+
+```c
+static u8 ra_rc_frame_parts(u8 parts, u8 cost, u8 room) {
+	if (parts == 0)          parts = 1;
+	if (cost == 0 || room == 0) return parts;
+	if (cost > room && parts < RA_RC_PARTS_MAX) return (u8)(parts + 1);
+	return parts;
+}
+```
+
+**It only ever rises,** and not for want of ambition. A step down would have to predict what a
+*larger* slice costs, and the cost is not proportional to the slice: `rc_update_memref_values()`
+runs on every call whatever the slice, so a fixed share of every measurement belongs to work that
+dividing cannot reduce. Guessing that share wrong in the optimistic direction is precisely the
+oscillation this exists to end. Rising only is monotone, converges in at most seven frames, and a
+spurious step costs sample rate rather than correctness.
+
+`linesLastRun` is thrown away on a change of `parts` rather than scaled, for the same reason: what a
+smaller slice will cost is the thing that cannot be predicted from a larger one. Zero already means
+"not measured, so run" everywhere in this file, so the next frame is a measurement instead of a
+refusal, and convergence is one frame per step.
+
+**And it removes a hardware round-trip.** The open question was how much of the 101 lines is the
+memref pass, since that share cannot be divided — and `rcParts` at `+0x69` answers it without
+anyone measuring it separately:
+
+- **1** — nothing was divided; the set fits whatever the game leaves. Every game before this one.
+- **2 to 7** — the reader found a division that fits. The memref share is small and the fix holds.
+- **8 (`RA_RC_PARTS_MAX`) with `rcLinesMax` still above `rcRoomMax`** — the memref pass alone does
+  not fit, no division of the triggers ever will, and the next thing to attack is the peek path.
+
+Eight is the floor on sample rate rather than a guess: a trigger visited every eighth frame is
+7.5 Hz, against the one-in-twelve this project shipped on without missing an unlock.
+
+### Hardware: it fits now, and `rcLinesMax` is the field that lies about it
+
+Two readings, world map and Leene Square, same session:
+
+| Field | Offset | World map | Leene Square |
+| --- | --- | --- | --- |
+| `rcParts` | `+0x69` | **8** | 8 |
+| `rcLines` | `+0x84` | **58** | 60 |
+| `rcLinesMax` | `+0x85` | 100 | 100 |
+| `rcRoomMax` | `+0x87` | 70 | 70 |
+| `rcPeeks` | `+0x7C` | 237 | 237 |
+
+On screen: the world-map tearing down to roughly what the official release does, and the text region
+trembling slightly but legible.
+
+**`rcLines` 58 against `rcRoomMax` 70 is the reading that matters, and it fits.** `rcLinesMax` still
+says 100 because it is a running maximum that is never reset — so it is reporting a frame from before
+the tuner converged, when the set was still being evaluated whole. Against the interpretation written
+one section above, "pinned at `RA_RC_PARTS_MAX` with `rcLinesMax` still above `rcRoomMax`" is
+therefore *not* the reading it claimed to be: the ceiling is reached, and the work fits anyway.
+`rcLinesMax` describes a configuration that is no longer in force.
+
+### What the numbers say the cost is made of
+
+`rcParts` 8 costing 58, and the undivided set costing 101, give the split:
+
+```
+fixed + variable/1 = 101      ->  variable ≈ 48   (the trigger loop, divisible)
+fixed + variable/8 =  58      ->  fixed    ≈ 53   (the memref pass, not divisible)
+```
+
+**Three quarters of the budget is the fixed term.** `rc_update_memref_values()` runs on every call
+whatever the slice, so 53 of the 70 available scanlines are spent before a single trigger is looked
+at, and dividing the trigger list can only ever recover the other 48. That is why `rcParts` 8 wins so
+little over `rcParts` 4, and it is the ceiling on this whole approach.
+
+It also gives a figure that looked alarming and turned out to be a bad division: 237 peeks in ~53
+scanlines reads as ~950 ARM9 cycles per memory read, and the section on the memref pass below shows
+why that denominator is the wrong one — the pass walks about 3.5× more entries than it reads — a translate, a range check and a load. Nothing in `ra_rc_peek()`,
+`ra_readable()` or `ra_read()` accounts for two orders of magnitude more than that costs. The same
+ratio shows up in the trigger loop: 48 scanlines for 98 definitions is ~2,000 cycles each. Both
+halves are uniformly slow by a similar factor, which points at how the code executes rather than at
+what it does — this binary runs from DSi WRAM at `0x03740000`, a region a DS game's own MPU setup has
+no reason to have marked cacheable. **That is the next lever, and it is a much bigger one than
+slicing:** an instruction cache over a region we load once and never write is a safe change, and a
+3–5× cut would take the whole per-frame cost to about 25 scanlines and end this section.
+
+`rcMemrefLines` at `+0x25` measures the fixed term directly rather than inferring it from two
+whole-frame readings on two different games. It takes one of the three bytes reserved there, because
+the bytes next to `rcLinesMax` are spent; no existing offset moves.
+
+**The parts tuner is left exactly as it is on purpose.** It is a ratchet — it converges during the
+noisiest frames of the session, which is boot, where `rcInitTotal` says the parse alone spans 13
+frames, and it can never come back down. Tuning against `rcRoomMax` instead of the frame's own room
+would settle *Chrono Trigger* at 3 by the arithmetic above, which is 69 scanlines against 70: the
+honest optimum and no margin at all. `rcParts` 8 costs 58 and has eleven lines to spare, and what it
+buys with them — a picture at the level of the official release — is worth more than the difference
+between visiting a trigger at 7.5 Hz and at 20 Hz. A confirmed-good result is not worth trading for
+a computed one. The ratchet gets revisited when the fixed term comes down, because that is when the
+numbers change.
+
+### Hardware: `rcMemrefLines` = 47, and that closes the slicing question
+
+Read on both screens of the same session, identical in each: `rcMemrefLines` **47**, `rcParts` 8,
+`rcLines` 58, `rcRoomMax` 70.
+
+The inference above said ~53 from two whole-frame readings on two different games; measured directly
+it is 47. Close enough to leave the conclusion standing and precise enough to end the argument:
+
+| Term | Scanlines | Divisible |
+| --- | --- | --- |
+| memref pass | **47** | no — runs on every call, whatever the slice |
+| trigger loop, whole | ~50 | yes |
+| in force at `rcParts` 8 | **58** of 70 | — |
+
+**67% of the budget cannot be divided.** `rcParts` 8 already spends only 11 scanlines on triggers, so
+doubling to 16 would save five and halve the detection rate for them. There is nothing left in
+slicing. The approach is finished, it worked, and this is where it stops.
+
+What that costs, stated plainly rather than left implicit: a trigger is visited every eighth frame,
+so a hit-count condition counts eight times slower and a transient state a `ResetIf` or `PauseIf`
+wanted to see can pass between visits. Nothing is lost from the queue and no unlock is dropped — the
+precedent for a low sample rate is this project's own 8% of frames — but "hold this for 300 frames"
+becomes 2,400, and that is a real behavioural change rather than a free win.
+
+Which is the argument for the cache lead, and it is now the only lever left with a large number
+behind it: 47 scanlines for 237 reads is ~840 ARM9 cycles each. If executing this binary cached takes
+that down by 3–5×, the whole per-frame cost lands near 15 scanlines, `rcParts` goes back to 1, and
+every caveat in the paragraph above disappears with it.
+
+## The reader may be executing uncached, and one bit would say so
+
+Two unrelated halves of the work being slow by the same factor is not a property of what the code
+does. It is a property of how it runs. This binary executes from DSi WRAM at `0x03740000`, and a DS
+game's own MPU setup has no reason to have marked that region cacheable — on a retail DS there is
+nothing there at all.
+
+### Instruction cache only, and the asymmetry is the whole safety argument
+
+Cacheability on the ARM946 is per MPU region, and the region that happens to cover `0x03740000` may
+cover a great deal more: the I/O registers at `0x04000000`, and the ROM cache immediately below us at
+`0x03700000` which the card DMAs into. **A data cache over either of those is fatal** — `VCOUNT`
+would stop advancing, and cached ROM would go stale under the DMA that filled it.
+
+An *instruction* cache over exactly the same region is inert. Nothing is ever fetched for execution
+from an I/O register or from a ROM cache line. Only code is fetched, and the only code in this region
+is ours: written once by the bootloader before we ever run, and never modified afterwards. So the
+instruction bit can be set on a region that the data bit must never touch, and that is why this
+change is available at all.
+
+### And it declines the one region it must not touch
+
+If the winning region for our address also spans `0x02000000`, it governs how the **game's** code is
+fetched. nds-bootstrap's own MPU patch can produce exactly that — it widens a region to `PAGE_128M`
+at base 0 — and a loader that DMAs overlays into main RAM is the last program that should have an
+instruction cache switched on underneath it. In practice such a region already has the bit set,
+because no DS game gives up its instruction cache. Either way the decision belongs to a measurement,
+so `ra_icache_claim()` reports that case and leaves it alone.
+
+### `raMpuBits`, at `+0x26`
+
+One byte, taking a reserved one so no offset moves, and it is a report rather than a boolean because
+there are four ways this comes back and three of them mean something different has to be tried:
+
+| Bit | Meaning |
+| --- | --- |
+| 0–2 | the winning MPU region for `0x03740000` |
+| `0x08` | that region also covers main RAM, so it was left alone |
+| `0x10` | the region was **already** instruction-cacheable |
+| `0x20` | it was not, and this turned it on |
+| `0x40` | the instruction cache is enabled globally in CP15 `c1` |
+| `0x80` | the region is data-cacheable too — informational |
+| `0xFF` | no enabled region covers the window at all |
+
+**Read bit `0x40` first.** A per-region cacheability bit does nothing while the cache itself is off,
+so a clear bit 6 makes every other bit here moot and sends the whole diagnosis somewhere else.
+
+The two decisions are pure functions — `ra_mpu_region_pick()` over the eight raw region registers and
+`ra_mpu_report()` over the three CP15 words — for the reason `ra_rc_frame_skip()` is one: the
+arithmetic is the part with the logic and the coprocessor read is the part a host does not have. The
+suite drives both directly, including the case that would have been a real bug: a size field of 31 is
+the whole address space, and `1u << 32` is undefined.
+
+### Hardware: `raMpuBits` = 0xD9. The cache was never off.
+
+| Bit | Value | Meaning |
+| --- | --- | --- |
+| 0–2 | 1 | region 1 wins for `0x03740000` |
+| `0x08` | set | it also covers main RAM, so it was left alone |
+| `0x10` | **set** | it was **already** instruction-cacheable |
+| `0x20` | clear | nothing was changed |
+| `0x40` | set | the instruction cache is enabled globally |
+| `0x80` | set | the region is data-cacheable too |
+
+`rcMemrefLines` still 47, which is exactly right: nothing was changed, so nothing moved.
+
+**The hypothesis is dead, and cleanly.** The window is not merely instruction-cached — it is
+data-cached as well, because nds-bootstrap's own MPU patch widens region 1 to reach from main RAM
+through `0x03740000`, and that region is fully cacheable. There was never an uncached window to fix.
+The ~845 cycles per read is what this code costs *with* both caches on.
+
+`ra_icache_claim()` stays. It reports, it declines the dangerous case, and on a game whose MPU puts
+our window in a region of its own with the bit clear it would still do something. On the measured
+configuration it does nothing at all, which is the useful thing to have written down.
+
+### So the cost is the read itself, and two games now agree on the rate
+
+The host measures what the arena measurement never asked: **69 reads** for Contra 4's 56-definition
+set, all of them in the memref pass and *none* in trigger evaluation. Put beside the two hardware
+timings, one rate explains both:
+
+| | reads | rate | memref pass | remainder |
+| --- | --- | --- | --- | --- |
+| Chrono Trigger | 237 | 845 cyc/read | **47 lines** (measured) | — |
+| Contra 4 | 69 | 845 cyc/read | 13.7 lines | 53 lines for 1,946 conditions = **117 cyc each** |
+
+117 cycles per condition is a sane figure for evaluating a condition. 845 cycles for a translate, two
+range checks and a load is not — and `ra_rc_translate()` is four instructions, `ra_readable()` two
+comparisons, `ra_read()` a compare and a load. The code is not where it goes.
+
+One candidate was the bus: scattered main RAM addresses are cache line fills on the external bus,
+taken from inside VBlank where a DS game's DMA channels are moving VRAM and OAM and hold that bus.
+
+### `rcMemrefMin` 45 against `rcMemrefLines` 47 kills that, and the denominator was wrong
+
+Stable to 4% over a play session. Bus contention varies with what the game is transferring;
+deterministic arithmetic does not. **It is fixed work.**
+
+And then the host counted the thing the whole calculation had assumed. For Contra 4's set:
+
+```
+memref list    68 entries, 68 typed, 173 modified
+memref pass    69 reads
+```
+
+**The pass walks 241 entries and reads 69 of them.** `rc_update_memref_values()` has two loops, and
+only the first does reads. The second walks `modified_memrefs` and calls
+`rc_get_modified_memref_value()`, which does no memory access at all in the common case — it
+evaluates two operands, converts types and combines them. That is where `AddSource`, `SubSource`,
+`AddAddress` and the arithmetic operators live.
+
+On the ARM9 that arithmetic is not cheap. There is **no integer divide instruction**, so an operator
+of `/` or `%` is a libgcc call of a few hundred cycles; `rc_typed_value_t` carries a float variant, and
+there is no FPU either, so any definition using a float promotes the whole combine into soft-float.
+
+Redone with the real denominator, scaling Contra 4's ratio onto Chrono Trigger's 237 reads:
+
+| | entries walked | reads | cycles per entry |
+| --- | --- | --- | --- |
+| Contra 4 | 241 | 69 | — |
+| Chrono Trigger | ~839 | 237 | 47 lines → **~239** |
+
+**239 cycles for two operand evaluations, a type conversion and a combine is a normal number.** There
+was never a 20× anomaly. The reader is doing a great deal of work at an ordinary rate, and the whole
+"845 cycles per read" figure was an artefact of dividing the pass's cost by the wrong count — reads
+instead of entries.
+
+### Which closes the investigation, and makes slicing the fix rather than a workaround
+
+Three hypotheses, all dead, and each died to a measurement rather than an argument: the window was
+never uncached (`raMpuBits` 0xD9), the bus is not the bottleneck (`rcMemrefMin` 45 of 47), and the
+per-entry cost is not anomalous (239 cycles for what that entry does). There is no large win sitting
+here. The cost is the work.
+
+So there is nothing left to make cheaper, only less of it to do per frame — which is what `rcParts`
+already does. Note precisely what it does and does not reach: slicing divides the **trigger loop**,
+which is why the measured total is 47 fixed plus 11 for triggers. The dominant term is untouched by
+it, because every memref and every modified memref is updated on every call.
+
+**And slicing the memref pass as well is not available, for a reason worth writing down.** Whole-frame
+skipping was uniform: everything went stale by the same amount, so a trigger comparing two addresses
+still compared two values sampled at the same instant. Per-memref slicing is not uniform. A trigger
+in slice *k* would read some addresses updated this frame and others up to eight frames old, and a
+condition comparing two of them would be comparing different moments. That is a correctness change,
+not a sample-rate change, and it is the line this project has not crossed anywhere else.
+
+The number to watch for a future set is therefore **not the achievement count** — it is the count of
+memrefs and modified memrefs, which is what `rcPeeks` and the host's list walk report. A set of a
+hundred simple definitions is cheaper than fifty full of `AddSource` arithmetic.
 
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
@@ -7554,6 +8035,17 @@ and a player who uses the in-game menu heavily will meet it sooner here than on 
       its own, and `raWifiSubmitOne()` lost its config parameter to the change. Cost: the
       TWL-SDK ARM7 is down to 60 bytes of link margin. **Built and host-tested; not yet
       confirmed on hardware.**
+- [x] **Chrono Trigger runs** — **confirmed on hardware**, and it is a compatibility gain rather
+      than an RA feature. It froze on entering Leene Square, every time, with no menu involved; it
+      now passes it and continues into the story, the world-map tearing is down to what the official
+      release does, and the character-text region is legible. The reader's per-frame evaluation was
+      overrunning the game's blanking period — `rcLinesMax` 101 against a hardware ceiling of 71 —
+      and the fix is to evaluate the trigger loop in self-tuning slices (`rcParts`) rather than to
+      schedule work that fits no schedule. Three hypotheses died to measurements on the way: the
+      window was never uncached (`raMpuBits` 0xD9), the bus was not stalling (`rcMemrefMin` 45 of
+      47), and the alarming "845 cycles per read" was a division by the wrong count. Cost: a trigger
+      is visited every eighth frame, which is inside the 8% of frames this project already shipped
+      on without missing an unlock. No other game changed, and nothing was disabled.
 - [ ] **Hardcore.** Blocked on nothing in this tree any more, and now measured rather
       than inferred: `h=1` from this client returns `Success:true` and is filed as a
       **softcore** unlock — hardcore score unchanged, `HardcoreUnlocks` empty,

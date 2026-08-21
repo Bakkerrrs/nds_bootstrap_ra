@@ -319,7 +319,57 @@ typedef struct raSnapshot {
 	*/
 	u32 wramTicks;       /* +0x20 */
 	u8  wramState;       /* +0x24  RA_WRAM_*, written by the cardengine */
-	u8  reserved[3];     /* +0x25 */
+	/*
+	    How many scanlines rc_update_memref_values() cost on its own, worst seen -- and it is the
+	    number that says how much of the per-frame cost dividing the set can never touch.
+
+	    The memref pass runs on **every** call whatever the slice, so it is the fixed term in
+	    `cost = rcMemrefLines + (evaluation / rcParts)`. With it measured, the arithmetic stops
+	    being an inference from two whole-frame readings on two different games: the ceiling on what
+	    slicing can achieve is exactly rcMemrefLines, and rcMemrefLines at or above rcRoomMax means
+	    no division of the triggers can ever fit.
+
+	    It lives up here in the reserved bytes rather than beside rcLinesMax because the bytes next
+	    to rcLinesMax are spent. No existing offset moves.
+	*/
+	u8  rcMemrefLines;   /* +0x25  scanlines the memref pass cost alone, worst seen */
+	/*
+	    What ra_icache_claim() found and did, packed into one byte, and the reason it is a report
+	    rather than a boolean is that there are four different ways this can come back and three of
+	    them mean something different has to be tried.
+
+	        bits 0-2  the winning MPU region for 0x03740000
+	        bit 3     0x08  the region also covers main RAM, so it was left alone
+	        bit 4     0x10  that region was already instruction-cacheable
+	        bit 5     0x20  ...it was not, and this turned it on
+	        bit 6     0x40  the instruction cache is enabled globally in CP15 c1
+	        bit 7     0x80  the region is data-cacheable too, which is informational only
+
+	    Plus RA_MPU_SPANS_MAIN_RAM: the winning region also covers 0x02000000, so it governs how the
+	    *game's* code is fetched and this declines to touch it. See the note on ra_icache_claim().
+
+	    Bit 6 clear makes every other bit here moot -- a per-region cacheability bit does nothing
+	    while the cache itself is off -- and it is the first thing to read.
+	*/
+	u8  raMpuBits;       /* +0x26 */
+	/*
+	    The *cheapest* memref pass seen, against rcMemrefLines' worst -- and the pair is one
+	    discriminator rather than two numbers.
+
+	    A read costs ~845 ARM9 cycles, confirmed twice: 237 reads in 47 scanlines on Chrono Trigger,
+	    and Contra 4's 69 reads at the same rate leaving 117 cycles per condition for its 1,946, which
+	    is a sane figure. Nothing in the peek path spends 845 cycles -- a translate, two range checks
+	    and a load -- and the instruction cache was already on. What is left is the read itself: main
+	    RAM, from inside the game's VBlank, where the game's own DMA holds the bus and the CPU gets a
+	    slot when it is given one. The trigger loop is fast because it reads memref values out of
+	    cached DSi WRAM instead, which is not on that bus.
+
+	    So: a min far below the max means the cost is contention and varies with what the game is
+	    transferring, which would make running outside the blanking period the cheaper place to be. A
+	    min equal to the max means it is fixed work and the bus is exonerated. One byte answers it,
+	    and it answers on any play session rather than needing a run of its own.
+	*/
+	u8  rcMemrefMin;     /* +0x27  cheapest memref pass seen, 0 until the first one */
 	/*
 	    The two cells the self-test chains walk. They live here, in main RAM, rather than
 	    in the WRAM binary alongside the watchlist -- because a pointer the chain walker
@@ -346,7 +396,22 @@ typedef struct raSnapshot {
 	u32 heapSize;        /* +0x60 */
 	u32 heapUsed;        /* +0x64 */
 	u8  wramStage;       /* +0x68  RA_STAGE_*, how far it got */
-	u8  reserved2;       /* +0x69 */
+	/*
+	    How many pieces the trigger list is being evaluated in, and it is the field that says whether
+	    dividing the set was enough.
+
+	    1 means the set fits inside whatever blanking the game leaves and nothing was divided -- which
+	    is every game measured before Chrono Trigger. Between 2 and RA_RC_PARTS_MAX means the reader
+	    found a division that fits, and the only cost is that a trigger is visited every N frames.
+
+	    Pinned at RA_RC_PARTS_MAX **while rcLinesMax still exceeds rcRoomMax** is the reading that
+	    matters: rc_update_memref_values() runs on every call whatever the slice, so a share of the
+	    cost cannot be divided at all, and that combination says the share alone does not fit. No
+	    further division would help and the next thing to attack is the peek path.
+
+	    Costs the byte reserved at this offset since the struct was written, so no offset moves.
+	*/
+	u8  rcParts;         /* +0x69  slices the trigger list is evaluated in, 1 = undivided */
 	/*
 	    The deepest excursion rcheevos made on the private stack, in bytes -- and it is the
 	    number that explains why a real achievement set crashed a retail game twice.
@@ -414,7 +479,25 @@ typedef struct raSnapshot {
 	u8  rcLines;         /* +0x84  scanlines rc_runtime_do_frame() cost, last tick */
 	u8  rcLinesMax;      /* +0x85  worst seen, excluding the init frame */
 	u8  rcEvents;        /* +0x86  events of any kind delivered, clamped at 255 */
-	u8  reserved3;       /* +0x87 */
+	/*
+	    The most blanking the reader has ever found still unspent when its turn came, and it is
+	    read *against* rcLinesMax rather than on its own.
+
+	    The reader is chained after the game's own VBlank handler, so what is left is the game's
+	    decision, not ours. That makes this the number that says whether the per-frame cost can be
+	    scheduled around at all: a rcRoomMax comfortably above rcLinesMax means there are frames
+	    with room to spare and declining the others costs only sample rate, while a rcRoomMax at or
+	    below it means no frame in the session could hold the work and the cost itself is the only
+	    thing left to attack.
+
+	    Zero means every evaluation began outside the blanking period -- the game's own handler had
+	    already run past line 262 before ours started -- which is the worst reading available here
+	    and not a missing measurement.
+
+	    Costs the byte that has been reserved at this offset since the struct was written, so no
+	    existing offset moves and the hardware checklist stays valid.
+	*/
+	u8  rcRoomMax;       /* +0x87  blanking left when the reader ran, best seen, of 71 */
 	/*
 	    The allocator, reported separately from the arena. Added after a reading that could
 	    not be diagnosed: rcheevos failed to allocate 32 bytes while heapSize said 189K was
@@ -788,6 +871,22 @@ typedef struct raSnapshot {
 
 #define RA_RC_LOADING     5  /* activating, one per frame; rcActivated says how far */
 #define RA_RC_ACTIVE      6  /* every definition activated and validated */
+/*
+    ra_icache_claim()'s report. See raSnapshot.raMpuBits.
+*/
+#define RA_MPU_REGION_MASK    0x07
+#define RA_MPU_ICACHE_WAS_ON  0x10
+#define RA_MPU_ICACHE_SET     0x20
+#define RA_MPU_ICACHE_GLOBAL  0x40
+#define RA_MPU_DCACHE_ON      0x80
+#define RA_MPU_SPANS_MAIN_RAM 0x08
+/*
+    A sentinel rather than a bit, because "no region covers our window" shares nothing with the
+    other readings and needs no room beside them. Unambiguous: a real report never sets both
+    RA_MPU_ICACHE_WAS_ON and RA_MPU_ICACHE_SET, so 0xFF cannot arise from one.
+*/
+#define RA_MPU_NO_REGION      0xFF
+
 #define RA_RC_FRAME       7  /* rc_runtime_do_frame() has run */
 
 #endif /* RA_H */
