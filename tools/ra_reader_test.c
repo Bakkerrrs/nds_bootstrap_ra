@@ -1210,7 +1210,7 @@ int main(void) {
 		/* Zero either side says nothing, which is the case the host lives in. */
 		CHECK(ra_rc_frame_parts(3, 0, 70) == 3);
 		CHECK(ra_rc_frame_parts(3, 200, 0) == 3);
-		/* A zero parts is 1, because rc_runtime_do_frame_slice() treats it that way too. */
+		/* A zero parts is 1, because ra_rc_do_frame_slice() treats it that way too. */
 		CHECK(ra_rc_frame_parts(0, 0, 0) == 1);
 		/* The floor on sample rate stays inside the 8% of frames the old VCOUNT hook shipped on. */
 		CHECK(RA_RC_PARTS_MAX <= 12);

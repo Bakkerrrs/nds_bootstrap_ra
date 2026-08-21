@@ -7508,14 +7508,30 @@ ceiling on any game. Contra 4 has never torn on any build because it is the last
 divided:
 
 ```c
-if (parts > 1 && ((uint32_t)i % parts) != slice)
-  continue;
+if (parts > 1 && ((u32)i % parts) != slice)
+	continue;
 ```
 
-A local patch to the vendored rcheevos, added as `rc_runtime_do_frame_slice()` with
-`rc_runtime_do_frame()` kept as a wrapper for slice 0 of 1 parts — so rcheevos' own tests and any
-other caller see nothing at all. Modulo rather than a contiguous range, so a change of `parts`
-mid-session cannot leave a band of triggers unvisited for a whole cycle.
+**Reimplemented in `ra_rcheevos.c` as `ra_rc_do_frame_slice()`, not patched into rcheevos** — and the
+first version of this was patched into rcheevos, which was wrong for a structural reason worth
+recording. **rcheevos is a submodule**, pinned at RetroAchievements' own v12.4.0 (`2ad0b867`). The
+parent repository records a gitlink, not the files, so an edit to the submodule's working tree
+belongs to no commit this project can make: it builds on the machine that made it and is absent from
+every fresh clone. The host suite would not have caught it and the release script would not have
+caught it; the only thing that did was the working tree refusing to come clean.
+
+What is lost by not calling upstream's function is the part this fork has no use for. Its loop raises
+nine event types and `ra_rc_event_handler()` acts on exactly one, `ACHIEVEMENT_TRIGGERED`, counting
+the rest; there are no leaderboards and no rich presence here, so those two loops iterate zero times.
+What is kept is everything that changes behaviour — memrefs updated first, triggers skipped when null
+or holding an invalid memref, `RESET` read back off the trigger rather than treated as a state, and
+events raised only on a real transition.
+
+One narrowing, written down because it changes a snapshot field's meaning: `rcEvents` now counts
+trigger **state transitions** rather than upstream's nine event kinds.
+
+Modulo rather than a contiguous range, so a change of `parts` mid-session cannot leave a band of
+triggers unvisited for a whole cycle.
 
 **Memrefs are updated on every call, and only the trigger loop is divided.** That is the half that
 decides whether this is honest. Each trigger still sees a true one-frame delta whenever it is looked

@@ -1476,12 +1476,83 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
     than an asm call to rc_runtime_do_frame() directly, because the callbacks it needs are static
     to this file and the trampoline takes one argument.
 */
+/*
+    rc_runtime_do_frame(), with the trigger loop divided into `parts` slices and only slice `slice`
+    evaluated. Memrefs are updated on every call regardless.
+
+    **Reimplemented here rather than patched into rcheevos, because rcheevos is a submodule** pinned
+    at RetroAchievements' own v12.4.0. A change to its working tree belongs to no commit this project
+    can make: the parent records a gitlink, so the edit would build on this machine and vanish from a
+    fresh clone. The first version of this was exactly that mistake.
+
+    What is lost by not calling upstream's function is the part of it this fork has no use for. Its
+    loop raises nine event types; ra_rc_event_handler() acts on one, RC_RUNTIME_EVENT_ACHIEVEMENT_
+    TRIGGERED, and counts the rest. There are no leaderboards and no rich presence here, so those two
+    loops iterate zero times. What is kept is everything that changes behaviour: memrefs updated
+    first, triggers skipped when null or holding an invalid memref, RESET read back off the trigger
+    rather than treated as a state, and events raised only on a real transition.
+
+    `eventCount` therefore counts state transitions rather than upstream's nine event kinds, which is
+    a narrowing of what raSnapshot.rcEvents means and is why it is written down here.
+
+    Modulo rather than a contiguous range, so a change of `parts` mid-session cannot leave a band of
+    triggers unvisited for a whole cycle.
+*/
+static void ra_rc_do_frame_slice(u8 slice, u8 parts) {
+	rc_runtime_event_t ev;
+	int32_t i;
+
+	if (parts == 0) {
+		parts = 1;
+	}
+
+	rc_update_memref_values(runtime.memrefs, ra_rc_peek, 0);
+
+	ev.value = 0;
+
+	for (i = (int32_t)runtime.trigger_count - 1; i >= 0; --i) {
+		rc_trigger_t* trigger = runtime.triggers[i].trigger;
+		int old_state, new_state;
+
+		if (!trigger || runtime.triggers[i].invalid_memref) {
+			continue;
+		}
+		if (parts > 1 && ((u32)i % parts) != slice) {
+			continue;
+		}
+
+		old_state = trigger->state;
+		new_state = rc_evaluate_trigger(trigger, ra_rc_peek, 0, 0);
+		/*
+		    RESET is a notification rather than a state -- upstream raises an event for it and then
+		    reads the real state back off the trigger. Nothing here consumes the notification, so
+		    only the read-back is kept.
+		*/
+		if (new_state == RC_TRIGGER_STATE_RESET) {
+			new_state = trigger->state;
+		}
+
+		if (new_state == old_state) {
+			continue;
+		}
+
+		if (new_state == RC_TRIGGER_STATE_TRIGGERED) {
+			ev.type = RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED;
+			ev.id   = runtime.triggers[i].id;
+			ra_rc_event_handler(&ev);   /* counts itself */
+		} else {
+			eventCount++;
+		}
+	}
+}
+
 static u8 ra_rc_frame_step(raSnapshot* snapshot) {
 	/*
 	    One slice of the trigger list, and every memref. rcParts is 1 until a measurement raises it,
-	    so on a set that fits inside the game's blanking period this is the call it always was.
+	    so on a set that fits inside the game's blanking period this evaluates everything, every
+	    frame, exactly as rc_runtime_do_frame() did.
 	*/
-	rc_runtime_do_frame_slice(&runtime, ra_rc_event_handler, ra_rc_peek, 0, 0, rcSlice, rcParts);
+	ra_rc_do_frame_slice(rcSlice, rcParts);
 
 	/*
 	    After the frame, not inside the event handler. The handler runs deep inside rcheevos with the
