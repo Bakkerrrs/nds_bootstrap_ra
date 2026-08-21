@@ -838,6 +838,7 @@ int main(void) {
 	/* Took one of the three bytes reserved at 0x25; the bytes beside rcLinesMax are spent. */
 	CHECK(__builtin_offsetof(raSnapshot, rcMemrefLines) == 0x25);
 	CHECK(__builtin_offsetof(raSnapshot, raMpuBits) == 0x26);
+	CHECK(__builtin_offsetof(raSnapshot, rcMemrefMin) == 0x27);
 	CHECK(__builtin_offsetof(raSnapshot, linesMax) == 0x1B);
 	CHECK(__builtin_offsetof(raSnapshot, wramMagic) == 0x1C);
 	CHECK(__builtin_offsetof(raSnapshot, wramTicks) == 0x20);

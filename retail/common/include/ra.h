@@ -352,7 +352,24 @@ typedef struct raSnapshot {
 	    while the cache itself is off -- and it is the first thing to read.
 	*/
 	u8  raMpuBits;       /* +0x26 */
-	u8  reserved;        /* +0x27 */
+	/*
+	    The *cheapest* memref pass seen, against rcMemrefLines' worst -- and the pair is one
+	    discriminator rather than two numbers.
+
+	    A read costs ~845 ARM9 cycles, confirmed twice: 237 reads in 47 scanlines on Chrono Trigger,
+	    and Contra 4's 69 reads at the same rate leaving 117 cycles per condition for its 1,946, which
+	    is a sane figure. Nothing in the peek path spends 845 cycles -- a translate, two range checks
+	    and a load -- and the instruction cache was already on. What is left is the read itself: main
+	    RAM, from inside the game's VBlank, where the game's own DMA holds the bus and the CPU gets a
+	    slot when it is given one. The trigger loop is fast because it reads memref values out of
+	    cached DSi WRAM instead, which is not on that bus.
+
+	    So: a min far below the max means the cost is contention and varies with what the game is
+	    transferring, which would make running outside the blanking period the cheaper place to be. A
+	    min equal to the max means it is fixed work and the bus is exonerated. One byte answers it,
+	    and it answers on any play session rather than needing a run of its own.
+	*/
+	u8  rcMemrefMin;     /* +0x27  cheapest memref pass seen, 0 until the first one */
 	/*
 	    The two cells the self-test chains walk. They live here, in main RAM, rather than
 	    in the WRAM binary alongside the watchlist -- because a pointer the chain walker

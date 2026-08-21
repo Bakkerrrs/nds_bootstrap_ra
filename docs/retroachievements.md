@@ -7723,10 +7723,64 @@ arithmetic is the part with the logic and the coprocessor read is the part a hos
 suite drives both directly, including the case that would have been a real bug: a size field of 31 is
 the whole address space, and `1u << 32` is undefined.
 
-**What to look for.** `raMpuBits` at `0x027FEA26` first — it says which of the four situations this
-is. Then `rcMemrefLines` at `+0x25`: if the bit was set and 47 has not moved, the cache was not the
-reason and the ~840 cycles per read have another cause. And the game itself, because this is the
-first change in this line of work that alters how a running game's code is fetched.
+### Hardware: `raMpuBits` = 0xD9. The cache was never off.
+
+| Bit | Value | Meaning |
+| --- | --- | --- |
+| 0–2 | 1 | region 1 wins for `0x03740000` |
+| `0x08` | set | it also covers main RAM, so it was left alone |
+| `0x10` | **set** | it was **already** instruction-cacheable |
+| `0x20` | clear | nothing was changed |
+| `0x40` | set | the instruction cache is enabled globally |
+| `0x80` | set | the region is data-cacheable too |
+
+`rcMemrefLines` still 47, which is exactly right: nothing was changed, so nothing moved.
+
+**The hypothesis is dead, and cleanly.** The window is not merely instruction-cached — it is
+data-cached as well, because nds-bootstrap's own MPU patch widens region 1 to reach from main RAM
+through `0x03740000`, and that region is fully cacheable. There was never an uncached window to fix.
+The ~845 cycles per read is what this code costs *with* both caches on.
+
+`ra_icache_claim()` stays. It reports, it declines the dangerous case, and on a game whose MPU puts
+our window in a region of its own with the bit clear it would still do something. On the measured
+configuration it does nothing at all, which is the useful thing to have written down.
+
+### So the cost is the read itself, and two games now agree on the rate
+
+The host measures what the arena measurement never asked: **69 reads** for Contra 4's 56-definition
+set, all of them in the memref pass and *none* in trigger evaluation. Put beside the two hardware
+timings, one rate explains both:
+
+| | reads | rate | memref pass | remainder |
+| --- | --- | --- | --- | --- |
+| Chrono Trigger | 237 | 845 cyc/read | **47 lines** (measured) | — |
+| Contra 4 | 69 | 845 cyc/read | 13.7 lines | 53 lines for 1,946 conditions = **117 cyc each** |
+
+117 cycles per condition is a sane figure for evaluating a condition. 845 cycles for a translate, two
+range checks and a load is not — and `ra_rc_translate()` is four instructions, `ra_readable()` two
+comparisons, `ra_read()` a compare and a load. The code is not where it goes.
+
+**What is left is the read itself.** These are main RAM addresses, scattered, so each is a fresh cache
+line fill on the external bus — taken from inside the game's VBlank interrupt, which is exactly when
+a DS game's DMA channels are moving VRAM and OAM and hold that bus. The CPU gets a slot when it is
+given one. And the same explanation says why the trigger loop is fast: it reads updated memref values
+out of cached DSi WRAM, which is not on the contended bus at all.
+
+It also explains, retroactively, why the cost tracks *distinct addresses* rather than conditions, and
+why Contra 4 has never torn on any build in any test. Its set reads 69 addresses. Chrono Trigger's
+reads 237.
+
+### `rcMemrefMin` at `+0x27` decides it, on any play session
+
+One byte, the last reserved one, and the pair with `rcMemrefLines` is a single discriminator:
+
+- **min far below max** — the cost is contention and varies with what the game is transferring. Then
+  the blanking period is the *worst* place to do this work, not the best, and the whole placement is
+  worth reopening.
+- **min equal to max** — it is fixed work, the bus is exonerated, and 845 cycles per read needs a
+  third explanation.
+
+No dedicated run needed: it accumulates on whatever is being played.
 
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 

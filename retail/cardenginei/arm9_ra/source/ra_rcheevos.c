@@ -294,6 +294,12 @@ static u8  rcSlice;
     therefore the ceiling on what dividing the trigger list can ever recover.
 */
 static u8  memrefLinesMax;
+/*
+    ...and the cheapest. Zero means "none seen yet" rather than being initialised to 0xFF, because
+    this binary has no crt0: ra_startup() zeroes .bss and nothing copies a .data initialiser here.
+    A genuine cost of zero reading as unset is harmless -- 237 reads do not come free.
+*/
+static u8  memrefLinesMin;
 
 /*
     How many frames to sit out after an evaluation that cost `lines` scanlines with `room` scanlines
@@ -1529,6 +1535,9 @@ static void ra_rc_do_frame_slice(u8 slice, u8 parts) {
 		if ((u8)mrLines > memrefLinesMax) {
 			memrefLinesMax = (u8)mrLines;
 		}
+		if (memrefLinesMin == 0 || (u8)mrLines < memrefLinesMin) {
+			memrefLinesMin = (u8)mrLines;
+		}
 	}
 
 	ev.value = 0;
@@ -1769,5 +1778,6 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	snapshot->rcRoomMax       = roomMax;
 	snapshot->rcParts         = rcParts;
 	snapshot->rcMemrefLines   = memrefLinesMax;
+	snapshot->rcMemrefMin     = memrefLinesMin;
 	snapshot->rcEvents        = (u8)((eventCount > 255) ? 255 : eventCount);
 }
