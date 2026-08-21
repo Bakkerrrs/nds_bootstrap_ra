@@ -7618,7 +7618,7 @@ at, and dividing the trigger list can only ever recover the other 48. That is wh
 little over `rcParts` 4, and it is the ceiling on this whole approach.
 
 It also gives a figure worth staring at. 237 peeks in ~53 scanlines is about **950 ARM9 cycles per
-memory read** — a translate, a range check and a load. Nothing in `ra_rc_peek()`,
+memory read** (measured directly one section below: 47 scanlines, ~840 cycles) — a translate, a range check and a load. Nothing in `ra_rc_peek()`,
 `ra_readable()` or `ra_read()` accounts for two orders of magnitude more than that costs. The same
 ratio shows up in the trigger loop: 48 scanlines for 98 definitions is ~2,000 cycles each. Both
 halves are uniformly slow by a similar factor, which points at how the code executes rather than at
@@ -7641,8 +7641,34 @@ between visiting a trigger at 7.5 Hz and at 20 Hz. A confirmed-good result is no
 a computed one. The ratchet gets revisited when the fixed term comes down, because that is when the
 numbers change.
 
-**What to look for on hardware.** `rcMemrefLines` at `0x027FEA25` — one number, and it either
-confirms ~53 or moves the whole diagnosis.
+### Hardware: `rcMemrefLines` = 47, and that closes the slicing question
+
+Read on both screens of the same session, identical in each: `rcMemrefLines` **47**, `rcParts` 8,
+`rcLines` 58, `rcRoomMax` 70.
+
+The inference above said ~53 from two whole-frame readings on two different games; measured directly
+it is 47. Close enough to leave the conclusion standing and precise enough to end the argument:
+
+| Term | Scanlines | Divisible |
+| --- | --- | --- |
+| memref pass | **47** | no — runs on every call, whatever the slice |
+| trigger loop, whole | ~50 | yes |
+| in force at `rcParts` 8 | **58** of 70 | — |
+
+**67% of the budget cannot be divided.** `rcParts` 8 already spends only 11 scanlines on triggers, so
+doubling to 16 would save five and halve the detection rate for them. There is nothing left in
+slicing. The approach is finished, it worked, and this is where it stops.
+
+What that costs, stated plainly rather than left implicit: a trigger is visited every eighth frame,
+so a hit-count condition counts eight times slower and a transient state a `ResetIf` or `PauseIf`
+wanted to see can pass between visits. Nothing is lost from the queue and no unlock is dropped — the
+precedent for a low sample rate is this project's own 8% of frames — but "hold this for 300 frames"
+becomes 2,400, and that is a real behavioural change rather than a free win.
+
+Which is the argument for the cache lead, and it is now the only lever left with a large number
+behind it: 47 scanlines for 237 reads is ~840 ARM9 cycles each. If executing this binary cached takes
+that down by 3–5×, the whole per-frame cost lands near 15 scanlines, `rcParts` goes back to 1, and
+every caveat in the paragraph above disappears with it.
 
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
