@@ -333,7 +333,26 @@ typedef struct raSnapshot {
 	    to rcLinesMax are spent. No existing offset moves.
 	*/
 	u8  rcMemrefLines;   /* +0x25  scanlines the memref pass cost alone, worst seen */
-	u8  reserved[2];     /* +0x26 */
+	/*
+	    What ra_icache_claim() found and did, packed into one byte, and the reason it is a report
+	    rather than a boolean is that there are four different ways this can come back and three of
+	    them mean something different has to be tried.
+
+	        bits 0-2  the winning MPU region for 0x03740000
+	        bit 3     0x08  the region also covers main RAM, so it was left alone
+	        bit 4     0x10  that region was already instruction-cacheable
+	        bit 5     0x20  ...it was not, and this turned it on
+	        bit 6     0x40  the instruction cache is enabled globally in CP15 c1
+	        bit 7     0x80  the region is data-cacheable too, which is informational only
+
+	    Plus RA_MPU_SPANS_MAIN_RAM: the winning region also covers 0x02000000, so it governs how the
+	    *game's* code is fetched and this declines to touch it. See the note on ra_icache_claim().
+
+	    Bit 6 clear makes every other bit here moot -- a per-region cacheability bit does nothing
+	    while the cache itself is off -- and it is the first thing to read.
+	*/
+	u8  raMpuBits;       /* +0x26 */
+	u8  reserved;        /* +0x27 */
 	/*
 	    The two cells the self-test chains walk. They live here, in main RAM, rather than
 	    in the WRAM binary alongside the watchlist -- because a pointer the chain walker
@@ -835,6 +854,22 @@ typedef struct raSnapshot {
 
 #define RA_RC_LOADING     5  /* activating, one per frame; rcActivated says how far */
 #define RA_RC_ACTIVE      6  /* every definition activated and validated */
+/*
+    ra_icache_claim()'s report. See raSnapshot.raMpuBits.
+*/
+#define RA_MPU_REGION_MASK    0x07
+#define RA_MPU_ICACHE_WAS_ON  0x10
+#define RA_MPU_ICACHE_SET     0x20
+#define RA_MPU_ICACHE_GLOBAL  0x40
+#define RA_MPU_DCACHE_ON      0x80
+#define RA_MPU_SPANS_MAIN_RAM 0x08
+/*
+    A sentinel rather than a bit, because "no region covers our window" shares nothing with the
+    other readings and needs no room beside them. Unambiguous: a real report never sets both
+    RA_MPU_ICACHE_WAS_ON and RA_MPU_ICACHE_SET, so 0xFF cannot arise from one.
+*/
+#define RA_MPU_NO_REGION      0xFF
+
 #define RA_RC_FRAME       7  /* rc_runtime_do_frame() has run */
 
 #endif /* RA_H */

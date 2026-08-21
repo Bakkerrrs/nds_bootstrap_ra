@@ -7670,6 +7670,64 @@ behind it: 47 scanlines for 237 reads is ~840 ARM9 cycles each. If executing thi
 that down by 3–5×, the whole per-frame cost lands near 15 scanlines, `rcParts` goes back to 1, and
 every caveat in the paragraph above disappears with it.
 
+## The reader may be executing uncached, and one bit would say so
+
+Two unrelated halves of the work being slow by the same factor is not a property of what the code
+does. It is a property of how it runs. This binary executes from DSi WRAM at `0x03740000`, and a DS
+game's own MPU setup has no reason to have marked that region cacheable — on a retail DS there is
+nothing there at all.
+
+### Instruction cache only, and the asymmetry is the whole safety argument
+
+Cacheability on the ARM946 is per MPU region, and the region that happens to cover `0x03740000` may
+cover a great deal more: the I/O registers at `0x04000000`, and the ROM cache immediately below us at
+`0x03700000` which the card DMAs into. **A data cache over either of those is fatal** — `VCOUNT`
+would stop advancing, and cached ROM would go stale under the DMA that filled it.
+
+An *instruction* cache over exactly the same region is inert. Nothing is ever fetched for execution
+from an I/O register or from a ROM cache line. Only code is fetched, and the only code in this region
+is ours: written once by the bootloader before we ever run, and never modified afterwards. So the
+instruction bit can be set on a region that the data bit must never touch, and that is why this
+change is available at all.
+
+### And it declines the one region it must not touch
+
+If the winning region for our address also spans `0x02000000`, it governs how the **game's** code is
+fetched. nds-bootstrap's own MPU patch can produce exactly that — it widens a region to `PAGE_128M`
+at base 0 — and a loader that DMAs overlays into main RAM is the last program that should have an
+instruction cache switched on underneath it. In practice such a region already has the bit set,
+because no DS game gives up its instruction cache. Either way the decision belongs to a measurement,
+so `ra_icache_claim()` reports that case and leaves it alone.
+
+### `raMpuBits`, at `+0x26`
+
+One byte, taking a reserved one so no offset moves, and it is a report rather than a boolean because
+there are four ways this comes back and three of them mean something different has to be tried:
+
+| Bit | Meaning |
+| --- | --- |
+| 0–2 | the winning MPU region for `0x03740000` |
+| `0x08` | that region also covers main RAM, so it was left alone |
+| `0x10` | the region was **already** instruction-cacheable |
+| `0x20` | it was not, and this turned it on |
+| `0x40` | the instruction cache is enabled globally in CP15 `c1` |
+| `0x80` | the region is data-cacheable too — informational |
+| `0xFF` | no enabled region covers the window at all |
+
+**Read bit `0x40` first.** A per-region cacheability bit does nothing while the cache itself is off,
+so a clear bit 6 makes every other bit here moot and sends the whole diagnosis somewhere else.
+
+The two decisions are pure functions — `ra_mpu_region_pick()` over the eight raw region registers and
+`ra_mpu_report()` over the three CP15 words — for the reason `ra_rc_frame_skip()` is one: the
+arithmetic is the part with the logic and the coprocessor read is the part a host does not have. The
+suite drives both directly, including the case that would have been a real bug: a size field of 31 is
+the whole address space, and `1u << 32` is undefined.
+
+**What to look for.** `raMpuBits` at `0x027FEA26` first — it says which of the four situations this
+is. Then `rcMemrefLines` at `+0x25`: if the bit was set and 47 has not moved, the cache was not the
+reason and the ~840 cycles per read have another cause. And the game itself, because this is the
+first change in this line of work that alters how a running game's code is fetched.
+
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
 Reported on **Chrono Trigger** and **Super Mario 64 DS**: open the in-game menu, navigate it, choose
