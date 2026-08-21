@@ -346,7 +346,22 @@ typedef struct raSnapshot {
 	u32 heapSize;        /* +0x60 */
 	u32 heapUsed;        /* +0x64 */
 	u8  wramStage;       /* +0x68  RA_STAGE_*, how far it got */
-	u8  reserved2;       /* +0x69 */
+	/*
+	    How many pieces the trigger list is being evaluated in, and it is the field that says whether
+	    dividing the set was enough.
+
+	    1 means the set fits inside whatever blanking the game leaves and nothing was divided -- which
+	    is every game measured before Chrono Trigger. Between 2 and RA_RC_PARTS_MAX means the reader
+	    found a division that fits, and the only cost is that a trigger is visited every N frames.
+
+	    Pinned at RA_RC_PARTS_MAX **while rcLinesMax still exceeds rcRoomMax** is the reading that
+	    matters: rc_update_memref_values() runs on every call whatever the slice, so a share of the
+	    cost cannot be divided at all, and that combination says the share alone does not fit. No
+	    further division would help and the next thing to attack is the peek path.
+
+	    Costs the byte reserved at this offset since the struct was written, so no offset moves.
+	*/
+	u8  rcParts;         /* +0x69  slices the trigger list is evaluated in, 1 = undivided */
 	/*
 	    The deepest excursion rcheevos made on the private stack, in bytes -- and it is the
 	    number that explains why a real achievement set crashed a retail game twice.

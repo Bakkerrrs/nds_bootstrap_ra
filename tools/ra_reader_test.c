@@ -850,6 +850,7 @@ int main(void) {
 	    are untouched. It is the field that says how deep rcheevos went on the stack this binary
 	    now gives it -- see the note in ra.h about the IRQ stack it was borrowing before.
 	*/
+	CHECK(__builtin_offsetof(raSnapshot, rcParts) == 0x69);
 	CHECK(__builtin_offsetof(raSnapshot, rcStackUsed) == 0x6A);
 	CHECK(__builtin_offsetof(raSnapshot, rcStage) == 0x6C);
 	CHECK(__builtin_offsetof(raSnapshot, rcTriggered) == 0x70);
@@ -1189,6 +1190,30 @@ int main(void) {
 		CHECK(ra_rc_frame_fits(200, 0, 255) == 1);
 		/* And the forced run is rare enough to be worth forcing: 1 in 17 frames, near the 8% shipped. */
 		CHECK(RA_RC_FRAME_STARVE_MAX >= 8 && RA_RC_FRAME_STARVE_MAX <= 32);
+
+		/*
+		    ...and then hardware said neither of the two above can work on this set, with two numbers
+		    read off the snapshot on Chrono Trigger's world map: rcLinesMax 101, rcRoomMax 70.
+
+		    70 of a possible 71 means the game leaves the reader essentially the whole blanking period
+		    and the work still needs 40% more than the hardware has. There is no schedule for a job
+		    that exceeds the budget on its cheapest frame, so the set is divided instead.
+		*/
+		CHECK(ra_rc_frame_parts(1, 101, 70) == 2);   /* the measurement that forced this */
+		CHECK(ra_rc_frame_parts(2, 69, 70) == 2);    /* fits now: settle here */
+		CHECK(ra_rc_frame_parts(2, 71, 70) == 3);    /* one over is still over */
+		/* It only rises, so a piece that fits is never enlarged on a guess about the memref pass. */
+		CHECK(ra_rc_frame_parts(4, 10, 70) == 4);
+		CHECK(ra_rc_frame_parts(1, 10, 70) == 1);
+		/* Pinned at the ceiling is a reading, not a loop: no division of triggers fits, so stop. */
+		CHECK(ra_rc_frame_parts(RA_RC_PARTS_MAX, 200, 70) == RA_RC_PARTS_MAX);
+		/* Zero either side says nothing, which is the case the host lives in. */
+		CHECK(ra_rc_frame_parts(3, 0, 70) == 3);
+		CHECK(ra_rc_frame_parts(3, 200, 0) == 3);
+		/* A zero parts is 1, because rc_runtime_do_frame_slice() treats it that way too. */
+		CHECK(ra_rc_frame_parts(0, 0, 0) == 1);
+		/* The floor on sample rate stays inside the 8% of frames the old VCOUNT hook shipped on. */
+		CHECK(RA_RC_PARTS_MAX <= 12);
 	}
 
 	printf("\nthe self-test's own id is one the unlock guard refuses\n");

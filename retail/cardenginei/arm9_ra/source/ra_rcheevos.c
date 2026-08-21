@@ -91,9 +91,23 @@ extern void ra_watch_clear(void);
     feeling -- the old VCOUNT hook ran on roughly 8% of frames, one in twelve, and achievements
     still fired correctly.
 */
+/*
+    ...and RA_RC_PARTS_MAX bounds the *division of the set*, which is the fix hardware asked for after
+    the two above turned out to be scheduling a job that does not fit any schedule.
+
+    Measured on Chrono Trigger: `rcLinesMax` 101, `rcRoomMax` 70. The second number is the most
+    blanking the reader ever found unspent, and it is one line short of the 71 that exist -- so the
+    game leaves essentially all of it and the work still needs 40% more than the hardware has. No
+    gate and no throttle can place 101 lines inside 71. The set has to be evaluated in pieces.
+
+    Eight is the floor on sample rate rather than a guess: a trigger visited every eighth frame is
+    7.5 Hz, and this project measured the old VCOUNT hook running on 8% of frames -- one in twelve --
+    without missing an unlock.
+*/
 #define RA_VBLANK_FIRST_LINE   192
 #define RA_RC_FRAME_SKIP_MAX   3
 #define RA_RC_FRAME_STARVE_MAX 16
+#define RA_RC_PARTS_MAX        8
 
 /*
     The RetroAchievements memory map for the Nintendo DS, which is the part of
@@ -268,6 +282,13 @@ static u8  frameSkipMax;
 static u8  linesLastRun;
 static u8  roomMax;
 static u8  starve;
+/*
+    How many pieces the trigger list is evaluated in, and which piece is next. rcParts is 1 until a
+    measurement says otherwise -- an untuned reader behaves exactly as it did before this existed,
+    which is what makes a game that never needed the division pay nothing for it.
+*/
+static u8  rcParts = 1;
+static u8  rcSlice;
 
 /*
     How many frames to sit out after an evaluation that cost `lines` scanlines with `room` scanlines
@@ -335,6 +356,38 @@ static u8 ra_rc_frame_fits(u8 cost, u8 room, u8 declined) {
 		return 1;
 	}
 	return (room >= cost) ? 1 : 0;
+}
+
+/*
+    How many pieces the trigger list should be evaluated in, given how many it is being evaluated in
+    now and what that last piece cost against the room it had.
+
+    **It only ever rises.** Not for want of ambition: a step down would have to predict the cost of a
+    larger piece, and the cost is not proportional to the piece -- rc_update_memref_values() runs on
+    every call whatever the slice, so a fixed share of every measurement belongs to work that dividing
+    cannot reduce. Guessing that share wrong in the optimistic direction produces exactly the
+    oscillation this is here to end. Rising only is monotone, converges in at most seven frames, and
+    what a spurious step costs is sample rate rather than correctness.
+
+    It also *reports* the thing no separate measurement had to be taken for. If rcParts settles below
+    the ceiling, the division worked and the fixed share is small. If it pins at RA_RC_PARTS_MAX and
+    the reader is still over the room, then the memref pass alone does not fit and no division of the
+    triggers ever will -- which is a different problem, and this is how it announces itself.
+
+    A cost of zero or a room of zero says nothing either way and changes nothing, for the reason it
+    does in the two functions above: on a host neither number ever moves.
+*/
+static u8 ra_rc_frame_parts(u8 parts, u8 cost, u8 room) {
+	if (parts == 0) {
+		parts = 1;
+	}
+	if (cost == 0 || room == 0) {
+		return parts;
+	}
+	if (cost > room && parts < RA_RC_PARTS_MAX) {
+		return (u8)(parts + 1);
+	}
+	return parts;
 }
 
 /*
@@ -1424,7 +1477,11 @@ static u8 ra_rc_activate_next(raSnapshot* snapshot) {
     to this file and the trampoline takes one argument.
 */
 static u8 ra_rc_frame_step(raSnapshot* snapshot) {
-	rc_runtime_do_frame(&runtime, ra_rc_event_handler, ra_rc_peek, 0, 0);
+	/*
+	    One slice of the trigger list, and every memref. rcParts is 1 until a measurement raises it,
+	    so on a set that fits inside the game's blanking period this is the call it always was.
+	*/
+	rc_runtime_do_frame_slice(&runtime, ra_rc_event_handler, ra_rc_peek, 0, 0, rcSlice, rcParts);
 
 	/*
 	    After the frame, not inside the event handler. The handler runs deep inside rcheevos with the
@@ -1544,6 +1601,26 @@ void ra_rc_tick(raSnapshot* snapshot) {
 			}
 
 			/*
+			    Advance to the next slice, and divide the set further if this one did not fit.
+
+			    linesLastRun is thrown away on a change of rcParts rather than scaled: what a
+			    smaller slice will cost is exactly the thing that cannot be predicted from a
+			    larger one, and a zero is already defined everywhere here as "not measured, so
+			    run" -- which is what makes the next frame a measurement instead of a refusal.
+			    Convergence is one frame per step and there are at most seven.
+			*/
+			rcSlice = (u8)((rcSlice + 1) % rcParts);
+			{
+				const u8 want = ra_rc_frame_parts(rcParts, (u8)lines, (u8)room);
+
+				if (want != rcParts) {
+					rcParts = want;
+					rcSlice = 0;
+					linesLastRun = 0;
+				}
+			}
+
+			/*
 			    Sit out enough frames that the average lands inside the room we had. Kept
 			    alongside the gate above rather than replaced by it: the gate stops the
 			    overruns nobody had to take, and this pays back the ones starvation forced.
@@ -1596,5 +1673,6 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	snapshot->rcLines         = (u8)lines;
 	snapshot->rcLinesMax      = linesMax;
 	snapshot->rcRoomMax       = roomMax;
+	snapshot->rcParts         = rcParts;
 	snapshot->rcEvents        = (u8)((eventCount > 255) ? 255 : eventCount);
 }

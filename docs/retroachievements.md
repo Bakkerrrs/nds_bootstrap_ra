@@ -7475,9 +7475,100 @@ reader has ever found still unspent when its turn came, and it is read **against
 Which of the three *Chrono Trigger* gives is the next thing worth knowing, and the RAM viewer can
 answer it directly: `rcLinesMax` at `+0x85`, `rcRoomMax` at `+0x87`, adjacent bytes in the snapshot.
 
-**What to look for on hardware.** Leene Square still passable — the gate must not have cost the fix
-that worked. The world-map tearing gone, or visibly rarer. The text region steady when Crono is low.
-And the two adjacent bytes above, which say whether a clean pass was ever available.
+### Hardware: `rcLinesMax` 101, `rcRoomMax` 70 — and that ends the scheduling approach
+
+Read off the snapshot on *Chrono Trigger*'s world map, at `0x027FEA85` and `0x027FEA87`:
+
+| Field | Offset | Value |
+| --- | --- | --- |
+| `rcLinesMax` | `+0x85` | **101** of 263 |
+| `rcRoomMax` | `+0x87` | **70** of 71 |
+| `rcActivated` | `+0x99` | 98 definitions |
+| `rcInitLines` | `+0x6F` | 249 — the slowest single activation |
+| `rcInitTotal` | `+0x9E` | 3,487 scanlines, 13 frames to parse the set |
+
+**70 of a possible 71.** The blanking period is 71 scanlines and the reader found 70 of them
+unspent, so the game's own VBlank handler returns almost immediately and leaves the reader
+essentially all of it. There was no room being stolen and none to reclaim: the third bullet above
+is the reading, and it is the bad one.
+
+The work needs **101 lines against a hardware ceiling of 71** — 40% more than the console has, on
+the reader's *best* frame. That is not a schedule that was chosen badly. No gate, no throttle and no
+skip counter can place 101 lines inside 71, because the budget is not a policy: it is how many
+scanlines a Nintendo DS frame spends not drawing. Everything above this section was solving the
+wrong problem correctly.
+
+And it is not a *Chrono Trigger* quirk. Contra 4's 45 definitions cost 67 lines and this set's 98
+cost 101, so the cost tracks the set size, and any set past roughly seventy definitions is over the
+ceiling on any game. Contra 4 has never torn on any build because it is the last size that fits.
+
+### The fix: divide the set, not the calendar
+
+`rc_runtime_do_frame()` is a memref pass followed by a loop over every trigger. The loop is now
+divided:
+
+```c
+if (parts > 1 && ((uint32_t)i % parts) != slice)
+  continue;
+```
+
+A local patch to the vendored rcheevos, added as `rc_runtime_do_frame_slice()` with
+`rc_runtime_do_frame()` kept as a wrapper for slice 0 of 1 parts — so rcheevos' own tests and any
+other caller see nothing at all. Modulo rather than a contiguous range, so a change of `parts`
+mid-session cannot leave a band of triggers unvisited for a whole cycle.
+
+**Memrefs are updated on every call, and only the trigger loop is divided.** That is the half that
+decides whether this is honest. Each trigger still sees a true one-frame delta whenever it is looked
+at, rather than a stale one from its own last visit — which is more than whole-frame skipping ever
+gave it, since skipping updates no memrefs at all on the frames it sits out. What the division costs
+is sample rate: a trigger is evaluated every `parts` frames. That is the cost this project already
+measured as survivable, when the old VCOUNT hook ran on 8% of frames without missing an unlock.
+
+**An earlier note here rejected this, and the rejection was wrong.** It said splitting a set across
+frames "would hand the delta operators two different notions of previous". Updating every memref
+every frame is what makes that false — per trigger, the split is a lower sample rate and nothing
+else, which is exactly what the throttle already was. The difference is that the split bounds the
+peak and the throttle only bounded the average.
+
+### `rcParts` tunes itself, and reports the one thing left to measure
+
+```c
+static u8 ra_rc_frame_parts(u8 parts, u8 cost, u8 room) {
+	if (parts == 0)          parts = 1;
+	if (cost == 0 || room == 0) return parts;
+	if (cost > room && parts < RA_RC_PARTS_MAX) return (u8)(parts + 1);
+	return parts;
+}
+```
+
+**It only ever rises,** and not for want of ambition. A step down would have to predict what a
+*larger* slice costs, and the cost is not proportional to the slice: `rc_update_memref_values()`
+runs on every call whatever the slice, so a fixed share of every measurement belongs to work that
+dividing cannot reduce. Guessing that share wrong in the optimistic direction is precisely the
+oscillation this exists to end. Rising only is monotone, converges in at most seven frames, and a
+spurious step costs sample rate rather than correctness.
+
+`linesLastRun` is thrown away on a change of `parts` rather than scaled, for the same reason: what a
+smaller slice will cost is the thing that cannot be predicted from a larger one. Zero already means
+"not measured, so run" everywhere in this file, so the next frame is a measurement instead of a
+refusal, and convergence is one frame per step.
+
+**And it removes a hardware round-trip.** The open question was how much of the 101 lines is the
+memref pass, since that share cannot be divided — and `rcParts` at `+0x69` answers it without
+anyone measuring it separately:
+
+- **1** — nothing was divided; the set fits whatever the game leaves. Every game before this one.
+- **2 to 7** — the reader found a division that fits. The memref share is small and the fix holds.
+- **8 (`RA_RC_PARTS_MAX`) with `rcLinesMax` still above `rcRoomMax`** — the memref pass alone does
+  not fit, no division of the triggers ever will, and the next thing to attack is the peek path.
+
+Eight is the floor on sample rate rather than a guess: a trigger visited every eighth frame is
+7.5 Hz, against the one-in-twelve this project shipped on without missing an unlock.
+
+**What to look for on hardware.** `rcParts` at `0x027FEA69` — where it settled is the whole result.
+`rcLinesMax` at `+0x85` should now be near or under `rcRoomMax` at `+0x87`. Leene Square still
+passable. The world-map tearing gone, and the text region steady when Crono is low — those two are
+what the number is for.
 
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
