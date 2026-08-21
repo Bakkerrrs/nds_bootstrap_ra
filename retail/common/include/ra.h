@@ -319,7 +319,21 @@ typedef struct raSnapshot {
 	*/
 	u32 wramTicks;       /* +0x20 */
 	u8  wramState;       /* +0x24  RA_WRAM_*, written by the cardengine */
-	u8  reserved[3];     /* +0x25 */
+	/*
+	    How many scanlines rc_update_memref_values() cost on its own, worst seen -- and it is the
+	    number that says how much of the per-frame cost dividing the set can never touch.
+
+	    The memref pass runs on **every** call whatever the slice, so it is the fixed term in
+	    `cost = rcMemrefLines + (evaluation / rcParts)`. With it measured, the arithmetic stops
+	    being an inference from two whole-frame readings on two different games: the ceiling on what
+	    slicing can achieve is exactly rcMemrefLines, and rcMemrefLines at or above rcRoomMax means
+	    no division of the triggers can ever fit.
+
+	    It lives up here in the reserved bytes rather than beside rcLinesMax because the bytes next
+	    to rcLinesMax are spent. No existing offset moves.
+	*/
+	u8  rcMemrefLines;   /* +0x25  scanlines the memref pass cost alone, worst seen */
+	u8  reserved[2];     /* +0x26 */
 	/*
 	    The two cells the self-test chains walk. They live here, in main RAM, rather than
 	    in the WRAM binary alongside the watchlist -- because a pointer the chain walker

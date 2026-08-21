@@ -7581,10 +7581,68 @@ anyone measuring it separately:
 Eight is the floor on sample rate rather than a guess: a trigger visited every eighth frame is
 7.5 Hz, against the one-in-twelve this project shipped on without missing an unlock.
 
-**What to look for on hardware.** `rcParts` at `0x027FEA69` — where it settled is the whole result.
-`rcLinesMax` at `+0x85` should now be near or under `rcRoomMax` at `+0x87`. Leene Square still
-passable. The world-map tearing gone, and the text region steady when Crono is low — those two are
-what the number is for.
+### Hardware: it fits now, and `rcLinesMax` is the field that lies about it
+
+Two readings, world map and Leene Square, same session:
+
+| Field | Offset | World map | Leene Square |
+| --- | --- | --- | --- |
+| `rcParts` | `+0x69` | **8** | 8 |
+| `rcLines` | `+0x84` | **58** | 60 |
+| `rcLinesMax` | `+0x85` | 100 | 100 |
+| `rcRoomMax` | `+0x87` | 70 | 70 |
+| `rcPeeks` | `+0x7C` | 237 | 237 |
+
+On screen: the world-map tearing down to roughly what the official release does, and the text region
+trembling slightly but legible.
+
+**`rcLines` 58 against `rcRoomMax` 70 is the reading that matters, and it fits.** `rcLinesMax` still
+says 100 because it is a running maximum that is never reset — so it is reporting a frame from before
+the tuner converged, when the set was still being evaluated whole. Against the interpretation written
+one section above, "pinned at `RA_RC_PARTS_MAX` with `rcLinesMax` still above `rcRoomMax`" is
+therefore *not* the reading it claimed to be: the ceiling is reached, and the work fits anyway.
+`rcLinesMax` describes a configuration that is no longer in force.
+
+### What the numbers say the cost is made of
+
+`rcParts` 8 costing 58, and the undivided set costing 101, give the split:
+
+```
+fixed + variable/1 = 101      ->  variable ≈ 48   (the trigger loop, divisible)
+fixed + variable/8 =  58      ->  fixed    ≈ 53   (the memref pass, not divisible)
+```
+
+**Three quarters of the budget is the fixed term.** `rc_update_memref_values()` runs on every call
+whatever the slice, so 53 of the 70 available scanlines are spent before a single trigger is looked
+at, and dividing the trigger list can only ever recover the other 48. That is why `rcParts` 8 wins so
+little over `rcParts` 4, and it is the ceiling on this whole approach.
+
+It also gives a figure worth staring at. 237 peeks in ~53 scanlines is about **950 ARM9 cycles per
+memory read** — a translate, a range check and a load. Nothing in `ra_rc_peek()`,
+`ra_readable()` or `ra_read()` accounts for two orders of magnitude more than that costs. The same
+ratio shows up in the trigger loop: 48 scanlines for 98 definitions is ~2,000 cycles each. Both
+halves are uniformly slow by a similar factor, which points at how the code executes rather than at
+what it does — this binary runs from DSi WRAM at `0x03740000`, a region a DS game's own MPU setup has
+no reason to have marked cacheable. **That is the next lever, and it is a much bigger one than
+slicing:** an instruction cache over a region we load once and never write is a safe change, and a
+3–5× cut would take the whole per-frame cost to about 25 scanlines and end this section.
+
+`rcMemrefLines` at `+0x25` measures the fixed term directly rather than inferring it from two
+whole-frame readings on two different games. It takes one of the three bytes reserved there, because
+the bytes next to `rcLinesMax` are spent; no existing offset moves.
+
+**The parts tuner is left exactly as it is on purpose.** It is a ratchet — it converges during the
+noisiest frames of the session, which is boot, where `rcInitTotal` says the parse alone spans 13
+frames, and it can never come back down. Tuning against `rcRoomMax` instead of the frame's own room
+would settle *Chrono Trigger* at 3 by the arithmetic above, which is 69 scanlines against 70: the
+honest optimum and no margin at all. `rcParts` 8 costs 58 and has eleven lines to spare, and what it
+buys with them — a picture at the level of the official release — is worth more than the difference
+between visiting a trigger at 7.5 Hz and at 20 Hz. A confirmed-good result is not worth trading for
+a computed one. The ratchet gets revisited when the fixed term comes down, because that is when the
+numbers change.
+
+**What to look for on hardware.** `rcMemrefLines` at `0x027FEA25` — one number, and it either
+confirms ~53 or moves the whole diagnosis.
 
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 

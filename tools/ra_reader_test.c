@@ -835,6 +835,8 @@ int main(void) {
 	CHECK(__builtin_offsetof(raSnapshot, ticks) == 0x04);
 	CHECK(__builtin_offsetof(raSnapshot, deniedNoLayer) == 0x14);
 	CHECK(__builtin_offsetof(raSnapshot, watchCount) == 0x18);
+	/* Took one of the three bytes reserved at 0x25; the bytes beside rcLinesMax are spent. */
+	CHECK(__builtin_offsetof(raSnapshot, rcMemrefLines) == 0x25);
 	CHECK(__builtin_offsetof(raSnapshot, linesMax) == 0x1B);
 	CHECK(__builtin_offsetof(raSnapshot, wramMagic) == 0x1C);
 	CHECK(__builtin_offsetof(raSnapshot, wramTicks) == 0x20);

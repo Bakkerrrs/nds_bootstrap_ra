@@ -289,6 +289,11 @@ static u8  starve;
 */
 static u8  rcParts = 1;
 static u8  rcSlice;
+/*
+    What the memref pass costs on its own, worst seen. The fixed term of the per-frame cost, and
+    therefore the ceiling on what dividing the trigger list can ever recover.
+*/
+static u8  memrefLinesMax;
 
 /*
     How many frames to sit out after an evaluation that cost `lines` scanlines with `room` scanlines
@@ -1506,7 +1511,25 @@ static void ra_rc_do_frame_slice(u8 slice, u8 parts) {
 		parts = 1;
 	}
 
-	rc_update_memref_values(runtime.memrefs, ra_rc_peek, 0);
+	/*
+	    Timed on its own, because it is the one part of this function no slice count can shrink: every
+	    memref is updated on every call. Whole-frame readings on two games put this at roughly half
+	    the cost and that was arithmetic on two data points -- this is the measurement.
+	*/
+	{
+		const u16 mrStart = RA_VCOUNT;
+		u16 mrLines;
+
+		rc_update_memref_values(runtime.memrefs, ra_rc_peek, 0);
+
+		mrLines = (RA_VCOUNT - mrStart + RA_SCANLINES_PER_FRAME) % RA_SCANLINES_PER_FRAME;
+		if (mrLines > 255) {
+			mrLines = 255;
+		}
+		if ((u8)mrLines > memrefLinesMax) {
+			memrefLinesMax = (u8)mrLines;
+		}
+	}
 
 	ev.value = 0;
 
@@ -1745,5 +1768,6 @@ void ra_rc_tick(raSnapshot* snapshot) {
 	snapshot->rcLinesMax      = linesMax;
 	snapshot->rcRoomMax       = roomMax;
 	snapshot->rcParts         = rcParts;
+	snapshot->rcMemrefLines   = memrefLinesMax;
 	snapshot->rcEvents        = (u8)((eventCount > 255) ? 255 : eventCount);
 }
