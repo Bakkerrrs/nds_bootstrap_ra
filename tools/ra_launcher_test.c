@@ -251,6 +251,90 @@ static void test_config(void) {
 	/* `spaced` is nobody's key: a typo has to be visible. */
 	CHECK(cfg.unknown == 1);
 	CHECK(cfg.badLines == 1);
+	/*
+	    A file that has never heard of verbose_log gets the quiet screen -- the one default in the
+	    parser that is not "behave as before", and worth pinning because it is a visible change to
+	    every existing card.
+	*/
+	CHECK(cfg.verboseLog == 0);
+
+	printf("\nverbose_log is off unless the file asks for it\n");
+	{
+		raConfig vcfg;
+		FILE*    vf = fopen(path, "w");
+
+		fputs("username=u\npassword=p\nverbose_log=1\n", vf);
+		fclose(vf);
+		CHECK(raConfigRead(path, &vcfg) == true);
+		CHECK(vcfg.verboseLog == 1);
+		/* Recognised, so it must not be counted as somebody's typo. */
+		CHECK(vcfg.unknown == 0);
+		CHECK(vcfg.notYet == 0);
+
+		vf = fopen(path, "w");
+		fputs("username=u\npassword=p\nverbose_log=0\n", vf);
+		fclose(vf);
+		CHECK(raConfigRead(path, &vcfg) == true);
+		CHECK(vcfg.verboseLog == 0);
+		/* And it changes nothing else: sync and submit keep their own defaults. */
+		CHECK(vcfg.sync == 1);
+		CHECK(vcfg.submit == 1);
+	}
+
+	printf("\nthe progress bar agrees with its own percentage\n");
+	{
+		char bar[RA_BAR_MIN];
+
+		/*
+		    A full bar beside "95%" is the kind of thing that gets reported as a bug, so the cells and
+		    the number come from the same rounded division and both ends are pinned.
+		*/
+		raWifiBar(bar, sizeof(bar), 0, RA_STEP_MAX);
+		CHECK(strcmp(bar, "[----------------------]   0%") == 0);
+		raWifiBar(bar, sizeof(bar), RA_STEP_MAX, RA_STEP_MAX);
+		CHECK(strcmp(bar, "[######################] 100%") == 0);
+		raWifiBar(bar, sizeof(bar), 5, 10);
+		CHECK(strcmp(bar, "[###########-----------]  50%") == 0);
+		/* Rounded, not truncated: 3 of 10 is 6.6 cells and reads as 7. */
+		raWifiBar(bar, sizeof(bar), 3, 10);
+		CHECK(strcmp(bar, "[#######---------------]  30%") == 0);
+		/* It fits the console: 32 columns, and the bar must not be the thing that wraps. */
+		CHECK(strlen(bar) <= 32);
+
+		/* A step past the end is clamped rather than overrunning the buffer. */
+		raWifiBar(bar, sizeof(bar), 200, RA_STEP_MAX);
+		CHECK(strcmp(bar, "[######################] 100%") == 0);
+		/* ...and zero steps is one step, because a bar with no denominator still has to draw. */
+		raWifiBar(bar, sizeof(bar), 1, 0);
+		CHECK(strcmp(bar, "[######################] 100%") == 0);
+		/*
+		    Colour costs no cells, and getting that wrong is not cosmetic: the quiet screen pads
+		    every row to the console width instead of erasing to the end of the line, so padding by
+		    strlen() leaves the tail of whatever was there before -- and it truncated a 38-byte
+		    yellow line at 32, cutting its closing escape in half and leaving the console yellow for
+		    everything printed after it.
+		*/
+		CHECK(raWifiVisible("") == 0);
+		CHECK(raWifiVisible("Ready") == 5);
+		CHECK(raWifiVisible("\x1b[31mCould not sign in\x1b[37m") == 17);
+		CHECK(raWifiVisible("\x1b[33m") == 0);
+		/* Multi-parameter sequences, and ones that end in a letter other than 'm'. */
+		CHECK(raWifiVisible("\x1b[1;33mx\x1b[0m") == 1);
+		CHECK(raWifiVisible("\x1b[12;4Hy") == 1);
+		/* An unterminated escape swallows the rest, which is the safe reading of an unprintable tail. */
+		CHECK(raWifiVisible("a\x1b[33") == 1);
+		/* A bare ESC with no bracket is one cell, not the start of anything. */
+		CHECK(raWifiVisible("\x1b") == 1);
+
+		/* Too small a buffer terminates rather than writing what it cannot fit. */
+		{
+			char small[8];
+
+			memset(small, 0x5A, sizeof(small));
+			raWifiBar(small, sizeof(small), 5, 10);
+			CHECK(small[0] == 0);
+		}
+	}
 
 	/*
 	    And the secret must never be printable. The log is a file that gets sent to someone.

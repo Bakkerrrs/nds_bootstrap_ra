@@ -595,6 +595,18 @@ typedef struct raConfig {
 	*/
 	u8   sync;
 	u8   debug;
+	/*
+	    `verbose_log=1` in ra.cfg: put the whole ladder on the screen, as it was before this key
+	    existed. Defaults to **0**, which shows a progress bar, the step being worked on in ordinary
+	    words, and a handful of essential lines at the end.
+
+	    It governs **the screen only. The log file always gets everything.** That asymmetry is the
+	    point of the key rather than a shortcut: the file is the channel this project's hardware
+	    findings have all arrived through, and a setting that silenced it would mean a reflash before
+	    any problem could be looked at. What was too verbose was never the file -- it was reading
+	    fifty lines of chip bring-up on a screen while waiting to play.
+	*/
+	u8   verboseLog;
 	u8   found;          /* the file existed */
 	u8   usable;         /* ...and both credentials are set */
 	u16  notYet;         /* keys we recognise from odelot's file and do not act on yet */
@@ -606,6 +618,41 @@ typedef struct raConfig {
     Step 3c's transport. The layering table has had an `ra_net` row since before it existed;
     this is it. Negative returns so a failure names its own step instead of becoming a zero.
 */
+/*
+    The quiet screen's steps, in the order they happen, and the count is the bar's denominator.
+
+    Named for what a player is waiting for rather than for the API call underneath -- "Signing in"
+    rather than "stage 10: r=login" -- because the audience for this screen is someone who wants to
+    know whether to keep waiting.
+*/
+#define RA_STEP_GAME      1   /* reading the ROM and hashing it */
+#define RA_STEP_SETTINGS  2   /* ra.cfg */
+#define RA_STEP_WIFI      3   /* chip up, associated */
+#define RA_STEP_ADDRESS   4   /* DHCP */
+#define RA_STEP_SIGNIN    5   /* r=login */
+#define RA_STEP_LOOKUP    6   /* r=gameid */
+#define RA_STEP_SESSION   7   /* r=startsession */
+#define RA_STEP_SENDING   8   /* r=awardachievement for the queue */
+#define RA_STEP_EARNED    9   /* r=unlocks */
+#define RA_STEP_DOWNLOAD  10  /* r=patch */
+#define RA_STEP_MAX       10
+
+/*
+    Render `step` of `steps` as a bar and a percentage, into at least RA_BAR_MIN bytes.
+
+    Pure, and its own function, for the reason ra_rc_frame_skip() is one: it is the part with the
+    arithmetic and tools/ra_launcher_test.c drives it directly. Getting a percentage wrong on a
+    progress bar is the kind of bug that is invisible until someone counts.
+*/
+#define RA_BAR_CELLS 22
+#define RA_BAR_MIN   32
+void raWifiBar(char* out, u32 size, u8 step, u8 steps);
+/*
+    How many console cells a string occupies, with ANSI colour sequences counted as none. See the
+    note on the definition: the quiet screen pads rather than erasing, so this is what it pads by.
+*/
+u32 raWifiVisible(const char* text);
+
 #define RA_NET_HOST           "retroachievements.org"
 
 /*

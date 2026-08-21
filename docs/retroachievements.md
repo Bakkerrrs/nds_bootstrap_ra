@@ -7860,6 +7860,86 @@ The number to watch for a future set is therefore **not the achievement count** 
 memrefs and modified memrefs, which is what `rcPeeks` and the host's list walk report. A set of a
 hundred simple definitions is cheaper than fifty full of `AddSource` arithmetic.
 
+## The boot screen has two audiences, and `verbose_log` is which one it is for
+
+The launcher's RA ladder narrated everything it did to the screen: stage headings, the SCFG
+registers, every line dsiwifi prints on its way up, a heap report between rungs, and a twenty-line
+summary. Several hundred lines. That is the right screen for finding out why a boot failed and the
+wrong one for a person waiting to play a game.
+
+`verbose_log` in `ra.cfg` picks. **It defaults to 0**, which is the one default in the parser that is
+not "behave exactly as before" — a card with no opinion gets the quiet screen, and the verbose one is
+a diagnostic mode you ask for.
+
+### The log file is not affected, and that is the point of the key
+
+`verbose_log` governs **the screen only.** `ra_wifi_launcher.log` gets everything in both modes.
+
+That asymmetry is deliberate rather than a shortcut. Every hardware finding in this project arrived
+through that file, and a setting that silenced it would mean a reflash before any problem could be
+looked at — which is exactly the cost the quiet mode is supposed to remove. As it stands, quiet mode
+is safe to leave on forever: when something goes wrong the full story is already on the card.
+
+### What the quiet screen shows
+
+Ten steps, each named for what the player is waiting for rather than for the API call underneath, a
+bar, and the essentials underneath once they are known:
+
+```
+RetroAchievements
+
+[######################] 100%
+
+Ready
+Signed in as <username>
+Game found on the server
+98 achievements ready
+2 sent, 0 still waiting
+34 earned before now
+```
+
+The two live lines are redrawn in place; the essentials are written once at the end, from `verdict` —
+the same structure the verbose summary is written from, so the two cannot disagree about what
+happened. They are ordered by what a *failing* boot needs first: "Could not sign in" at the top of
+that block is the whole diagnosis for the most common problem this loader will ever have.
+
+A spinner turns at the end of the caption line while a rung blocks. It earns its place: association
+can take forty seconds and DHCP ten more, during which the bar and the caption are both correct and
+both still, and a run that has stopped looks exactly like a run that is waiting.
+
+### Four things about drawing on a DS console that cost more thought than the feature
+
+- **The config is read before anything is printed.** `verboseLog` decides what the screen is *for*, so
+  it cannot be learned at stage 0c with three stages already on the screen. The read moved to the top
+  of `raWifiProbe()`; stage 0c still reports every field, and the property that made the old ordering
+  right is kept — the file is still parsed with no radio up, so a bad config is still a line in the
+  log before the network can be blamed for it.
+
+- **Cursor positioning goes through `PrintConsole`, not through an ANSI escape.** libnds' console does
+  implement `\x1b[<row>;<col>H`, and **nothing in this tree has ever used it** — so there is no build
+  here that has proved it works on this console, and a progress display is a poor place to find out.
+  `cursorX` and `cursorY` are documented public fields of `PrintConsole` and are what the escape would
+  set anyway.
+
+- **Rows are relative to wherever the cursor already was.** Nothing clears the screen before the
+  probe runs and the launcher may have printed above it, so the block is placed below whatever is
+  there. And the base is clamped: writing past the last row scrolls the console, which would move
+  every row the code has already addressed and turn the display into a smear.
+
+- **Padding is counted in cells, not bytes.** Rows are padded to the console width instead of using
+  the erase-to-end-of-line escape, for the same reason as the second point. `\x1b[31m` is five bytes
+  that occupy no cell, so padding by `strlen()` pads a coloured line five cells short and leaves the
+  tail of whatever was there before — and a 38-byte yellow line truncated at 32 loses its closing
+  escape and leaves the console yellow for everything printed afterwards. `raWifiVisible()` counts
+  cells; the host suite drives it, including the unterminated-escape case.
+
+Both pure pieces live in `ra_screen.c` rather than `ra_wifi.c`, for the reason `ra_wifi_verdict.c`
+exists: everything else in that file needs a console, a FIFO or a socket, and these need `sniprintf`.
+That is not ceremony over four lines of division — **a progress bar is a thing whose bugs are
+invisible.** A full bar beside "95%" gets reported as a fault in the loader, a bar that reaches 90%
+and stops looks like a hang, and neither would ever fail a build. Both ends of the range are pinned on
+the host, along with the rounding that makes the last step read 100%.
+
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
 Reported on **Chrono Trigger** and **Super Mario 64 DS**: open the in-game menu, navigate it, choose

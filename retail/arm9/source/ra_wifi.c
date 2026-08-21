@@ -209,6 +209,148 @@ static void raWifiSync(void) {
     interrupt stores the string contents and not the NUL, so there is nothing to print until
     a piece is terminated here.
 */
+/*
+    The screen, and only the screen.
+
+    Zero until ra.cfg is read, which is why the config is read before anything is printed: a run that
+    starts verbose and goes quiet three lines in would be worse than either mode. The log file is
+    written in both modes and is not affected by any of this -- see raConfig.verboseLog.
+*/
+static u8  raVerbose;
+/* Where the quiet screen keeps its two live lines, and where the summary starts. */
+#define RA_ROW_BAR      2
+#define RA_ROW_CAPTION  4
+#define RA_ROW_SUMMARY  6
+static u8  raStep;
+static u8  raSpin;
+static u8  raSummaryRow;
+/*
+    The console row the quiet block starts at, taken from wherever the cursor already was.
+
+    Absolute rows are only safe if they are ours. Nothing clears the screen before raWifiProbe() runs
+    and the launcher may have printed above us, so the block is placed *below* whatever is there
+    rather than over it. And it is clamped: writing past the last row scrolls the console, which would
+    move every row this code has already addressed and turn the display into a smear.
+*/
+#define RA_ROW_ESSENTIALS_MAX 8
+static u8  raRowBase;
+
+static void raWifiRowBase(void) {
+	const PrintConsole* con = consoleGetDefault();
+	int                 y   = con ? con->cursorY : 0;
+
+	if (y < 0 || y + RA_ROW_SUMMARY + RA_ROW_ESSENTIALS_MAX > 23) {
+		y = 0;
+	}
+	raRowBase = (u8)y;
+}
+
+/*
+    Put the cursor somewhere, through PrintConsole's own fields rather than an ANSI escape.
+
+    libnds' console does implement the cursor-position escape, and nothing in this tree uses it --
+    so there is no build here that has ever proved it works on this console, and a progress display
+    is a poor place to find out. cursorX and cursorY are documented public fields of PrintConsole
+    and are what the escape would set anyway.
+*/
+static void raWifiCursor(int x, int y) {
+	PrintConsole* con = consoleGetDefault();
+
+	if (con) {
+		con->cursorX = x;
+		con->cursorY = y;
+	}
+}
+
+
+/*
+    One line, padded to the console's width so nothing of the previous line survives on the right.
+
+    Padding rather than the erase-to-end-of-line escape, for the same reason raWifiCursor() exists:
+    it needs nothing of the console but the ability to print a character.
+*/
+#define RA_CONSOLE_WIDTH 32
+
+static void raWifiRow(int row, const char* text) {
+	/*
+	    Wide enough for the width plus the colour sequences that occupy none of it. The padding is
+	    counted in *cells* rather than bytes -- see raWifiVisible().
+	*/
+	char line[RA_CONSOLE_WIDTH + 24];
+	u32  n;
+	u32  cells;
+
+	sniprintf(line, sizeof(line), "%s", text);
+	n     = strlen(line);
+	cells = raWifiVisible(line);
+	while (cells < RA_CONSOLE_WIDTH && n < sizeof(line) - 1) {
+		line[n++] = ' ';
+		cells++;
+	}
+	line[n] = 0;
+
+	raWifiCursor(0, raRowBase + row);
+	iprintf("%s", line);
+}
+
+/*
+    Advance the quiet screen to `step`, captioned in words a person waiting to play can act on.
+
+    Does nothing in verbose mode, where the ladder's own headings are already on the screen and this
+    would draw over them.
+*/
+static void raWifiStep(u8 step, const char* caption) {
+	char bar[RA_BAR_MIN];
+
+	raStep = step;
+	if (raVerbose) {
+		return;
+	}
+	raWifiBar(bar, sizeof(bar), step, RA_STEP_MAX);
+	raWifiRow(RA_ROW_BAR, bar);
+	raWifiRow(RA_ROW_CAPTION, caption);
+}
+
+/*
+    A character that moves while a rung blocks, and it earns its place: association can take forty
+    seconds and DHCP another ten, during which the bar and the caption are both correct and both
+    still. A run that has stopped and a run that is waiting look identical without this.
+*/
+static void raWifiSpin(void) {
+	static const char face[4] = { '-', '\\', '|', '/' };
+
+	if (raVerbose) {
+		return;
+	}
+	raSpin++;
+	if ((raSpin & 7) != 0) {
+		return;
+	}
+	raWifiCursor(31, raRowBase + RA_ROW_CAPTION);
+	iprintf("%c", face[(raSpin >> 3) & 3]);
+}
+
+/*
+    An essential line, under the bar, in the order they become true. Quiet mode only -- in verbose
+    mode the summary below says all of this and more.
+*/
+static void raWifiEssential(const char* fmt, ...) {
+	char    line[RA_CONSOLE_WIDTH + 24];
+	va_list args;
+
+	if (raVerbose) {
+		return;
+	}
+	va_start(args, fmt);
+	vsniprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+
+	raWifiRow(RA_ROW_SUMMARY + raSummaryRow, line);
+	if (raSummaryRow < RA_ROW_ESSENTIALS_MAX - 1) {
+		raSummaryRow++;
+	}
+}
+
 static void raWifiDrain(void) {
 	const u32 head = textHead;        /* snapshot: the interrupt may advance it as we go */
 	char      piece[129];
@@ -224,7 +366,9 @@ static void raWifiDrain(void) {
 		piece[n] = 0;
 		textTail += n;
 
-		iprintf("%s", piece);
+		if (raVerbose) {
+			iprintf("%s", piece);
+		}
 		if (logFile) {
 			fputs(piece, logFile);
 		}
@@ -271,7 +415,9 @@ static void raWifiLog(const char* fmt, ...) {
 	vsniprintf(line, sizeof(line), fmt, args);
 	va_end(args);
 
-	iprintf("%s", line);
+	if (raVerbose) {
+		iprintf("%s", line);
+	}
 	if (logFile) {
 		fputs(line, logFile);
 	}
@@ -440,6 +586,7 @@ static void raWifiReportHeap(const char* when) {
 static void raWifiIdle(void) {
 	swiWaitForVBlank();
 	raWifiDrain();
+	raWifiSpin();
 }
 
 /*
@@ -1450,7 +1597,14 @@ static void raWifiPatchSink(void* ctx, const char* data, int length) {
 	patchProgress += (u32)length;
 	if (patchProgress >= 8192) {
 		patchProgress = 0;
-		iprintf(".");
+		/*
+		    Quiet mode has the caption and the bar for this, and a row of dots would run off the
+		    end of the line the caption is on. The recv() loop cannot yield, so the spinner cannot
+		    turn here either -- which is exactly why the dots exist in verbose mode.
+		*/
+		if (raVerbose) {
+			iprintf(".");
+		}
 	}
 }
 
@@ -1521,7 +1675,9 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	memset(&p, 0, sizeof(p));
 	got = raNetHttpGetStream(RA_NET_HOST, path, raWifiPatchSink, &patch, &p);
 	raPatchFinish(&patch);
-	iprintf("\n");
+	if (raVerbose) {
+		iprintf("\n");
+	}
 	raWifiReportAttempts("patch", &p);
 
 	if (got < -1000) {
@@ -2068,12 +2224,28 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 
 	logFile = fopen(sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT, "w");
 
-	iprintf("\x1b[33mnds-bootstrap RA WiFi, step 3\x1b[37m\n");
-	iprintf("launcher context, no game running\n\n");
-	if (logFile) {
-		iprintf("logging to %s\n", sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT);
+	/*
+	    **Read before a single line is printed**, and that is the whole reason it moved up here from
+	    stage 0c: verboseLog decides what the screen is for, and a run that starts verbose and turns
+	    quiet three lines in would be worse than either mode. Nothing else about the ordering changes
+	    -- the file is still parsed with no network up, so a bad config is still a line in the log
+	    before the radio can be blamed for anything, and stage 0c below still reports every field.
+	*/
+	raConfigRead(sdFound ? RA_CFG_PATH : RA_CFG_PATH_FAT, &config);
+	raVerbose = config.verboseLog;
+
+	if (raVerbose) {
+		iprintf("\x1b[33mnds-bootstrap RA WiFi, step 3\x1b[37m\n");
+		iprintf("launcher context, no game running\n\n");
+		if (logFile) {
+			iprintf("logging to %s\n", sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT);
+		} else {
+			iprintf("\x1b[33mno log file; screen only\x1b[37m\n");
+		}
 	} else {
-		iprintf("\x1b[33mno log file; screen only\x1b[37m\n");
+		raWifiRowBase();
+		raWifiRow(0, "RetroAchievements");
+		raWifiStep(0, "Starting up");
 	}
 
 	raWifiVerdictReset(&verdict);
@@ -2092,6 +2264,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	    be checked against the game's page on retroachievements.org by eye, which is a cheaper
 	    verification than any amount of code.
 	*/
+	raWifiStep(RA_STEP_GAME, "Reading the game");
 	raWifiLog("\n-- stage 0b: the ROM's RetroAchievements hash --\n");
 	{
 		raHashInfo hashInfo;
@@ -2127,9 +2300,10 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	    username, a `notYet` count that is really a typo, a `password=` line the user thought
 	    they filled in. The secret itself is never printed: see raConfigRedact().
 	*/
+	raWifiStep(RA_STEP_SETTINGS, "Reading your settings");
 	raWifiLog("\n-- stage 0c: the RetroAchievements config --\n");
-	raConfigRead(sdFound ? RA_CFG_PATH : RA_CFG_PATH_FAT, &config);
 	raWifiLog("ra.cfg           %s\n", config.found ? "found" : "absent");
+	raWifiLog("verbose_log      %s\n", config.verboseLog ? "1" : "0");
 	if (config.found) {
 		raWifiLog("username         %s\n", config.username[0] ? config.username : "(empty)");
 		raWifiLog("password         %s\n", raConfigRedact(config.password));
@@ -2156,6 +2330,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	} else {
 		raWifiLog("put username= and password= in\n%s\n",
 		          sdFound ? RA_CFG_PATH : RA_CFG_PATH_FAT);
+		raWifiEssential("\x1b[33mNo ra.cfg: playing offline\x1b[37m");
 	}
 
 	/*
@@ -2180,9 +2355,11 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	*/
 	if (!config.sync) {
 		raWifiLog("\n\x1b[33msync=0 in ra.cfg -- the radio stays off\x1b[37m\n");
+		raWifiEssential("Wi-Fi off (sync=0)");
 		goto done;
 	}
 
+	raWifiStep(RA_STEP_WIFI, "Connecting to Wi-Fi");
 	raWifiLog("\n-- the ARM7 half --\n");
 
 	if (!raWifiWaitArm7()) {
@@ -2216,6 +2393,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	    stack, so anything that fails from now on is lwip in the launcher -- which is the one
 	    thing this round exists to find out.
 	*/
+	raWifiStep(RA_STEP_ADDRESS, "Getting a network address");
 	raWifiLog("\n-- stage 6: DHCP --\n");
 	if (!raWifiWaitIp(RA_WIFI_WAIT_DHCP)) {
 		goto done;
@@ -2223,10 +2401,12 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 
 	raWifiReportHeap("with lwip up");
 
+	raWifiStep(RA_STEP_SIGNIN, "Signing in to your account");
 	raWifiLog("\n-- stage 10: log in --\n");
 	raWifiLogin(&config);
 	raWifiReportHeap("after login");
 
+	raWifiStep(RA_STEP_LOOKUP, "Looking up this game");
 	raWifiLog("\n-- stage 11: does the server know this ROM --\n");
 	raWifiIdentify();
 	raWifiReportHeap("after gameid");
@@ -2246,19 +2426,23 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	    First of the game-specific rungs, because it is what the official client does first and because
 	    the award below may depend on it existing. See RA_WIFI_STAGE_SESSION.
 	*/
+	raWifiStep(RA_STEP_SESSION, "Starting your session");
 	raWifiLog("\n-- stage 12: start a play session --\n");
 	raWifiStartSession(&config);
 	raWifiReportHeap("after session");
 
+	raWifiStep(RA_STEP_SENDING, "Sending what you earned");
 	raWifiLog("\n-- stage 13: report what the last session earned --\n");
 	raWifiSubmitQueue(&config, sdFound);
 	raWifiStagePending(sdFound, ndsPath);
 	raWifiReportHeap("after award");
 
+	raWifiStep(RA_STEP_EARNED, "Checking what you have");
 	raWifiLog("\n-- stage 14: what has this account already earned --\n");
 	raWifiUnlocks(&config);
 	raWifiReportHeap("after unlocks");
 
+	raWifiStep(RA_STEP_DOWNLOAD, "Downloading achievements");
 	raWifiLog("\n-- stage 15: fetch the set --\n");
 	raWifiFetchPatch(&config);
 	raWifiReportHeap("after patch");
@@ -2378,6 +2562,68 @@ done:
 	if (textDropped) {
 		raWifiLog("\x1b[31m%lu chars dropped: the log has a hole\x1b[37m\n",
 		          (unsigned long)textDropped);
+	}
+
+	/*
+	    And the quiet screen's own ending: the bar finished, and the four or five facts a person
+	    actually wanted from the wait. Written from `verdict`, the same structure the summary above is
+	    written from, so the two cannot disagree about what happened.
+
+	    Ordered by what a failing boot needs first. Signing in is the step that fails when a password
+	    is wrong, and "Could not sign in" at the top of the block is the whole diagnosis for the most
+	    common problem this loader will ever have.
+	*/
+	if (!raVerbose) {
+		raWifiStep(RA_STEP_MAX, (stage >= RA_WIFI_STAGE_PATCHED) ? "Ready" : "Finished with problems");
+
+		if (config.sync) {
+			if (verdict.loggedIn) {
+				raWifiEssential("Signed in as %s", raUser[0] ? raUser : config.username);
+			} else if (!config.usable) {
+				raWifiEssential("\x1b[33mNo username or password set\x1b[37m");
+			} else if (verdict.apiOk) {
+				raWifiEssential("\x1b[31mCould not sign in\x1b[37m");
+			} else if (verdict.gotIp) {
+				raWifiEssential("\x1b[31mCould not reach the server\x1b[37m");
+			} else if (verdict.linkReady) {
+				raWifiEssential("\x1b[31mNo network address\x1b[37m");
+			} else {
+				raWifiEssential("\x1b[31mNo Wi-Fi connection\x1b[37m");
+			}
+		}
+
+		if (verdict.identified) {
+			raWifiEssential("Game found on the server");
+		} else if (verdict.loggedIn) {
+			raWifiEssential("\x1b[33mGame not in the database\x1b[37m");
+		}
+
+		/*
+		    Said differently for the cache, because the difference matters to a player rather than
+		    only to a log: a cached set is real and will fire, and its "already earned" filtering is
+		    as old as the last successful download.
+		*/
+		if (verdict.patched) {
+			raWifiEssential("%u achievements ready", verdict.defsKept);
+		} else if (verdict.defsBytes) {
+			raWifiEssential("Achievements from last time");
+		} else {
+			raWifiEssential("\x1b[33mNo achievements loaded\x1b[37m");
+		}
+
+		if (verdict.submitAccepted || verdict.submitRefused || verdict.submitKept) {
+			raWifiEssential("%u sent, %u still waiting",
+			                verdict.submitAccepted, verdict.submitKept);
+		}
+		if (verdict.unlocksKnown) {
+			raWifiEssential("%u earned before now", verdict.unlockCount);
+		}
+
+		/*
+		    Leave the cursor below the block. Whatever the launcher prints next is not ours to place,
+		    and it must not land on top of the only lines this screen exists to show.
+		*/
+		raWifiCursor(0, raRowBase + RA_ROW_SUMMARY + raSummaryRow + 1);
 	}
 
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);
