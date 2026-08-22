@@ -281,6 +281,55 @@ static void test_config(void) {
 		CHECK(vcfg.submit == 1);
 	}
 
+	printf("\nthe body's end is read from the headers, not waited for\n");
+	{
+		/*
+		    This is where fifty of the sixty seconds were. Reading until the peer closes means
+		    waiting for the peer to close, and the timing line put every one-kilobyte request at
+		    10.2 seconds against a chip bring-up and a DHCP lease that together cost 5.
+
+		    Driven on the host because every part of it is a string problem: the header is
+		    case-insensitive by the standard, Cloudflare does not send it the way anyone expects, and
+		    a `Content-Length` appearing in the *body* must never be found.
+		*/
+		const char* r1 = "HTTP/1.1 200 OK\r\nContent-Length: 1087\r\n\r\n{\"Success\":true}";
+		const char* r2 = "HTTP/1.1 200 OK\r\ncontent-length:42\r\n\r\nbody";
+		const char* r3 = "HTTP/1.1 200 OK\r\nCONTENT-LENGTH:   7\r\n\r\nbody";
+		const char* r4 = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n";
+		const char* r5 = "HTTP/1.1 200 OK\r\nServer: cloudflare\r\n\r\nbody";
+
+		CHECK(raNetHeaderLength(r1, (u32)(strstr(r1, "\r\n\r\n") - r1 + 4)) == 1087);
+		CHECK(raNetHeaderLength(r2, (u32)(strstr(r2, "\r\n\r\n") - r2 + 4)) == 42);
+		CHECK(raNetHeaderLength(r3, (u32)(strstr(r3, "\r\n\r\n") - r3 + 4)) == 7);
+		/* A reply that does not say has no length, and falls back to ending at the close. */
+		CHECK(raNetHeaderLength(r5, (u32)(strstr(r5, "\r\n\r\n") - r5 + 4)) == 0);
+
+		CHECK(raNetHeaderChunked(r4, (u32)(strstr(r4, "\r\n\r\n") - r4 + 4)) == 1);
+		CHECK(raNetHeaderChunked(r1, (u32)(strstr(r1, "\r\n\r\n") - r1 + 4)) == 0);
+		/* `identity` is a Transfer-Encoding and is not chunked. */
+		{
+			const char* r6 = "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\n\r\nbody";
+
+			CHECK(raNetHeaderChunked(r6, (u32)(strstr(r6, "\r\n\r\n") - r6 + 4)) == 0);
+		}
+		/*
+		    And the one that would be a real bug: a body mentioning the header must not be mistaken
+		    for the header. The bound is what stops it, and a reply whose body is a JSON object full
+		    of achievement descriptions is exactly the kind of body that could contain anything.
+		*/
+		{
+			const char* r7 = "HTTP/1.1 200 OK\r\n\r\n{\"d\":\"Content-Length: 99\"}";
+
+			CHECK(raNetHeaderLength(r7, (u32)(strstr(r7, "\r\n\r\n") - r7 + 4)) == 0);
+		}
+		/* A header name that only starts a line counts; one in the middle of a line does not. */
+		{
+			const char* r8 = "HTTP/1.1 200 OK\r\nX: content-length: 5\r\n\r\nbody";
+
+			CHECK(raNetHeaderLength(r8, (u32)(strstr(r8, "\r\n\r\n") - r8 + 4)) == 0);
+		}
+	}
+
 	printf("\nan earned date packs into a word and comes back out\n");
 	{
 		/*

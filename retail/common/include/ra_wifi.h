@@ -815,6 +815,22 @@ typedef struct raNetStream {
 	u16       status;      /* the HTTP status line's code, 0 if it did not parse */
 	u32       chunkLeft;
 	u32       bodyBytes;   /* how much reached the sink -- the body's real length */
+	/*
+	    What the reply said its body would be, and whether the whole of it has arrived.
+
+	    **This is where fifty of the sixty seconds were.** Reading until the peer closes means
+	    waiting for the peer to close, and the timing line put every one-kilobyte request at 10.2
+	    seconds against a chip and a DHCP lease that together cost 5. The bytes were never the cost;
+	    the wait after them was.
+
+	    An earlier note here said Content-Length was not needed because `Connection: close` and the
+	    chunk terminator both say where the body ends. Both do -- and one of them says it by making
+	    the client wait for a socket to shut down. Enforced rather than believed: `done` is set only
+	    when the counted bytes reach the declared length, so a truncated reply still ends at the
+	    close it always ended at.
+	*/
+	u32       contentLength;   /* 0 = the reply did not say */
+	u8        done;            /* the body is complete: stop reading */
 	u16       lineLength;
 	char      line[RA_NET_LINE_MAX];
 } raNetStream;
@@ -1169,6 +1185,12 @@ int         raNetHttpGet(const char* host, const char* path, char* out, int outS
 const char* raNetBody(const char* response);
 bool        raNetJsonString(const char* json, const char* key, char* out, size_t outSize);
 bool        raNetJsonNumber(const char* json, const char* key, u32* out);
+/*
+    Content-Length and chunked, out of a raw response's headers, bounded so a body cannot supply
+    either. Pure and host-tested -- see the note on the definition.
+*/
+u32         raNetHeaderLength(const char* response, u32 headerEnd);
+int         raNetHeaderChunked(const char* response, u32 headerEnd);
 bool        raNetJsonTrue(const char* json, const char* key);
 /*
     Step 6's prerequisite: `"UserUnlocks":[93119,93120,...]` into an array of ids. Returns how many

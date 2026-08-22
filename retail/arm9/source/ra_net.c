@@ -79,6 +79,92 @@ bool raNetUrlEncode(const char* in, char* out, size_t outSize) {
 }
 
 /*
+    Read `Content-Length` out of a raw response's headers, or 0 if it does not say one.
+
+    Its own function, and pure, so tools/ra_launcher_test.c can drive it against the shapes a real
+    server sends: the header is case-insensitive by the standard and Cloudflare does not send it the
+    way anyone expects, the value may be preceded by spaces, and a `Content-Length` appearing inside
+    the *body* must not be found. Bounded by `headerEnd` for that last reason.
+*/
+u32 raNetHeaderLength(const char* response, u32 headerEnd) {
+	static const char key[] = "content-length:";
+	u32               at;
+
+	for (at = 0; at < headerEnd; at++) {
+		u32 i;
+
+		if (at && response[at - 1] != '\n') {
+			continue;
+		}
+		for (i = 0; key[i] && at + i < headerEnd; i++) {
+			char c = response[at + i];
+
+			if (c >= 'A' && c <= 'Z') {
+				c = (char)(c - 'A' + 'a');
+			}
+			if (c != key[i]) {
+				break;
+			}
+		}
+		if (!key[i]) {
+			u32 value = 0;
+			u32 j     = at + i;
+
+			while (j < headerEnd && response[j] == ' ') {
+				j++;
+			}
+			while (j < headerEnd && response[j] >= '0' && response[j] <= '9') {
+				value = value * 10 + (u32)(response[j] - '0');
+				j++;
+			}
+			return value;
+		}
+	}
+	return 0;
+}
+
+/* ...and whether it said `Transfer-Encoding: chunked`, on the same terms. */
+int raNetHeaderChunked(const char* response, u32 headerEnd) {
+	static const char key[] = "transfer-encoding:";
+	u32               at;
+
+	for (at = 0; at < headerEnd; at++) {
+		u32 i;
+
+		if (at && response[at - 1] != '\n') {
+			continue;
+		}
+		for (i = 0; key[i] && at + i < headerEnd; i++) {
+			char c = response[at + i];
+
+			if (c >= 'A' && c <= 'Z') {
+				c = (char)(c - 'A' + 'a');
+			}
+			if (c != key[i]) {
+				break;
+			}
+		}
+		if (!key[i]) {
+			u32 j;
+
+			for (j = at + i; j < headerEnd && response[j] != '\n'; j++) {
+				char c = response[j];
+
+				if (c >= 'A' && c <= 'Z') {
+					c = (char)(c - 'A' + 'a');
+				}
+				if (c == 'c' && j + 7 <= headerEnd
+				    && strncmp(response + j, "chunked", 7) == 0) {
+					return 1;
+				}
+			}
+			return 0;
+		}
+	}
+	return 0;
+}
+
+/*
     DNS, then a socket, then connect -- with a bounded retry, because the third socket of a run once
     lost a race inside lwip. See RA_NET_CONNECT_TRIES.
 
@@ -214,16 +300,53 @@ int raNetHttpGet(const char* host, const char* path, char* out, int outSize, raN
 		setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	}
 
-	while (total < outSize - 1) {
-		const int got = recv(sock, out + total, outSize - 1 - total, 0);
+	{
+		/*
+		    The same early exit, and the four rungs that use this path are where it was measured:
+		    r=login, r=gameid, r=startsession and r=unlocks each took 10.2 seconds for about a
+		    kilobyte, against 5 seconds for the whole chip bring-up and DHCP lease.
 
-		if (got <= 0) {
-			if (p) {
-				p->closedByPeer = (got == 0);
+		    This reader keeps the raw reply -- status line, headers and body -- because that is what
+		    its callers were written against, so the header scan happens here rather than in the
+		    stream parser. Content-Length is read once, when the blank line arrives, and the read
+		    ends when that many body bytes have followed it. A chunked reply ends on its terminator
+		    instead, and a reply with neither still ends where it always did, at the close.
+		*/
+		u32  headerEnd = 0;
+		u32  bodyWanted = 0;
+		int  chunked = 0;
+
+		while (total < outSize - 1) {
+			const int got = recv(sock, out + total, outSize - 1 - total, 0);
+
+			if (got <= 0) {
+				if (p) {
+					p->closedByPeer = (got == 0);
+				}
+				break;
 			}
-			break;
+			total += got;
+			out[total] = 0;
+
+			if (!headerEnd) {
+				const char* blank = strstr(out, "\r\n\r\n");
+
+				if (blank) {
+					headerEnd  = (u32)(blank + 4 - out);
+					bodyWanted = raNetHeaderLength(out, headerEnd);
+					chunked    = raNetHeaderChunked(out, headerEnd);
+				}
+			}
+			if (headerEnd) {
+				if (bodyWanted && (u32)total - headerEnd >= bodyWanted) {
+					break;
+				}
+				if (chunked && total >= 5
+				    && memcmp(out + total - 5, "0\r\n\r\n", 5) == 0) {
+					break;
+				}
+			}
 		}
-		total += got;
 	}
 	out[total] = 0;
 	lwip_close(sock);
@@ -276,9 +399,14 @@ static void raNetStreamEmit(raNetStream* s, const char* data, int length) {
 }
 
 /*
-    One finished header line. Only two of them are read, and the rest are deliberately ignored:
-    Content-Length is not needed because `Connection: close` and the chunk terminator both say
-    where the body ends, and a length we believed but did not enforce would be worse than none.
+    One finished header line. Three of them are read now, and the third is the one that matters:
+    Content-Length says where the body ends *without waiting for the socket to*.
+
+    The note here used to say Content-Length was not needed, because `Connection: close` and the
+    chunk terminator both give the same answer. Both do. What that missed is the cost: waiting for a
+    close means waiting, and the timing line put every one-kilobyte request at 10.2 seconds against a
+    chip and a DHCP lease that together cost 5. Believed but not enforced would indeed be worse than
+    none -- so it is enforced, and the counted bytes are what end the read.
 */
 static void raNetStreamHeaderLine(raNetStream* s) {
 	s->line[s->lineLength] = 0;
@@ -346,6 +474,35 @@ static void raNetStreamHeaderLine(raNetStream* s) {
 			}
 		}
 	}
+
+	/* ...and the length, when the reply gives one. */
+	{
+		static const char length[] = "content-length:";
+		u32               i;
+
+		for (i = 0; length[i]; i++) {
+			char c = s->line[i];
+
+			if (c >= 'A' && c <= 'Z') {
+				c = (char)(c - 'A' + 'a');
+			}
+			if (c != length[i]) {
+				break;
+			}
+		}
+		if (!length[i]) {
+			u32 value = 0;
+
+			while (s->line[i] == ' ') {
+				i++;
+			}
+			while (s->line[i] >= '0' && s->line[i] <= '9') {
+				value = value * 10 + (u32)(s->line[i] - '0');
+				i++;
+			}
+			s->contentLength = value;
+		}
+	}
 	s->lineLength = 0;
 }
 
@@ -404,6 +561,9 @@ void raNetStreamFeed(raNetStream* s, const char* data, int length) {
 				}
 				/* A zero-length chunk is the end of the body. Trailers are not ours to want. */
 				s->state = s->chunkLeft ? RA_NET_STREAM_DATA : RA_NET_STREAM_TRAILER;
+				if (!s->chunkLeft) {
+					s->done = 1;
+				}
 			} else if (data[i] != '\r' && s->lineLength < sizeof(s->line) - 1) {
 				s->line[s->lineLength++] = data[i];
 			}
@@ -500,6 +660,13 @@ int raNetHttpGetStream(const char* host, const char* path, raNetSink sink, void*
 			break;
 		}
 		raNetStreamFeed(&stream, rx, got);
+		/*
+		    Stop the moment the body is whole, instead of reading on until the peer closes. See
+		    raNetStream.contentLength -- this is where the wait was.
+		*/
+		if (stream.done) {
+			break;
+		}
 	}
 	lwip_close(sock);
 

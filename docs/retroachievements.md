@@ -7916,24 +7916,67 @@ alive across stages — and each of those asked DNS again. lwip caches, but a mi
 the resolver on a link this fork has measured at its slowest, and there is no version of "the address
 of retroachievements.org" that changes between two rungs of the same boot. Resolved once per boot now.
 
-### What is left, and what each would cost to take
+### The timeline, and it was not what anyone would have guessed
 
-Ordered by what the timing line will probably show, not by what is easiest:
+| Stage | starts | costs |
+| --- | --- | --- |
+| hash the ROM | 0.2s | 0.4s |
+| read `ra.cfg` | 0.6s | — |
+| chip up and associate | 0.6s | 1.3s |
+| DHCP | 1.9s | 3.2s |
+| `r=login` | 5.1s | **10.3s** |
+| `r=gameid` | 15.4s | **10.2s** |
+| `r=startsession` | 25.6s | **10.2s** |
+| send the queue (empty) | 35.8s | — |
+| `r=unlocks` | 35.8s | **10.2s** |
+| `r=patch`, 64,424 bytes | 46.0s | **13.8s** |
+| **total** | | **59.8s** |
 
-- **The chip bring-up and the DHCP lease.** This is dsiwifi's, not ours: SDIO reset, BMI, a firmware
-  upload, WMI, a scan, association, then a lease. `RA_WIFI_WAIT_CHIP` is 20 seconds and
-  `RA_WIFI_WAIT_DHCP` is 30, and those are ceilings rather than costs — but the real numbers are
-  unknown, which is exactly what the timeline is for. Nothing here is ours to make faster; what is
-  ours is whether to do it at all.
-- **`r=patch` re-downloads the whole set every boot**, and the set does not change between two
-  sessions of the same game. There is already a per-game cache and it is only used when the ladder
-  *fails*. Using it when the ladder succeeds — refetching every N days, or when the account's unlock
-  count has moved — would remove the largest single transfer from the common boot. The cost is that a
-  set updated on the server is not seen until the cache expires, which is a real tradeoff and belongs
-  to whoever is playing rather than to this file.
-- **`sync=0` already exists** and is the honest answer for a session where nobody wants to wait:
-  achievements are still detected, still shown, still queued, and one later boot with `sync=1` drains
-  the queue. Syncing and playing become separate activities, which is what they always were.
+**The radio is 5 seconds of it.** The chip bring-up everyone would have blamed — SDIO reset, BMI, a
+full firmware upload, WMI, a scan, WPA2 — is 1.3 seconds, and the DHCP lease is 3.2.
+
+**Four requests cost 10.2 seconds each for about a kilobyte.** A cost that is identical across four
+replies of different sizes is not a transfer, it is a wait. And the fifth is the same 10.2 plus 3.6
+for the 64 KB that actually moved — which says the transfer rate was never the problem either.
+
+### Reading until the peer closes means waiting for the peer to close
+
+```c
+while (total < outSize - 1) {
+	const int got = recv(sock, out + total, outSize - 1 - total, 0);
+	if (got <= 0) break;      /* ...after SO_RCVTIMEO, every time */
+	total += got;
+}
+```
+
+The body arrives in the first recv or two. Then the loop asks for more, and there is no more, so it
+sits on the socket timeout before the peer's close is noticed.
+
+A note in `raNetStreamHeaderLine()` had already decided against the fix, and reads as a warning now:
+
+> Content-Length is not needed because `Connection: close` and the chunk terminator both say where
+> the body ends, and a length we believed but did not enforce would be worse than none.
+
+Both statements are true. What they miss is the price: one of those two ways of knowing costs a
+socket timeout every time it is used. So the length is read now — and *enforced*, which answers the
+second half honestly: `done` is set only when the counted bytes reach the declared length, so a
+reply that promises more than it sends still ends where it always did, at the close.
+
+Both readers get it. The streaming one stops on `stream.done`; the plain one keeps returning the raw
+reply its callers were written against, so it scans the headers itself — `raNetHeaderLength()` and
+`raNetHeaderChunked()`, pure and host-driven, because every part of it is a string problem: the
+header is case-insensitive by the standard, Cloudflare does not send it the way anyone expects, and a
+`Content-Length` appearing inside a body of achievement descriptions must never be mistaken for the
+header.
+
+### What is left after this
+
+- **`r=patch` still re-downloads an unchanged set**, now the largest remaining item at ~3.6s of real
+  transfer. The per-game cache exists and is used only when the ladder *fails*; using it when the
+  ladder succeeds would remove that too, at the cost of a set that can go stale.
+- **The radio is 5 seconds** and is not worth attacking.
+- **`sync=0`** remains the honest answer for a session where nobody wants to wait at all.
+
 
 ## An achievement's detail page says when it was earned
 
