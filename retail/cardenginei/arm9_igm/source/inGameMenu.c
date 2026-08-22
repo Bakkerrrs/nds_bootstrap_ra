@@ -550,6 +550,42 @@ static bool sameCode(const char* a, const char* b) {
 }
 
 /*
+    A number right-aligned in `width` cells, without printDec()'s leading zeros.
+
+    printDec() writes exactly the digits it is asked for, taken from the low end -- so a count of 101
+    in two cells prints `01`, which is what the achievements header did on *Chrono Trigger*: a set of
+    a hundred and one read as a set of one. It was never a counting fault, and it would have gone on
+    reading plausibly wrong on every set past ninety-nine.
+
+    Widening the field alone is not the fix, because printDec() pads with zeros: three cells turn a
+    forty-five-achievement set into `045`. The screen is cleared at the top of every draw, so the
+    leading cells are already blank and the number only has to be placed -- which is all this does.
+
+    Clamped at `width` cells rather than overrunning: a value too large for the field loses its top
+    digits, which is the old bug in miniature, but RA_VIEWER_MAX_ENTRIES is 128 and every caller here
+    passes 3.
+*/
+/*
+    Three cells is enough for every count this menu shows, and it is checked rather than believed:
+    the field that was too small is exactly what this function exists to stop happening again.
+*/
+typedef char raCountFitsThreeCells[(RA_VIEWER_MAX_ENTRIES <= 999 && RA_QUEUE_MAX <= 99) ? 1 : -1];
+
+static void raPrintNum(int x, int y, int width, u32 val, FontPalette palette) {
+	int digits = 1;
+	u32 rest   = val;
+
+	while (rest >= 10) {
+		rest /= 10;
+		digits++;
+	}
+	if (digits > width) {
+		digits = width;
+	}
+	printDec(x + width - digits, y, val, digits, palette, false);
+}
+
+/*
     RetroAchievements: what is earned and not yet sent.
 
     One line per game, three fields -- the game, how many of its unlocks are still owed, and how long
@@ -576,8 +612,13 @@ static void raPendingPage(void) {
 	} else if (b->total + b->session == 0) {
 		print(0, 2, (unsigned char*)"Nothing waiting to sync", FONT_LIME, false);
 	} else {
-		printDec(0, 2, b->total + b->session, 1, FONT_WHITE, false);
-		print(2, 2, (unsigned char*)"waiting to sync", FONT_WHITE, false);
+		/*
+		    Two cells, not one. The queue holds up to RA_QUEUE_MAX records and a single cell showed
+		    the low digit of anything past nine -- twelve waiting read as two. Same defect as the
+		    achievements header, one page away, found while fixing that one.
+		*/
+		raPrintNum(0, 2, 2, (u32)(b->total + b->session), FONT_WHITE);
+		print(3, 2, (unsigned char*)"waiting to sync", FONT_WHITE, false);
 
 		line = 4;
 		for (int i = 0; i < b->games && line < 19; i++, line++) {
@@ -625,13 +666,13 @@ static void raPendingPage(void) {
 
 		/* Said rather than folded away: a screen that under-reports what is owed is worse. */
 		if (b->dropped) {
-			printDec(1, line + 1, b->dropped, 1, FONT_RED, false);
-			print(3, line + 1, (unsigned char*)"more game(s) not shown", FONT_RED, false);
+			raPrintNum(1, line + 1, 2, b->dropped, FONT_RED);
+			print(4, line + 1, (unsigned char*)"more game(s) not shown", FONT_RED, false);
 			line++;
 		}
 		if (b->unnamed) {
-			printDec(1, line + 1, b->unnamed, 1, FONT_LIGHT_GRAY, false);
-			print(3, line + 1, (unsigned char*)"of unknown origin", FONT_LIGHT_GRAY, false);
+			raPrintNum(1, line + 1, 2, b->unnamed, FONT_LIGHT_GRAY);
+			print(4, line + 1, (unsigned char*)"of unknown origin", FONT_LIGHT_GRAY, false);
 		}
 	}
 
@@ -689,13 +730,38 @@ static void raAchievementsPage(void) {
 		    and `02 of 45` as `2 of 45`. Nothing on this page may start at column 0.
 		*/
 		print(1, 0, igmText.raMenu[RA_MENU_ACHIEVEMENTS], FONT_WHITE, false);
-		printDec(1, 1, v->earned, 2, FONT_LIME, false);
-		print(4, 1, (unsigned char*)"of", FONT_LIGHT_GRAY, false);
-		printDec(7, 1, v->count, 2, FONT_WHITE, false);
-		print(10, 1, (unsigned char*)"earned", FONT_LIGHT_GRAY, false);
+		/*
+		    Three cells each, because RA_VIEWER_MAX_ENTRIES is 128 and two cells silently showed the
+		    low two digits of anything larger -- see raPrintNum().
+		*/
+		raPrintNum(1, 1, 3, v->earned, FONT_LIME);
+		print(5, 1, (unsigned char*)"of", FONT_LIGHT_GRAY, false);
+		raPrintNum(8, 1, 3, v->count, FONT_WHITE);
+		print(12, 1, (unsigned char*)"earned", FONT_LIGHT_GRAY, false);
 		if (v->queued) {
-			printDec(17, 1, v->queued, 2, FONT_RED, false);
-			print(20, 1, (unsigned char*)"to sync", FONT_LIGHT_GRAY, false);
+			raPrintNum(19, 1, 3, v->queued, FONT_RED);
+			print(23, 1, (unsigned char*)"sync", FONT_LIGHT_GRAY, false);
+		}
+		/*
+		    How far through the set this account is, at the right-hand end of the same line.
+
+		    **Queued counts.** An achievement that has fired but not been sent is earned -- it is the
+		    same thing the list marks with a star -- and a percentage that ignored it would fall
+		    behind the stars on the page under it. The two counts are disjoint in practice: QUEUED is
+		    this console's word for an unlock, EARNED is the server's answer, and an unlock crosses
+		    from one to the other on the boot that submits it.
+
+		    Clamped at 100 rather than trusted: the counts come from a block another binary wrote.
+		*/
+		{
+			const u32 done  = (u32)v->earned + (u32)v->queued;
+			u32       percent = v->count ? (done * 100) / v->count : 0;
+
+			if (percent > 100) {
+				percent = 100;
+			}
+			raPrintNum(28, 1, 3, percent, FONT_LIGHT_BLUE);
+			print(31, 1, (unsigned char*)"%", FONT_LIGHT_BLUE, false);
 		}
 
 		for (i = 0; i < rows && top + i < v->count; i++) {

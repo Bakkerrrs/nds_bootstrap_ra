@@ -7860,6 +7860,58 @@ The number to watch for a future set is therefore **not the achievement count** 
 memrefs and modified memrefs, which is what `rcPeeks` and the host's list walk report. A set of a
 hundred simple definitions is cheaper than fifty full of `AddSource` arithmetic.
 
+## `01 of 101` — a set of a hundred and one read as a set of one
+
+Reported on *Chrono Trigger*: the achievements page's header counted the total wrong, and only on
+that game. It was never a counting fault. `printDec()` writes exactly the digits it is asked for,
+taken from the low end:
+
+```c
+void printDec(int x, int y, u32 val, int digits, FontPalette palette, bool main) {
+	u16 *dst = ... + y * 0x20 + x;
+	for (int i = digits - 1; i >= 0; i--) {
+		*(dst + i) = ('0' + (val % 10)) | palette << 12;
+		val /= 10;
+	}
+}
+```
+
+The header asked for two cells. Every other set tested has been under a hundred, so two cells were
+enough and the field looked correct for a year. *Chrono Trigger*'s is over it, and 101 in two cells
+is `01`.
+
+**Widening the field is not the whole fix**, because `printDec()` pads with zeros: three cells turn a
+forty-five-achievement set into `045`. `raPrintNum()` counts the digits first and places the number
+right-aligned in the field. The screen is cleared at the top of every draw, so the leading cells are
+already blank and the number only has to be *placed* — there is nothing to pad with.
+
+And the same defect was one page away. Sync Pending printed its total in **one** cell, so twelve
+records waiting read as two. The queue holds up to `RA_QUEUE_MAX` of them.
+
+Both fields are now three and two cells respectively, and the sizes are checked at compile time
+rather than believed:
+
+```c
+typedef char raCountFitsThreeCells[(RA_VIEWER_MAX_ENTRIES <= 999 && RA_QUEUE_MAX <= 99) ? 1 : -1];
+```
+
+That pin is the actual lesson. A field too narrow for its source does not fail — it reports a smaller
+number, plausibly, forever, and only a set that crosses the boundary ever exposes it.
+
+### ...and the percentage, on the right of the same line
+
+```
+  12 of 101 earned   3 sync  14%
+ 101 of 101 earned          100%
+```
+
+**Queued counts toward it.** An achievement that has fired but not been sent is earned — it is the
+same thing the list below marks with a star — and a percentage that ignored it would fall behind the
+stars on the page under it. The two counts are disjoint in practice: `QUEUED` is this console's word
+for an unlock and `EARNED` is the server's answer, and an unlock crosses from one to the other on the
+boot that submits it. Clamped at 100 rather than trusted, because the counts come from a block
+another binary wrote.
+
 ## The boot screen has two audiences, and `verbose_log` is which one it is for
 
 The launcher's RA ladder narrated everything it did to the screen: stage headings, the SCFG
