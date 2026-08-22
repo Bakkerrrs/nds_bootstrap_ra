@@ -251,6 +251,236 @@ static void test_config(void) {
 	/* `spaced` is nobody's key: a typo has to be visible. */
 	CHECK(cfg.unknown == 1);
 	CHECK(cfg.badLines == 1);
+	/*
+	    A file that has never heard of verbose_log gets the quiet screen -- the one default in the
+	    parser that is not "behave as before", and worth pinning because it is a visible change to
+	    every existing card.
+	*/
+	CHECK(cfg.verboseLog == 0);
+
+	printf("\nverbose_log is off unless the file asks for it\n");
+	{
+		raConfig vcfg;
+		FILE*    vf = fopen(path, "w");
+
+		fputs("username=u\npassword=p\nverbose_log=1\n", vf);
+		fclose(vf);
+		CHECK(raConfigRead(path, &vcfg) == true);
+		CHECK(vcfg.verboseLog == 1);
+		/* Recognised, so it must not be counted as somebody's typo. */
+		CHECK(vcfg.unknown == 0);
+		CHECK(vcfg.notYet == 0);
+
+		vf = fopen(path, "w");
+		fputs("username=u\npassword=p\nverbose_log=0\n", vf);
+		fclose(vf);
+		CHECK(raConfigRead(path, &vcfg) == true);
+		CHECK(vcfg.verboseLog == 0);
+		/* And it changes nothing else: sync and submit keep their own defaults. */
+		CHECK(vcfg.sync == 1);
+		CHECK(vcfg.submit == 1);
+	}
+
+	printf("\nthe body's end is read from the headers, not waited for\n");
+	{
+		/*
+		    This is where fifty of the sixty seconds were. Reading until the peer closes means
+		    waiting for the peer to close, and the timing line put every one-kilobyte request at
+		    10.2 seconds against a chip bring-up and a DHCP lease that together cost 5.
+
+		    Driven on the host because every part of it is a string problem: the header is
+		    case-insensitive by the standard, Cloudflare does not send it the way anyone expects, and
+		    a `Content-Length` appearing in the *body* must never be found.
+		*/
+		const char* r1 = "HTTP/1.1 200 OK\r\nContent-Length: 1087\r\n\r\n{\"Success\":true}";
+		const char* r2 = "HTTP/1.1 200 OK\r\ncontent-length:42\r\n\r\nbody";
+		const char* r3 = "HTTP/1.1 200 OK\r\nCONTENT-LENGTH:   7\r\n\r\nbody";
+		const char* r4 = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n";
+		const char* r5 = "HTTP/1.1 200 OK\r\nServer: cloudflare\r\n\r\nbody";
+
+		CHECK(raNetHeaderLength(r1, (u32)(strstr(r1, "\r\n\r\n") - r1 + 4)) == 1087);
+		CHECK(raNetHeaderLength(r2, (u32)(strstr(r2, "\r\n\r\n") - r2 + 4)) == 42);
+		CHECK(raNetHeaderLength(r3, (u32)(strstr(r3, "\r\n\r\n") - r3 + 4)) == 7);
+		/* A reply that does not say has no length, and falls back to ending at the close. */
+		CHECK(raNetHeaderLength(r5, (u32)(strstr(r5, "\r\n\r\n") - r5 + 4)) == 0);
+
+		CHECK(raNetHeaderChunked(r4, (u32)(strstr(r4, "\r\n\r\n") - r4 + 4)) == 1);
+		CHECK(raNetHeaderChunked(r1, (u32)(strstr(r1, "\r\n\r\n") - r1 + 4)) == 0);
+		/* `identity` is a Transfer-Encoding and is not chunked. */
+		{
+			const char* r6 = "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\n\r\nbody";
+
+			CHECK(raNetHeaderChunked(r6, (u32)(strstr(r6, "\r\n\r\n") - r6 + 4)) == 0);
+		}
+		/*
+		    And the one that would be a real bug: a body mentioning the header must not be mistaken
+		    for the header. The bound is what stops it, and a reply whose body is a JSON object full
+		    of achievement descriptions is exactly the kind of body that could contain anything.
+		*/
+		{
+			const char* r7 = "HTTP/1.1 200 OK\r\n\r\n{\"d\":\"Content-Length: 99\"}";
+
+			CHECK(raNetHeaderLength(r7, (u32)(strstr(r7, "\r\n\r\n") - r7 + 4)) == 0);
+		}
+		/* A header name that only starts a line counts; one in the middle of a line does not. */
+		{
+			const char* r8 = "HTTP/1.1 200 OK\r\nX: content-length: 5\r\n\r\nbody";
+
+			CHECK(raNetHeaderLength(r8, (u32)(strstr(r8, "\r\n\r\n") - r8 + 4)) == 0);
+		}
+	}
+
+	printf("\nan earned date packs into a word and comes back out\n");
+	{
+		/*
+		    Two sources feed this -- a server timestamp converted to local time, and the queue file's
+		    own stamp -- and the menu unpacks it with shifts because it has no calendar library. A
+		    packing that lost a field would show a plausible wrong date, which is the failure mode
+		    this project has now been bitten by twice on this very page.
+		*/
+		const u32 w = raWhenPack(2026, 8, 22, 14, 7);
+
+		CHECK(w != 0);
+		CHECK(RA_WHEN_YEAR(w) == 2026);
+		CHECK(RA_WHEN_MONTH(w) == 8);
+		CHECK(RA_WHEN_DAY(w) == 22);
+		CHECK(RA_WHEN_HOUR(w) == 14);
+		CHECK(RA_WHEN_MINUTE(w) == 7);
+		/* Both ends of every field, since each one is a different width. */
+		{
+			const u32 lo = raWhenPack(2000, 1, 1, 0, 0);
+			const u32 hi = raWhenPack(2127, 12, 31, 23, 59);
+
+			CHECK(lo != 0 && RA_WHEN_YEAR(lo) == 2000 && RA_WHEN_MONTH(lo) == 1
+			      && RA_WHEN_DAY(lo) == 1 && RA_WHEN_HOUR(lo) == 0 && RA_WHEN_MINUTE(lo) == 0);
+			CHECK(hi != 0 && RA_WHEN_YEAR(hi) == 2127 && RA_WHEN_MONTH(hi) == 12
+			      && RA_WHEN_DAY(hi) == 31 && RA_WHEN_HOUR(hi) == 23 && RA_WHEN_MINUTE(hi) == 59);
+		}
+		/* Out of range is 0, not a wrapped date: the menu prints nothing for 0 and that is correct. */
+		CHECK(raWhenPack(1999, 1, 1, 0, 0) == 0);
+		CHECK(raWhenPack(2128, 1, 1, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 0, 1, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 13, 1, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 1, 0, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 1, 32, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 1, 1, 24, 0) == 0);
+		CHECK(raWhenPack(2026, 1, 1, 0, 60) == 0);
+		/*
+		    Zero has to be unreachable from a real date, because that is what "not known" is. Month
+		    and day are 1-based, so the month field can never be zero on a packed value.
+		*/
+		CHECK(raWhenPack(2000, 1, 1, 0, 0) != 0);
+
+		/* ...and from the queue file's own stamp, which is where a locally earned unlock's time is. */
+		CHECK(raWhenFromStamp("20260822140755") == raWhenPack(2026, 8, 22, 14, 7));
+		/* Seconds are read and dropped -- the field has no room and a minute is the useful unit. */
+		CHECK(raWhenFromStamp("20260822140700") == raWhenFromStamp("20260822140759"));
+		/* Anything that is not fourteen digits is refused rather than half-read. */
+		CHECK(raWhenFromStamp("2026082214075") == 0);
+		CHECK(raWhenFromStamp("2026-08-22 14:07") == 0);
+		CHECK(raWhenFromStamp("") == 0);
+		CHECK(raWhenFromStamp(NULL) == 0);
+		/* A stamp that parses but is not a date is still refused, by raWhenPack's ranges. */
+		CHECK(raWhenFromStamp("20269922140700") == 0);
+	}
+
+	printf("\nthe progress bar agrees with its own percentage\n");
+	{
+		char bar[RA_BAR_MIN];
+
+		/*
+		    A full bar beside "95%" is the kind of thing that gets reported as a bug, so the cells and
+		    the number come from the same rounded division and both ends are pinned.
+		*/
+		raWifiBar(bar, sizeof(bar), 0, RA_STEP_MAX);
+		CHECK(strcmp(bar, "[----------------------]   0%") == 0);
+		raWifiBar(bar, sizeof(bar), RA_STEP_MAX, RA_STEP_MAX);
+		CHECK(strcmp(bar, "[######################] 100%") == 0);
+		raWifiBar(bar, sizeof(bar), 5, 10);
+		CHECK(strcmp(bar, "[###########-----------]  50%") == 0);
+		/* Rounded, not truncated: 3 of 10 is 6.6 cells and reads as 7. */
+		raWifiBar(bar, sizeof(bar), 3, 10);
+		CHECK(strcmp(bar, "[#######---------------]  30%") == 0);
+		/* It fits the console: 32 columns, and the bar must not be the thing that wraps. */
+		CHECK(strlen(bar) <= 32);
+
+		/* A step past the end is clamped rather than overrunning the buffer. */
+		raWifiBar(bar, sizeof(bar), 200, RA_STEP_MAX);
+		CHECK(strcmp(bar, "[######################] 100%") == 0);
+		/* ...and zero steps is one step, because a bar with no denominator still has to draw. */
+		raWifiBar(bar, sizeof(bar), 1, 0);
+		CHECK(strcmp(bar, "[######################] 100%") == 0);
+
+		/*
+		    The spinner is one cell that pulses. A wrong mask here shows a space, and a spinner that
+		    stops is exactly what it exists to rule out -- a stalled run looking identical to a
+		    waiting one.
+		*/
+		{
+			u8 t;
+
+			CHECK(raWifiSpinFrame(0) == '.');
+			CHECK(raWifiSpinFrame(1) == 'o');
+			CHECK(raWifiSpinFrame(2) == 'O');
+			/* Symmetric: it returns through 'o' rather than snapping back, so it breathes. */
+			CHECK(raWifiSpinFrame(3) == 'o');
+			CHECK(raWifiSpinFrame(4) == '.');
+			/* Every tick in a byte prints something, including the wrap. */
+			for (t = 0; t < 255; t++) {
+				if (raWifiSpinFrame(t) <= ' ') {
+					break;
+				}
+			}
+			CHECK(t == 255);
+			CHECK(raWifiSpinFrame(255) > ' ');
+		}
+
+		/*
+		    Centring, and it is the fix for the layout coming apart rather than a nicety.
+
+		    Writing the console's final cell advances the cursor past the end, the console wraps to
+		    the next row, and every absolute row this code has addressed is then one out. So nothing
+		    may be placed where it could reach that column -- which is what the `cells + 1 >= width`
+		    guard is, and why the divisor is `width - 1`.
+		*/
+		CHECK(raWifiCentre(32, 24) == 3);      /* the bar: 24 cells of 32 */
+		CHECK(raWifiCentre(32, 1) == 15);      /* the pulse: one cell, its own row */
+		CHECK(raWifiCentre(32, 4) == 13);      /* " 45%" */
+		CHECK(raWifiCentre(32, 0) == 15);
+		/* A string that would reach the last column starts at 0 rather than being pushed off it. */
+		CHECK(raWifiCentre(32, 31) == 0);
+		CHECK(raWifiCentre(32, 32) == 0);
+		CHECK(raWifiCentre(32, 99) == 0);
+		/* And whatever it returns, the string still ends before the final column. */
+		{
+			u32 w, c;
+
+			for (w = 8; w <= 64; w++) {
+				for (c = 0; c <= w; c++) {
+					const u32 at = raWifiCentre(w, c);
+
+					if (at != 0 && at + c > w - 1) {
+						break;
+					}
+				}
+				if (c <= w) {
+					break;
+				}
+			}
+			CHECK(w == 65);
+		}
+		/* A zero-width console asks for nothing sensible and must not divide by it. */
+		CHECK(raWifiCentre(0, 4) == 0);
+
+		/* Too small a buffer terminates rather than writing what it cannot fit. */
+		{
+			char small[8];
+
+			memset(small, 0x5A, sizeof(small));
+			raWifiBar(small, sizeof(small), 5, 10);
+			CHECK(small[0] == 0);
+		}
+	}
 
 	/*
 	    And the secret must never be printable. The log is a file that gets sent to someone.
@@ -1797,12 +2027,13 @@ static void test_queue(void) {
 		/* And the block has to fit the reservation the heap was shortened to make room for. */
 		CHECK(sizeof(raPendingBlock) <= CARDENGINEI_ARM9_RA_PENDING_MAX);
 		/*
-		    Same pin for the viewer's index, and it earns it more: raViewerEntry is 12 bytes only
-		    because its three offsets are u16, and a field growing to u32 would push 128 entries past
-		    the reservation without a single line failing to compile. What it would overrun is the
-		    pending tally directly above it.
+		    Same pin for the viewer's index, and it earns it more: raViewerEntry is 16 bytes and 128
+		    of them plus the header is 2,060, so the reservation had to grow from 0x800 to 0xA00 when
+		    the entry gained the date an achievement was earned. Without this check that growth would
+		    have overrun the pending tally directly above it, with nothing failing to compile.
 		*/
 		CHECK(sizeof(raViewerBlock) <= CARDENGINEI_ARM9_RA_VIEWER_MAX);
+		CHECK(sizeof(raViewerEntry) == 16);
 		CHECK(RA_VIEWER_MAGIC == CARDENGINEI_ARM9_RA_VIEWER_MAGIC);
 		/*
 		    Same pin again for the session block, and this is the one where the two constants are

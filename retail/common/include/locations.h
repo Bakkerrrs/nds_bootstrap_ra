@@ -211,11 +211,16 @@
     definitions reserve 32K, the heap already stops below them, and the largest real set measured
     uses 9,662 of it. The launcher's cap comes down by both, so a set can never grow into either.
 
-    2K holds 128 entries of 12 bytes with room over. 128 is the ceiling rcheevos is given elsewhere
+    2.5K holds 128 entries of 16 bytes with room over. 128 is the ceiling rcheevos is given elsewhere
     in this fork, and a set larger than that is one the block would refuse before the index did.
+
+    It was 2K for a 12-byte entry, and grew when the entry gained the date an achievement was earned:
+    128 * 16 + the header is 2,060, which is twelve bytes past 0x800. The extra 512 comes out of the
+    rcheevos arena, which the fit test measures at about 11K of margin -- so the test that would
+    notice this going too far already exists and already runs.
 */
 #define CARDENGINEI_ARM9_RA_VIEWER_MAGIC             0x31564152   /* 'RAV1' */
-#define CARDENGINEI_ARM9_RA_VIEWER_MAX               0x800
+#define CARDENGINEI_ARM9_RA_VIEWER_MAX               0xA00
 #define CARDENGINEI_ARM9_RA_VIEWER_LOCATION          (CARDENGINEI_ARM9_RA_DEFS_LOCATION \
                                                       + CARDENGINEI_ARM9_RA_DEFS_MAX \
                                                       - CARDENGINEI_ARM9_RA_PENDING_MAX \

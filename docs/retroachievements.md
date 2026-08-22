@@ -7860,6 +7860,388 @@ The number to watch for a future set is therefore **not the achievement count** 
 memrefs and modified memrefs, which is what `rcPeeks` and the host's list walk report. A set of a
 hundred simple definitions is cheaper than fifty full of `AddSource` arithmetic.
 
+## The boot takes fifty seconds, and nobody could say where they went
+
+Reported as a standing complaint rather than a regression: the ladder has always been slow. And the
+log could not answer it — the rungs are a chip bring-up, a DHCP lease, five HTTP round trips and a
+hundred-kilobyte download, and which of them is the fifty seconds is not guessable from outside.
+
+So the first change is the measurement. `raWifiStep()` is already called once per stage in both
+modes, so one line there gives a timeline with no new call sites:
+
+```
+[  0s] Reading the game
+[  2s] Reading your settings
+[  2s] Connecting to Wi-Fi
+[ 21s] Getting a network address
+[ 24s] Signing in to your account
+...
+```
+
+**And `time(NULL)` was the wrong clock**, which hardware answered on the first run: every stage in
+the log read `[  0s]`. It reads a value the ARM7 refreshes, and in this launcher the ARM7 is running
+dsiwifi rather than libnds' own VBlank work — so the clock is set once at boot and then sits still.
+Correct for stamping an unlock, which is what it was measured doing; useless for measuring a boot.
+
+A VBlank counter was the other candidate and it is worse. `raWifiIdle()` runs in the wait loops and
+*not* inside a blocking `recv()`, which is precisely where the seconds being hunted are going. A
+timer counts through a blocked CPU; a frame counter cannot. TIMER0 cascaded into TIMER1 gives 32 bits
+at 32,728 Hz, read low-high-low so a wrap between the two registers cannot report a two-second jump.
+Both are stopped in `raWifiShutdown()` beside the one dsiwifi leaves behind.
+
+### The same log answered the other open question
+
+`console 32x24, map no`. **`consoleGetDefault()->fontBgMap` is null in this launcher**, so the tile
+map the fixed-layout screen drew into was never there — which is exactly why that build showed a
+black bottom screen and nothing else: `raMap` stayed null, the paint returned early every frame, and
+every other writer was gated off behind quiet mode.
+
+That is the reading the fifth attempt did not have and the reason the geometry line was kept. The
+fix it points at is small — `consoleSelect()` returns the *previously current* console, so calling it
+twice hands back the live one without changing anything — but the screen is not what this section is
+about, and a fixed layout is not what the boot time needs.
+
+### Two costs found by reading, both paid on every boot
+
+**The tail drain was eight seconds, flat.** It exists because dsiwifi narrates asynchronously and
+keeps talking after the last rung is decided — the probe's first hardware run printed the line naming
+the access point *after* its own summary. What it did not need was to spend the full eight seconds
+every time, and it did: there was no early exit. Eight seconds came off every boot this fork has ever
+done, whether there was anything left to say or not. It now ends after half a second of silence, with
+the same ceiling as before for a chip that keeps talking.
+
+**DNS was resolved once per request.** Every rung opens its own connection — each request carries
+`Connection: close`, because a DS with 191K of heap after lwip is up is not a place to keep sockets
+alive across stages — and each of those asked DNS again. lwip caches, but a miss is a round trip to
+the resolver on a link this fork has measured at its slowest, and there is no version of "the address
+of retroachievements.org" that changes between two rungs of the same boot. Resolved once per boot now.
+
+### The timeline, and it was not what anyone would have guessed
+
+| Stage | starts | costs |
+| --- | --- | --- |
+| hash the ROM | 0.2s | 0.4s |
+| read `ra.cfg` | 0.6s | — |
+| chip up and associate | 0.6s | 1.3s |
+| DHCP | 1.9s | 3.2s |
+| `r=login` | 5.1s | **10.3s** |
+| `r=gameid` | 15.4s | **10.2s** |
+| `r=startsession` | 25.6s | **10.2s** |
+| send the queue (empty) | 35.8s | — |
+| `r=unlocks` | 35.8s | **10.2s** |
+| `r=patch`, 64,424 bytes | 46.0s | **13.8s** |
+| **total** | | **59.8s** |
+
+**The radio is 5 seconds of it.** The chip bring-up everyone would have blamed — SDIO reset, BMI, a
+full firmware upload, WMI, a scan, WPA2 — is 1.3 seconds, and the DHCP lease is 3.2.
+
+**Four requests cost 10.2 seconds each for about a kilobyte.** A cost that is identical across four
+replies of different sizes is not a transfer, it is a wait. And the fifth is the same 10.2 plus 3.6
+for the 64 KB that actually moved — which says the transfer rate was never the problem either.
+
+### Reading until the peer closes means waiting for the peer to close
+
+```c
+while (total < outSize - 1) {
+	const int got = recv(sock, out + total, outSize - 1 - total, 0);
+	if (got <= 0) break;      /* ...after SO_RCVTIMEO, every time */
+	total += got;
+}
+```
+
+The body arrives in the first recv or two. Then the loop asks for more, and there is no more, so it
+sits on the socket timeout before the peer's close is noticed.
+
+A note in `raNetStreamHeaderLine()` had already decided against the fix, and reads as a warning now:
+
+> Content-Length is not needed because `Connection: close` and the chunk terminator both say where
+> the body ends, and a length we believed but did not enforce would be worse than none.
+
+Both statements are true. What they miss is the price: one of those two ways of knowing costs a
+socket timeout every time it is used. So the length is read now — and *enforced*, which answers the
+second half honestly: `done` is set only when the counted bytes reach the declared length, so a
+reply that promises more than it sends still ends where it always did, at the close.
+
+Both readers get it. The streaming one stops on `stream.done`; the plain one keeps returning the raw
+reply its callers were written against, so it scans the headers itself — `raNetHeaderLength()` and
+`raNetHeaderChunked()`, pure and host-driven, because every part of it is a string problem: the
+header is case-insensitive by the standard, Cloudflare does not send it the way anyone expects, and a
+`Content-Length` appearing inside a body of achievement descriptions must never be mistaken for the
+header.
+
+### Hardware: 59.8s to 10.5s, and the block is byte-identical
+
+| Stage | before | after |
+| --- | --- | --- |
+| hash the ROM | 0.4s | 0.4s |
+| chip up and associate | 1.3s | 1.3s |
+| DHCP | 3.2s | 3.3s |
+| `r=login` | **10.3s** | **0.5s** |
+| `r=gameid` | **10.2s** | **0.3s** |
+| `r=startsession` | **10.2s** | **0.4s** |
+| `r=unlocks` | **10.2s** | **0.5s** |
+| `r=patch` | **13.8s** | **3.5s** |
+| **total** | **59.8s** | **10.5s** |
+
+**What makes this proof rather than a claim** is that `body was 64424 bytes` and `block 26691 of
+29431 used` are identical to the slow run's. Had the early exit truncated anything, the patch body
+would have arrived short and the block would not land on the same byte. With them: `98 kept`, `98
+with ids`, `4 clipped`, `98/98 desc/points`, `24 clipped`, `already earned 4` with all four ids,
+`staged 98 definitions`, `reached stage 15 of 15`.
+
+The 3.5s left in `r=patch` is the 64 KB actually moving, which is what the breakdown predicted:
+10.2 fixed plus 3.6 real, with only the real part remaining.
+
+**The one hazard the change introduces**, written down rather than left implicit: a server declaring
+a `Content-Length` smaller than what it sends would be truncated here. HTTP servers do not do that,
+and one that did would already have defeated the JSON parsing. A reply with neither header behaves
+exactly as before and waits for the close — so the worst case of this change is the old behaviour,
+not a broken one.
+
+### What is left, and why the obvious one is now not worth doing
+
+- **`r=patch` re-downloading an unchanged set is no longer the lever it was.** At 60 seconds it was
+  the largest transfer in the boot; at 10.5 it is 3.5 seconds of a ten-second boot. Using the
+  per-game cache when the ladder *succeeds* would recover about three of them and would cost a set
+  that can go stale between server-side revisions. **Not worth it** — recorded as a decision rather
+  than as an open item.
+- **The radio is 5 of the 10 seconds** and is dsiwifi's, not ours.
+- **`sync=0`** remains the answer for a session where nobody wants to wait at all, and is now a much
+  smaller saving than it was.
+
+
+## An achievement's detail page says when it was earned
+
+`r=startsession` is the only rung in this API that answers the question. `r=unlocks` replies in bare
+ids and `r=patch` describes the *set* rather than the account, but a session reply carries objects:
+
+```json
+{"Success":true,"ServerNow":1786244358,
+ "HardcoreUnlocks":[{"ID":91467,"When":1786166850}],
+ "Unlocks":[{"ID":93119,"When":1786243172}, ...]}
+```
+
+That reply was already being made, and already being parsed for its ids. The dates were sitting
+beside them, unread.
+
+### The path, and why each hop is where it is
+
+| Where | What happens |
+| --- | --- |
+| `r=startsession`, stage 12 | ids and `When`s extracted into a table; `ServerNow` against the RTC gives this console's offset from UTC |
+| `r=patch`, stage 15 | each earned achievement's `#!` record gains a fifth field: the date, packed |
+| the bootloader | copies the block into DSi WRAM as it always did |
+| `cardenginei_arm9_ra` | reads that field into `raViewerEntry.when` while indexing |
+| the in-game menu | unpacks five fields with shifts and prints them |
+
+**The conversion happens in the launcher**, and that is the load-bearing choice. The launcher has a
+real clock and a real libc; the in-game menu has neither and has no business owning a calendar. So a
+date crosses as 27 bits and the menu does five shifts.
+
+**And it is packed rather than left as an epoch,** which costs the same four bytes. An epoch would
+have pushed the calendar arithmetic across the boundary into the binary that cannot afford it.
+
+### Two clocks, and `ServerNow` is what reconciles them
+
+The server answers in UTC. The queue file's stamps are the console's local time. The page shows both
+kinds of date side by side — a server-confirmed unlock and one still waiting to sync — so one of them
+has to be converted or the page tells the truth twice in two different timezones.
+
+There is no timezone setting anywhere in this fork to consult, and `ServerNow` makes one unnecessary:
+it is the server's clock at the moment this console's clock read `time(NULL)`, so the difference
+between them *is* this console's offset from UTC, whether or not anyone ever configured it. A console
+with a wrong RTC gets wrong dates here — and it already writes wrong stamps into the queue, so
+trusting it breaks nothing that was not already broken.
+
+### When there is no date, nothing is printed
+
+Three ways for that to happen, and none of them prints "unknown":
+
+- **The account does not hold it.** The status line above has already said so.
+- **It was earned during this session.** The flag flips while the game runs, and nothing in that
+  context has a date — `sharedAddr` carries hours and minutes and no calendar at all.
+- **The block filled.** The date is the first field `raPatchWriteEarned()` trims, ahead of the
+  description, and the only one whose loss is not counted: the other three are text a person came
+  here to read.
+
+An empty row says less than a wrong one, and "unknown" beside an achievement a player is looking at
+invites the question of what else about it is unknown.
+
+### What it cost
+
+`raViewerEntry` went from 12 bytes to 16, so 128 of them plus the header is 2,060 and the viewer
+reservation grew from `0x800` to `0xA00`. That comes out of the definitions block's own 32K, which
+the largest measured set uses 26,663 of. `sizeof(raViewerEntry) == 16` is now pinned on the host
+beside the reservation check — without it, the growth would have overrun the pending tally directly
+above with nothing failing to compile.
+
+`raWhenPack()` refuses anything out of range rather than wrapping it, because a wrong date shown
+confidently is worse than no date, and both of its sources are external: a stamp from a file a person
+can edit, and a timestamp from a server. Zero cannot collide with a real value — month and day are
+1-based, so a packed date always has a non-zero month field.
+
+## `01 of 101` — a set of a hundred and one read as a set of one
+
+Reported on *Chrono Trigger*: the achievements page's header counted the total wrong, and only on
+that game. It was never a counting fault. `printDec()` writes exactly the digits it is asked for,
+taken from the low end:
+
+```c
+void printDec(int x, int y, u32 val, int digits, FontPalette palette, bool main) {
+	u16 *dst = ... + y * 0x20 + x;
+	for (int i = digits - 1; i >= 0; i--) {
+		*(dst + i) = ('0' + (val % 10)) | palette << 12;
+		val /= 10;
+	}
+}
+```
+
+The header asked for two cells. Every other set tested has been under a hundred, so two cells were
+enough and the field looked correct for a year. *Chrono Trigger*'s is over it, and 101 in two cells
+is `01`.
+
+**Widening the field is not the whole fix**, because `printDec()` pads with zeros: three cells turn a
+forty-five-achievement set into `045`. `raPrintNum()` counts the digits first and places the number
+right-aligned in the field. The screen is cleared at the top of every draw, so the leading cells are
+already blank and the number only has to be *placed* — there is nothing to pad with.
+
+And the same defect was one page away. Sync Pending printed its total in **one** cell, so twelve
+records waiting read as two. The queue holds up to `RA_QUEUE_MAX` of them.
+
+Both fields are now three and two cells respectively, and the sizes are checked at compile time
+rather than believed:
+
+```c
+typedef char raCountFitsThreeCells[(RA_VIEWER_MAX_ENTRIES <= 999 && RA_QUEUE_MAX <= 99) ? 1 : -1];
+```
+
+That pin is the actual lesson. A field too narrow for its source does not fail — it reports a smaller
+number, plausibly, forever, and only a set that crosses the boundary ever exposes it.
+
+### ...and the percentage, on the right of the same line
+
+```
+  12 of 101 earned   3 sync  14%
+ 101 of 101 earned          100%
+```
+
+**Queued counts toward it.** An achievement that has fired but not been sent is earned — it is the
+same thing the list below marks with a star — and a percentage that ignored it would fall behind the
+stars on the page under it. The two counts are disjoint in practice: `QUEUED` is this console's word
+for an unlock and `EARNED` is the server's answer, and an unlock crosses from one to the other on the
+boot that submits it. Clamped at 100 rather than trusted, because the counts come from a block
+another binary wrote.
+
+## The boot screen has two audiences, and `verbose_log` is which one it is for
+
+The launcher's RA ladder narrated everything it did to the screen: stage headings, the SCFG
+registers, every line dsiwifi prints on its way up, a heap report between rungs, and a twenty-line
+summary. Several hundred lines. That is the right screen for finding out why a boot failed and the
+wrong one for a person waiting to play a game.
+
+`verbose_log` in `ra.cfg` picks. **It defaults to 0**, which is the one default in the parser that is
+not "behave exactly as before" — a card with no opinion gets the quiet screen, and the verbose one is
+a diagnostic mode you ask for.
+
+### The log file is not affected, and that is the point of the key
+
+`verbose_log` governs **the screen only.** `ra_wifi_launcher.log` gets everything in both modes.
+
+That asymmetry is deliberate rather than a shortcut. Every hardware finding in this project arrived
+through that file, and a setting that silenced it would mean a reflash before any problem could be
+looked at — which is exactly the cost the quiet mode is supposed to remove. As it stands, quiet mode
+is safe to leave on forever: when something goes wrong the full story is already on the card.
+
+### What the quiet screen shows
+
+Ten steps, each named for what the player is waiting for rather than for the API call underneath, a
+bar, and the essentials underneath once they are known:
+
+```
+Downloading achievements
+ [######################] 100%
+Signed in as <username>
+Game found on the server
+98 achievements ready
+2 sent, 0 still waiting
+34 earned before now
+```
+
+Eleven steps and five result lines, so the top two lines scroll off by the end. Several hundred lines
+became twenty-six, which was the actual complaint.
+
+The two live lines are redrawn in place; the essentials are written once at the end, from `verdict` —
+the same structure the verbose summary is written from, so the two cannot disagree about what
+happened. They are ordered by what a *failing* boot needs first: "Could not sign in" at the top of
+that block is the whole diagnosis for the most common problem this loader will ever have.
+
+A single cell on a row of its own pulses while a rung blocks — `.` `o` `O` `o`, about one
+breath a second. It earns its place: association can take forty seconds and DHCP ten more, during
+which the bar and the caption are both correct and both still, and a run that has stopped looks
+exactly like a run that is waiting.
+
+**It was a rotating `- \ | /` first, and that was the wrong shape.** Four glyphs of different widths
+flickering next to a word reads as corruption at this resolution rather than as progress. Pulsing one
+dot changes the *size* of a mark that never moves, which is what a progress animation looks like; a
+spinning stick is what a terminal looks like. The sequence returns through `o` rather than snapping
+from `O` back to `.`, so it breathes instead of ticking, and it runs every sixteenth frame because
+faster reads as flicker again.
+
+### Four things about drawing on a DS console that cost more thought than the feature
+
+- **The config is read before anything is printed.** `verboseLog` decides what the screen is *for*, so
+  it cannot be learned at stage 0c with three stages already on the screen. The read moved to the top
+  of `raWifiProbe()`; stage 0c still reports every field, and the property that made the old ordering
+  right is kept — the file is still parsed with no radio up, so a bad config is still a line in the
+  log before the network can be blamed for it.
+
+### The fixed layout was attempted five times and abandoned. Here is the record.
+
+The screen prints, one short line per step, through the same `iprintf()` the verbose path has always
+used. It scrolls. A fixed layout with the bar pinned mid-screen and the stage message in a reserved
+area is what was asked for and is **not delivered** — five attempts, each fixing a real fault without
+fixing the screen, and the fifth broke the boot. The faults are all real and are written down here so
+the next attempt starts from them rather than from an assumption:
+
+1. **Positioning `PrintConsole`'s cursor and calling `iprintf()` leaves the timing of the write to
+   stdio.** A buffer flushed later prints in sequence from wherever the cursor is by then. Reported
+   as "the messages are scrolled instead of holding their position".
+2. **Writing the last usable cell of a row advances the cursor past the end**, so the console wraps
+   and every absolute row addressed afterwards is one out. Reported as "it comes apart from 40% on" —
+   40% being where the first rung long enough to animate begins, with the animated character sitting
+   at column 31.
+3. **Drawing into the tile map directly fixes both of those and still only holds while nothing else
+   prints a newline.** Any other `printf` on this console scrolls the map and takes those cells with
+   it. A launcher is not a program that can promise nothing else prints.
+4. **Repainting every row every frame answers that in theory.** On hardware it produced a black
+   bottom screen with nothing on it and a boot that did not finish. Candidate causes, none confirmed:
+   a palette read back from `fontCurPal` that resolves to nothing, a map base that is not where
+   `consoleGetDefault()` reports, or seven hundred VRAM writes per frame inside a wait loop. **It
+   broke the loader, and a progress display is not worth a boot.**
+
+What is kept from all of it: `raWifiScreenInit()` writes the console's geometry and whether the tile
+map was found to the log — `console 32x24, map yes`. That is the reading a sixth attempt should start
+from, and it is the thing the first five did not have.
+
+What the printed version costs, stated rather than glossed: **there is no animation while a rung
+blocks.** Association can take forty seconds, and without a moving character a run that has stopped
+looks exactly like a run that is waiting. That is a real gap, left as a gap rather than filled with a
+third animation nobody asked for.
+
+And two lines per step rather than one, which is forced rather than chosen: the bar is 29 columns and
+the longest caption is 26, so one line carrying both wraps mid-word on a 32-column console.
+
+- **Colour stays an escape in the string**, since printing is what happens now, and colour is the one
+  escape sequence in this tree with a hardware record of working. `raWifiVisible()` was retired
+  during the tile-map attempt and is not needed here either: nothing pads or centres any more.
+
+`raWifiBar()` and `raWifiCentre()` live in `ra_screen.c` rather than `ra_wifi.c`, for the reason
+`ra_wifi_verdict.c` exists: everything else in that file needs a console, a FIFO or a socket, and these need `sniprintf`.
+That is not ceremony over four lines of division — **a progress bar is a thing whose bugs are
+invisible.** A full bar beside "95%" gets reported as a fault in the loader, a bar that reaches 90%
+and stops looks like a hang, and neither would ever fail a build. Both ends of the range are pinned on
+the host, along with the rounding that makes the last step read 100%.
+
 ## The in-game menu can kill the game when it closes — upstream, and this fork accelerates it
 
 Reported on **Chrono Trigger** and **Super Mario 64 DS**: open the in-game menu, navigate it, choose

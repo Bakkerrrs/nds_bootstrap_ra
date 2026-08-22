@@ -69,6 +69,21 @@
     Defaults to 1.
 */
 #define RA_CFG_SYNC      "sync"
+/*
+    This fork's own as well, and the only key here that changes nothing about what the loader does --
+    only about what it says while doing it.
+
+    `verbose_log=1` puts the whole ladder on the screen, which is what it did before this key existed:
+    stage headings, the SCFG registers, every line dsiwifi narrates on its way up, a heap report
+    between rungs and a twenty-line summary. That is the right screen for finding out why a boot
+    failed and the wrong one for a person waiting to play.
+
+    Defaults to **0**: a progress bar, the current step in ordinary words, and a few lines of essential
+    result at the end. It governs the screen only -- the log file gets everything either way, because
+    that file is how every hardware finding in this project arrived and a setting that silenced it
+    would mean a reflash before anything could be diagnosed.
+*/
+#define RA_CFG_VERBOSE   "verbose_log"
 
 /*
     Keys odelot's file has that this fork parses and then does nothing with, because what they
@@ -141,6 +156,11 @@ bool raConfigRead(const char* path, raConfig* cfg) {
 	*/
 	cfg->submit = 1;
 	cfg->sync   = 1;
+	/*
+	    verboseLog is left at the memset's zero deliberately, and it is the one default in here that
+	    is not "behave as before". The quiet screen is what a card with no opinion should get; the
+	    verbose one is a diagnostic mode you ask for.
+	*/
 
 	file = fopen(path, "r");
 	if (!file) {
@@ -179,6 +199,8 @@ bool raConfigRead(const char* path, raConfig* cfg) {
 			cfg->submit = raCfgFlag(value);
 		} else if (strcmp(key, RA_CFG_SYNC) == 0) {
 			cfg->sync = raCfgFlag(value);
+		} else if (strcmp(key, RA_CFG_VERBOSE) == 0) {
+			cfg->verboseLog = raCfgFlag(value);
 		} else if (raCfgKnownUnused(key)) {
 			cfg->notYet++;
 		} else {

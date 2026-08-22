@@ -194,7 +194,7 @@ static void raPatchForget(raPatch* p) {
 /*
     An achievement the account already holds, written for the viewer and for nothing else.
 
-    The record is `#!<id>\t<title>\t<points>\t<description>` -- **no memaddr at all**, which is
+    The record is `#!<id>\t<title>\t<points>\t<description>\t<when>` -- **no memaddr at all**, which is
     what makes this nearly free. An armed definition is dominated by its memaddr: the largest real
     set averages over 500 bytes a line for them, against about 100 for everything a person reads.
     So an achievement moving from "to earn" to "earned" gives the block back four fifths of its
@@ -217,6 +217,8 @@ static void raPatchWriteEarned(raPatch* p) {
 	u32 titleLength = 0;
 	u32 pointsLength = 0;
 	u32 descLength = 0;
+	u32 whenValue = 0;
+	u32 whenLength = 0;
 
 	if (!p->block || !p->pendingId) {
 		return;
@@ -232,26 +234,48 @@ static void raPatchWriteEarned(raPatch* p) {
 	if (pointsLength && p->descLength) {
 		descLength = (u32)p->descLength + 1;
 	}
+	/*
+	    ...and when it was earned, which only the launcher can answer -- see raWifiEarnedWhen().
 
-	p->wanted += idLength + titleLength + pointsLength + descLength + 1;
+	    Positional like every field before it, so it needs the description to be there: without it the
+	    date would land at tab 3 and be read as a description. That is the same rule the chain above
+	    already follows, one link further along.
+	*/
+	if (descLength && p->whenOf) {
+		whenValue = p->whenOf(p->pendingId);
+		if (whenValue) {
+			whenLength = raPatchIdDigits(whenValue) + 1;
+		}
+	}
+
+	p->wanted += idLength + titleLength + pointsLength + descLength + whenLength + 1;
 
 	if (p->used + idLength + 1 <= p->blockMax) {
-		u32* const trim[3] = { &descLength, &pointsLength, &titleLength };
-		u16* const count[3] = { &p->descNoRoom, &p->pointsNoRoom, &p->titleNoRoom };
+		u32* const trim[4] = { &whenLength, &descLength, &pointsLength, &titleLength };
+		u16* const count[4] = { 0, &p->descNoRoom, &p->pointsNoRoom, &p->titleNoRoom };
 		int        i;
 
-		for (i = 0; i < 3; i++) {
-			if (p->used + idLength + titleLength + pointsLength + descLength + 1 <= p->blockMax) {
+		/*
+		    The date goes first when the block is tight, and it is the only one of the four whose
+		    loss is not counted: the other three are text a person came here to read, and this is a
+		    line the page simply omits.
+		*/
+		for (i = 0; i < 4; i++) {
+			if (p->used + idLength + titleLength + pointsLength + descLength + whenLength + 1
+			    <= p->blockMax) {
 				break;
 			}
 			if (*trim[i]) {
 				*trim[i] = 0;
-				(*count[i])++;
+				if (count[i]) {
+					(*count[i])++;
+				}
 			}
 		}
 	}
 
-	if (p->used + idLength + titleLength + pointsLength + descLength + 1 > p->blockMax) {
+	if (p->used + idLength + titleLength + pointsLength + descLength + whenLength + 1
+	    > p->blockMax) {
 		p->earnedNoRoom++;
 		return;
 	}
@@ -272,6 +296,10 @@ static void raPatchWriteEarned(raPatch* p) {
 		p->block[p->used++] = '\t';
 		memcpy(p->block + p->used, p->desc, p->descLength);
 		p->used += p->descLength;
+	}
+	if (whenLength) {
+		p->block[p->used++] = '\t';
+		p->used += raPatchWriteId(p->block + p->used, whenValue);
 	}
 	p->block[p->used++] = '\n';
 	p->block[p->used]   = 0;

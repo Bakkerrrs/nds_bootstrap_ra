@@ -244,6 +244,42 @@
 */
 #define RA_VIEWER_QUEUED       0x02
 
+/*
+    When an achievement was earned, packed into 27 bits of a u32, and 0 means "not known".
+
+        bits 0-5    minute   0-59
+        bits 6-10   hour     0-23
+        bits 11-15  day      1-31
+        bits 16-19  month    1-12
+        bits 20-26  year     0-127, from 2000
+
+    **Packed rather than stored as text, and packed rather than left as a unix epoch**, for two
+    different reasons. Text would cost sixteen bytes an entry against a viewer block whose whole
+    reservation is a couple of kilobytes. An epoch would cost four, the same as this -- and would put
+    a calendar conversion inside the in-game menu, which has no libc and no business owning one. The
+    launcher has a real clock and a real library; it does the conversion once and the menu unpacks
+    five fields with shifts.
+
+    Zero cannot collide with a real value: month and day are 1-based, so a packed date always has a
+    non-zero month field.
+*/
+#define RA_WHEN_MINUTE(w)  ((w) & 0x3F)
+#define RA_WHEN_HOUR(w)    (((w) >> 6) & 0x1F)
+#define RA_WHEN_DAY(w)     (((w) >> 11) & 0x1F)
+#define RA_WHEN_MONTH(w)   (((w) >> 16) & 0x0F)
+#define RA_WHEN_YEAR(w)    (2000 + (((w) >> 20) & 0x7F))
+
+/*
+    Build one. Returns 0 for anything out of range rather than a wrapped date, because a wrong date
+    shown confidently is worse than no date at all -- the menu prints nothing for 0.
+*/
+u32 raWhenPack(int year, int month, int day, int hour, int minute);
+/*
+    ...and from the queue file's own stamp, `YYYYMMDDhhmmss`, which is where a locally earned unlock's
+    time comes from. Returns 0 if the stamp is not fourteen digits.
+*/
+u32 raWhenFromStamp(const char* stamp);
+
 typedef struct raViewerEntry {
 	u32 id;
 	u16 titleOff;
@@ -251,6 +287,12 @@ typedef struct raViewerEntry {
 	u16 descOff;
 	u8  flags;
 	u8  pad;
+	/*
+	    When it was earned, packed -- see RA_WHEN_MINUTE. Zero for an achievement this account does
+	    not hold, and zero for one earned during *this* session: the flag flips while the game runs
+	    and nothing in that context has a date, only the hours and minutes on sharedAddr.
+	*/
+	u32 when;
 } raViewerEntry;
 
 typedef struct raViewerBlock {
@@ -315,6 +357,16 @@ typedef struct raPendingBlock {
 	*/
 	u16  queuedCount;
 	u32  queued[RA_PENDING_QUEUED_MAX];
+	/*
+	    ...and when each of them was earned, packed, from the queue record's own stamp. Parallel to
+	    the array above rather than folded into it because that one is matched against by id, and an
+	    id is what the cardengine has.
+
+	    This is the *local* clock's answer, which the server's is converted into as well -- see
+	    raWifiEarnedWhen(). Two different sources for the same kind of fact have to agree about what
+	    kind of fact it is, or the page shows one achievement in local time and the next in UTC.
+	*/
+	u32  queuedWhen[RA_PENDING_QUEUED_MAX];
 } raPendingBlock;
 
 /*
@@ -388,6 +440,13 @@ typedef struct raQueue {
 	    a struct, because `ids` is passed on its own to the sender and this is only ever read beside it.
 	*/
 	u32  times[RA_QUEUE_MAX];
+	/*
+	    ...and the same instant packed for the in-game menu -- see RA_WHEN_MINUTE. Taken from the
+	    stamp string directly rather than converted back from `times`, which is what keeps this file
+	    free of calendar arithmetic: the stamp is already `YYYYMMDDhhmmss` and the packing is five
+	    substrings, where an epoch would need a real date library the menu side does not have.
+	*/
+	u32  packed[RA_QUEUE_MAX];
 	/*
 	    Which game each came from, straight out of that ROM's header and NUL-terminated here. Empty
 	    when the record did not say. `codes` is what identifies a game -- it is unique per release --
@@ -595,6 +654,18 @@ typedef struct raConfig {
 	*/
 	u8   sync;
 	u8   debug;
+	/*
+	    `verbose_log=1` in ra.cfg: put the whole ladder on the screen, as it was before this key
+	    existed. Defaults to **0**, which shows a progress bar, the step being worked on in ordinary
+	    words, and a handful of essential lines at the end.
+
+	    It governs **the screen only. The log file always gets everything.** That asymmetry is the
+	    point of the key rather than a shortcut: the file is the channel this project's hardware
+	    findings have all arrived through, and a setting that silenced it would mean a reflash before
+	    any problem could be looked at. What was too verbose was never the file -- it was reading
+	    fifty lines of chip bring-up on a screen while waiting to play.
+	*/
+	u8   verboseLog;
 	u8   found;          /* the file existed */
 	u8   usable;         /* ...and both credentials are set */
 	u16  notYet;         /* keys we recognise from odelot's file and do not act on yet */
@@ -606,6 +677,45 @@ typedef struct raConfig {
     Step 3c's transport. The layering table has had an `ra_net` row since before it existed;
     this is it. Negative returns so a failure names its own step instead of becoming a zero.
 */
+/*
+    The quiet screen's steps, in the order they happen, and the count is the bar's denominator.
+
+    Named for what a player is waiting for rather than for the API call underneath -- "Signing in"
+    rather than "stage 10: r=login" -- because the audience for this screen is someone who wants to
+    know whether to keep waiting.
+*/
+#define RA_STEP_GAME      1   /* reading the ROM and hashing it */
+#define RA_STEP_SETTINGS  2   /* ra.cfg */
+#define RA_STEP_WIFI      3   /* chip up, associated */
+#define RA_STEP_ADDRESS   4   /* DHCP */
+#define RA_STEP_SIGNIN    5   /* r=login */
+#define RA_STEP_LOOKUP    6   /* r=gameid */
+#define RA_STEP_SESSION   7   /* r=startsession */
+#define RA_STEP_SENDING   8   /* r=awardachievement for the queue */
+#define RA_STEP_EARNED    9   /* r=unlocks */
+#define RA_STEP_DOWNLOAD  10  /* r=patch */
+#define RA_STEP_MAX       10
+
+/*
+    Render `step` of `steps` as a bar and a percentage, into at least RA_BAR_MIN bytes.
+
+    Pure, and its own function, for the reason ra_rc_frame_skip() is one: it is the part with the
+    arithmetic and tools/ra_launcher_test.c drives it directly. Getting a percentage wrong on a
+    progress bar is the kind of bug that is invisible until someone counts.
+*/
+#define RA_BAR_CELLS 22
+#define RA_BAR_MIN   32
+void raWifiBar(char* out, u32 size, u8 step, u8 steps);
+/*
+    One cell of "still working", pulsing rather than spinning. See the note on the definition.
+*/
+char raWifiSpinFrame(u8 tick);
+/*
+    The column a `cells`-wide string starts at to sit centred in a `width`-wide console, never close
+    enough to the edge for the console to wrap. See the note on the definition.
+*/
+u32 raWifiCentre(u32 width, u32 cells);
+
 #define RA_NET_HOST           "retroachievements.org"
 
 /*
@@ -705,6 +815,22 @@ typedef struct raNetStream {
 	u16       status;      /* the HTTP status line's code, 0 if it did not parse */
 	u32       chunkLeft;
 	u32       bodyBytes;   /* how much reached the sink -- the body's real length */
+	/*
+	    What the reply said its body would be, and whether the whole of it has arrived.
+
+	    **This is where fifty of the sixty seconds were.** Reading until the peer closes means
+	    waiting for the peer to close, and the timing line put every one-kilobyte request at 10.2
+	    seconds against a chip and a DHCP lease that together cost 5. The bytes were never the cost;
+	    the wait after them was.
+
+	    An earlier note here said Content-Length was not needed because `Connection: close` and the
+	    chunk terminator both say where the body ends. Both do -- and one of them says it by making
+	    the client wait for a socket to shut down. Enforced rather than believed: `done` is set only
+	    when the counted bytes reach the declared length, so a truncated reply still ends at the
+	    close it always ended at.
+	*/
+	u32       contentLength;   /* 0 = the reply did not say */
+	u8        done;            /* the body is complete: stop reading */
 	u16       lineLength;
 	char      line[RA_NET_LINE_MAX];
 } raNetStream;
@@ -944,6 +1070,14 @@ typedef struct raPatch {
 	*/
 	const u32* skipIds;
 	u16   skipCount;
+	/*
+	    When an achievement in that skip list was earned, packed -- see RA_WHEN_MINUTE. A function
+	    rather than a table because only the launcher can answer it: the date comes from
+	    r=startsession's reply, which this file has no business knowing about.
+
+	    Null is legal and means no dates are staged, which is what a boot with no network produces.
+	*/
+	u32 (*whenOf)(u32 id);
 	u16   alreadyDone;    /* definitions matching one, which are written for the viewer instead */
 	/*
 	    ...and what that writing produced. `earned` is the display-only records in the block,
@@ -1051,6 +1185,12 @@ int         raNetHttpGet(const char* host, const char* path, char* out, int outS
 const char* raNetBody(const char* response);
 bool        raNetJsonString(const char* json, const char* key, char* out, size_t outSize);
 bool        raNetJsonNumber(const char* json, const char* key, u32* out);
+/*
+    Content-Length and chunked, out of a raw response's headers, bounded so a body cannot supply
+    either. Pure and host-tested -- see the note on the definition.
+*/
+u32         raNetHeaderLength(const char* response, u32 headerEnd);
+int         raNetHeaderChunked(const char* response, u32 headerEnd);
 bool        raNetJsonTrue(const char* json, const char* key);
 /*
     Step 6's prerequisite: `"UserUnlocks":[93119,93120,...]` into an array of ids. Returns how many
