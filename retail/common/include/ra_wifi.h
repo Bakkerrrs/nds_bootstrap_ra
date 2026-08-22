@@ -648,11 +648,6 @@ typedef struct raConfig {
 #define RA_BAR_MIN   32
 void raWifiBar(char* out, u32 size, u8 step, u8 steps);
 /*
-    How many console cells a string occupies, with ANSI colour sequences counted as none. See the
-    note on the definition: the quiet screen pads rather than erasing, so this is what it pads by.
-*/
-u32 raWifiVisible(const char* text);
-/*
     One cell of "still working", pulsing rather than spinning. See the note on the definition.
 */
 char raWifiSpinFrame(u8 tick);

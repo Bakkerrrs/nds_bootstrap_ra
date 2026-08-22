@@ -250,66 +250,139 @@ static u8  raWidth  = 32;
 static u8  raHeight = 24;
 
 /*
-    Put the cursor somewhere, through PrintConsole's own fields rather than an ANSI escape.
+    **The quiet screen draws into the console's tile map directly, and does not print.**
 
-    libnds' console does implement the cursor-position escape, and nothing in this tree uses it --
-    so there is no build here that has ever proved it works on this console, and a progress display
-    is a poor place to find out. cursorX and cursorY are documented public fields of PrintConsole
-    and are what the escape would set anyway.
+    Two rewrites got this wrong and both failed the same way -- text arriving in sequence instead of
+    staying where it was put -- so it is worth writing down what a text console will not do for you.
+
+    Positioning through PrintConsole's cursor fields and then calling iprintf() has two ways to
+    betray the caller and this code hit them both. Writing the last usable cell of a row advances the
+    cursor past the end, so the console wraps to the next row and every absolute row addressed after
+    that is one out. And iprintf() goes through stdio: whether the characters reach the screen at the
+    moment the cursor is where you set it, or later in a batch when a buffer flushes, is not this
+    code's decision to make. A batch flushed later prints in sequence from wherever the cursor
+    happens to be, which is exactly "the messages are scrolled instead of holding their position".
+
+    A tile map has neither problem. `fontBgMap[y * 32 + x]` is the cell at (x, y), the write lands
+    when it is made, there is no cursor to advance and nothing to scroll. It is also not a guess at
+    libnds' internals: it is the same expression consoleDrawChar() uses for a 4bpp text background,
+    with the same asciiOffset, fontCharOffset and fontCurPal.
+
+    If the map is not there -- a console this code did not expect, or none at all -- raMap stays null
+    and every draw below becomes an iprintf() of the same text. Sequential and ugly, which is what
+    the verbose mode looks like anyway, rather than a blank screen.
 */
-static void raWifiCursor(int x, int y) {
-	PrintConsole* con = consoleGetDefault();
+#define RA_MAP_STRIDE 32   /* entries per row in a 256x256 text background's map */
 
-	if (con) {
-		con->cursorX = x;
-		con->cursorY = y;
+static PrintConsole* raCon;
+static u16*          raMap;
+static u16           raPalNormal;
+static u16           raPalWarn;
+static u16           raPalError;
+
+/*
+    The palettes libnds would use for those colour escapes, asked for rather than computed.
+
+    An escape emits no character, so printing one only moves fontCurPal -- which means libnds' own
+    mapping from `\x1b[33m` to a palette index can be read back instead of reproduced here. Getting
+    that mapping wrong by hand would tint the whole screen.
+*/
+static u16 raWifiPalOf(const char* escape) {
+	if (!raCon) {
+		return 0;
+	}
+	iprintf("%s", escape);
+	return raCon->fontCurPal;
+}
+
+static void raWifiScreenInit(void) {
+	raCon = consoleGetDefault();
+	if (!raCon) {
+		return;
+	}
+	if (raCon->consoleWidth  > 8) {
+		raWidth = (u8)raCon->consoleWidth;
+	}
+	if (raCon->consoleHeight > 8) {
+		raHeight = (u8)raCon->consoleHeight;
+	}
+	/*
+	    The stride is the one thing here that is not read from the struct, so the map is only used on
+	    a console whose width it is known to match. Anything else falls back to printing.
+	*/
+	if (raCon->fontBgMap && raWidth == RA_MAP_STRIDE) {
+		raMap = raCon->fontBgMap;
+	}
+	raPalError  = raWifiPalOf("\x1b[31m");
+	raPalWarn   = raWifiPalOf("\x1b[33m");
+	raPalNormal = raWifiPalOf("\x1b[37m");
+}
+
+static void raWifiPut(int x, int y, char c, u16 pal) {
+	if (x < 0 || y < 0 || x >= raWidth - 1 || y >= raHeight) {
+		return;
+	}
+	raMap[y * RA_MAP_STRIDE + x] =
+		(u16)((u16)(c - raCon->font.asciiOffset + raCon->fontCharOffset) | pal);
+}
+
+/* Blank one row, leaving the final column untouched -- nothing here ever owns it. */
+static void raWifiClear(int row) {
+	int x;
+
+	if (!raMap) {
+		return;
+	}
+	for (x = 0; x < raWidth - 1; x++) {
+		raWifiPut(x, raRowBase + row, ' ', raPalNormal);
 	}
 }
 
 /*
-    Take the console's real geometry and place the block below whatever is already on screen.
+    Take the console's geometry and place the block below whatever is already on screen.
 
-    The width was hard-coded at 32 and is now asked for, because a console this code does not own is
-    not a console this code may make assumptions about. The base is clamped for the reason above:
-    a block that runs off the bottom scrolls, and a scroll moves every row already addressed.
+    Clamped because a block that runs off the bottom would be drawn off the map -- raWifiPut()
+    refuses those cells rather than wrapping, so the effect is a truncated display instead of a
+    smeared one, but a truncated display is still not what was asked for.
 */
 static void raWifiRowBase(void) {
-	const PrintConsole* con = consoleGetDefault();
-	int                 y   = 0;
+	int y;
 
-	if (con) {
-		if (con->consoleWidth  > 8)  raWidth  = (u8)con->consoleWidth;
-		if (con->consoleHeight > 8)  raHeight = (u8)con->consoleHeight;
-		y = con->cursorY;
-	}
+	raWifiScreenInit();
+	y = raCon ? raCon->cursorY : 0;
 	if (y < 0 || y + RA_ROWS_TOTAL > raHeight) {
 		y = 0;
 	}
 	raRowBase = (u8)y;
 }
 
-/* Blank one row, leaving the final column untouched -- see the layout note. */
-static void raWifiClear(int row) {
-	int x;
+/*
+    One centred line, in a row cleared first.
 
-	raWifiCursor(0, raRowBase + row);
-	for (x = 0; x < raWidth - 1; x++) {
-		iprintf(" ");
+    The colour is a parameter rather than an escape inside the text, because a tile map has no notion
+    of an escape: `\x1b[31m` written into it would be five glyphs. That is a better arrangement than
+    it looks -- it retired raWifiVisible(), which existed only to count the cells an escape does not
+    occupy, and took that whole class of miscount out of the drawing path.
+*/
+static void raWifiRowPal(int row, const char* text, u16 pal) {
+	u32 cells;
+	u32 at;
+	u32 i;
+
+	if (!raMap) {
+		iprintf("%s\n", text);
+		return;
+	}
+	cells = strlen(text);
+	at    = raWifiCentre(raWidth, cells);
+	raWifiClear(row);
+	for (i = 0; i < cells; i++) {
+		raWifiPut((int)(at + i), raRowBase + row, text[i], pal);
 	}
 }
 
-/*
-    One centred line, in a row that is cleared first rather than padded.
-
-    Clearing beats padding because padding has to know how wide the text prints, and these lines
-    carry colour: `\x1b[31m` is five bytes occupying no cell. raWifiVisible() is still what centres
-    them, but a miscount now costs a line that sits a cell or two off centre instead of a line that
-    overruns the row and pushes the whole layout down.
-*/
 static void raWifiRow(int row, const char* text) {
-	raWifiClear(row);
-	raWifiCursor((int)raWifiCentre(raWidth, raWifiVisible(text)), raRowBase + row);
-	iprintf("%s", text);
+	raWifiRowPal(row, text, raPalNormal);
 }
 
 /*
@@ -358,12 +431,12 @@ static void raWifiStep(u8 step, const char* caption) {
     and the message are both correct and both still, and a run that has stopped looks exactly like a
     run that is waiting.
 
-    A row of its own rather than the end of the message line, and that is the second half of the
-    layout fix. At the end of a line it sat in the console's last usable column, wrapping the cursor
-    on every single frame it drew -- the busiest writer on the screen, in the worst possible place.
+    A row of its own rather than the end of the message line, and that was half the layout fix: at
+    the end of a line it sat in the console's last usable column -- the busiest writer on the screen,
+    in the one place that wraps the cursor.
 */
 static void raWifiSpin(void) {
-	if (raVerbose) {
+	if (raVerbose || !raMap) {
 		return;
 	}
 	raSpin++;
@@ -374,15 +447,15 @@ static void raWifiSpin(void) {
 	if ((raSpin & 15) != 0) {
 		return;
 	}
-	raWifiCursor((int)raWifiCentre(raWidth, 1), raRowBase + RA_ROW_PULSE);
-	iprintf("%c", raWifiSpinFrame((u8)(raSpin >> 4)));
+	raWifiPut((int)raWifiCentre(raWidth, 1), raRowBase + RA_ROW_PULSE,
+	          raWifiSpinFrame((u8)(raSpin >> 4)), raPalNormal);
 }
 
 /*
     An essential line, under the bar, in the order they become true. Quiet mode only -- in verbose
     mode the summary below says all of this and more.
 */
-static void raWifiEssential(const char* fmt, ...) {
+static void raWifiEssentialPal(u16 pal, const char* fmt, ...) {
 	char    line[96];
 	va_list args;
 
@@ -393,11 +466,15 @@ static void raWifiEssential(const char* fmt, ...) {
 	vsniprintf(line, sizeof(line), fmt, args);
 	va_end(args);
 
-	raWifiRow(RA_ROW_SUMMARY + raSummaryRow, line);
+	raWifiRowPal(RA_ROW_SUMMARY + raSummaryRow, line, pal);
 	if (raSummaryRow < RA_ROW_ESSENTIALS_MAX - 1) {
 		raSummaryRow++;
 	}
 }
+
+#define raWifiEssential(...)  raWifiEssentialPal(raPalNormal, __VA_ARGS__)
+#define raWifiWarn(...)       raWifiEssentialPal(raPalWarn, __VA_ARGS__)
+#define raWifiError(...)      raWifiEssentialPal(raPalError, __VA_ARGS__)
 
 static void raWifiDrain(void) {
 	const u32 head = textHead;        /* snapshot: the interrupt may advance it as we go */
@@ -2292,7 +2369,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 		}
 	} else {
 		raWifiRowBase();
-		raWifiRow(RA_ROW_TITLE, "RetroAchievements");
+		raWifiRowPal(RA_ROW_TITLE, "RetroAchievements", raPalWarn);
 		raWifiStep(0, "Starting up");
 	}
 
@@ -2378,7 +2455,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	} else {
 		raWifiLog("put username= and password= in\n%s\n",
 		          sdFound ? RA_CFG_PATH : RA_CFG_PATH_FAT);
-		raWifiEssential("\x1b[33mNo ra.cfg: playing offline\x1b[37m");
+		raWifiWarn("No ra.cfg: playing offline");
 	}
 
 	/*
@@ -2628,22 +2705,22 @@ done:
 			if (verdict.loggedIn) {
 				raWifiEssential("Signed in as %s", raUser[0] ? raUser : config.username);
 			} else if (!config.usable) {
-				raWifiEssential("\x1b[33mNo username or password set\x1b[37m");
+				raWifiWarn("No username or password set");
 			} else if (verdict.apiOk) {
-				raWifiEssential("\x1b[31mCould not sign in\x1b[37m");
+				raWifiError("Could not sign in");
 			} else if (verdict.gotIp) {
-				raWifiEssential("\x1b[31mCould not reach the server\x1b[37m");
+				raWifiError("Could not reach the server");
 			} else if (verdict.linkReady) {
-				raWifiEssential("\x1b[31mNo network address\x1b[37m");
+				raWifiError("No network address");
 			} else {
-				raWifiEssential("\x1b[31mNo Wi-Fi connection\x1b[37m");
+				raWifiError("No Wi-Fi connection");
 			}
 		}
 
 		if (verdict.identified) {
 			raWifiEssential("Game found on the server");
 		} else if (verdict.loggedIn) {
-			raWifiEssential("\x1b[33mGame not in the database\x1b[37m");
+			raWifiWarn("Game not in the database");
 		}
 
 		/*
@@ -2656,7 +2733,7 @@ done:
 		} else if (verdict.defsBytes) {
 			raWifiEssential("Achievements from last time");
 		} else {
-			raWifiEssential("\x1b[33mNo achievements loaded\x1b[37m");
+			raWifiWarn("No achievements loaded");
 		}
 
 		if (verdict.submitAccepted || verdict.submitRefused || verdict.submitKept) {
@@ -2672,7 +2749,6 @@ done:
 		    and it must not land on top of the only lines this screen exists to show.
 		*/
 		raWifiClear(RA_ROW_PULSE);
-		raWifiCursor(0, raRowBase + RA_ROW_SUMMARY + raSummaryRow + 1);
 	}
 
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);

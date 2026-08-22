@@ -307,24 +307,6 @@ static void test_config(void) {
 		/* ...and zero steps is one step, because a bar with no denominator still has to draw. */
 		raWifiBar(bar, sizeof(bar), 1, 0);
 		CHECK(strcmp(bar, "[######################] 100%") == 0);
-		/*
-		    Colour costs no cells, and getting that wrong is not cosmetic: the quiet screen pads
-		    every row to the console width instead of erasing to the end of the line, so padding by
-		    strlen() leaves the tail of whatever was there before -- and it truncated a 38-byte
-		    yellow line at 32, cutting its closing escape in half and leaving the console yellow for
-		    everything printed after it.
-		*/
-		CHECK(raWifiVisible("") == 0);
-		CHECK(raWifiVisible("Ready") == 5);
-		CHECK(raWifiVisible("\x1b[31mCould not sign in\x1b[37m") == 17);
-		CHECK(raWifiVisible("\x1b[33m") == 0);
-		/* Multi-parameter sequences, and ones that end in a letter other than 'm'. */
-		CHECK(raWifiVisible("\x1b[1;33mx\x1b[0m") == 1);
-		CHECK(raWifiVisible("\x1b[12;4Hy") == 1);
-		/* An unterminated escape swallows the rest, which is the safe reading of an unprintable tail. */
-		CHECK(raWifiVisible("a\x1b[33") == 1);
-		/* A bare ESC with no bracket is one cell, not the start of anything. */
-		CHECK(raWifiVisible("\x1b") == 1);
 
 		/*
 		    The spinner is one cell that pulses. A wrong mask here shows a space, and a spinner that

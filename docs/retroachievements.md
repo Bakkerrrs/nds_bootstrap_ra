@@ -7939,11 +7939,19 @@ faster reads as flicker again.
   right is kept — the file is still parsed with no radio up, so a bad config is still a line in the
   log before the network can be blamed for it.
 
-- **Cursor positioning goes through `PrintConsole`, not through an ANSI escape.** libnds' console does
-  implement `\x1b[<row>;<col>H`, and **nothing in this tree has ever used it** — so there is no build
-  here that has proved it works on this console, and a progress display is a poor place to find out.
-  `cursorX` and `cursorY` are documented public fields of `PrintConsole` and are what the escape would
-  set anyway.
+- **It draws into the console's tile map and does not print at all.** Two versions before this one
+  positioned the cursor and called `iprintf()`, and both failed the same way — text arriving in
+  sequence instead of staying where it was put. A text console has two ways to betray a caller who
+  wants absolute positions and this hit both. Writing the last usable cell of a row advances the
+  cursor past the end, so the console wraps and every absolute row addressed afterwards is one out.
+  And `iprintf()` goes through stdio: whether the characters reach the screen while the cursor is
+  where you set it, or later in a batch when a buffer flushes, is not the caller's decision — and a
+  batch flushed later prints in sequence from wherever the cursor happens to be, which is exactly
+  "the messages are scrolled instead of holding their position". `fontBgMap[y * 32 + x]` has neither
+  problem: the write lands when it is made, there is no cursor to advance and nothing to scroll. It
+  is not a guess at libnds' internals either — it is the expression `consoleDrawChar()` uses for a
+  4bpp text background, with the same `asciiOffset`, `fontCharOffset` and `fontCurPal`. If the map is
+  not there, every draw falls back to printing the same text: sequential and ugly, rather than blank.
 
 - **Rows are relative to wherever the cursor already was.** Nothing clears the screen before the
   probe runs and the launcher may have printed above it, so the block is placed below whatever is
@@ -7960,13 +7968,17 @@ faster reads as flicker again.
   long enough to pulse begins. Now the width and height come from `PrintConsole`, everything is
   centred inside `width - 1`, and `raWifiCentre()` refuses any position that could reach the edge.
 
-- **Regions are cleared, not padded.** Padding a row to the full width has to know how wide the text
-  *prints*, and these lines carry colour: `\x1b[31m` is five bytes occupying no cell, so padding by
-  `strlen()` pads five cells short per escape and leaves the tail of the previous line. Clearing the
-  message area whole before writing it removes the dependency: `raWifiVisible()` still centres the
-  text, but a miscount now costs a line a cell or two off centre instead of one that overruns the row
-  and pushes the layout down. The message area is two rows and both are cleared on every step, so a
-  long caption cannot leave anything behind a short one.
+- **Colour is a parameter, not an escape inside the string.** A tile map has no notion of an escape:
+  `\x1b[31m` written into it would be five glyphs. So the palette is passed in, and the palettes
+  themselves are *asked for* rather than computed — an escape emits no character, so printing one
+  only moves `fontCurPal`, which means libnds' own mapping from `\x1b[33m` to a palette index can be
+  read back instead of reproduced by hand. That retired `raWifiVisible()`, which had existed only to
+  count the cells an escape does not occupy, and took a whole class of miscount out of the drawing
+  path with it.
+
+- **Regions are cleared, not padded.** The message area is two rows and both are blanked on every
+  step, so a long caption cannot leave its tail behind a short one — and clearing needs to know
+  nothing about the text that was there.
 
 Both pure pieces live in `ra_screen.c` rather than `ra_wifi.c`, for the reason `ra_wifi_verdict.c`
 exists: everything else in that file needs a console, a FIFO or a socket, and these need `sniprintf`.
