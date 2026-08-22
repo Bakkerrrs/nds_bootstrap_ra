@@ -7878,8 +7878,28 @@ modes, so one line there gives a timeline with no new call sites:
 ...
 ```
 
-`time(NULL)` rather than a timer, because the resolution that matters here is seconds and a timer
-would be one more thing to give back before the game starts.
+**And `time(NULL)` was the wrong clock**, which hardware answered on the first run: every stage in
+the log read `[  0s]`. It reads a value the ARM7 refreshes, and in this launcher the ARM7 is running
+dsiwifi rather than libnds' own VBlank work — so the clock is set once at boot and then sits still.
+Correct for stamping an unlock, which is what it was measured doing; useless for measuring a boot.
+
+A VBlank counter was the other candidate and it is worse. `raWifiIdle()` runs in the wait loops and
+*not* inside a blocking `recv()`, which is precisely where the seconds being hunted are going. A
+timer counts through a blocked CPU; a frame counter cannot. TIMER0 cascaded into TIMER1 gives 32 bits
+at 32,728 Hz, read low-high-low so a wrap between the two registers cannot report a two-second jump.
+Both are stopped in `raWifiShutdown()` beside the one dsiwifi leaves behind.
+
+### The same log answered the other open question
+
+`console 32x24, map no`. **`consoleGetDefault()->fontBgMap` is null in this launcher**, so the tile
+map the fixed-layout screen drew into was never there — which is exactly why that build showed a
+black bottom screen and nothing else: `raMap` stayed null, the paint returned early every frame, and
+every other writer was gated off behind quiet mode.
+
+That is the reading the fifth attempt did not have and the reason the geometry line was kept. The
+fix it points at is small — `consoleSelect()` returns the *previously current* console, so calling it
+twice hands back the live one without changing anything — but the screen is not what this section is
+about, and a fixed layout is not what the boot time needs.
 
 ### Two costs found by reading, both paid on every boot
 

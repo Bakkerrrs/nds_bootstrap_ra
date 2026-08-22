@@ -330,13 +330,50 @@ static void raWifiScreenInit(void) {
     verbose path has only ever used colour, so colour is the only escape with a hardware record here.
 */
 /*
-    When the ladder started, so every stage can say how far into the run it is.
+    Elapsed time, from a hardware timer, and **not from time(NULL)** -- which was the first attempt
+    and which hardware answered immediately: every stage in the log read `[  0s]`.
 
-    time(NULL) rather than a timer: the launcher has a real clock and the resolution that matters
-    here is seconds, because the question this answers is "which rung is eating ten of them". A
-    timer would be finer and would be one more thing to give back before the game starts.
+    time(NULL) on this console reads a value the ARM7 refreshes, and in this launcher the ARM7 is
+    running dsiwifi rather than libnds' own VBlank work, so the clock is set once at boot and then
+    sits still. It is correct for stamping an unlock -- which is what it was measured doing -- and
+    useless for measuring a fifty-second boot.
+
+    A VBlank counter was the other candidate and it is worse: raWifiIdle() runs in the wait loops and
+    *not* inside a blocking recv(), which is precisely where the seconds this is trying to find are
+    going. A timer counts through a blocked CPU; a frame counter cannot.
+
+    TIMER0 cascaded into TIMER1 gives 32 bits at 32,728 Hz -- about 36 hours before it wraps, against
+    16 bits on its own which wraps in two seconds. Both are stopped in raWifiShutdown() beside the
+    one dsiwifi leaves behind: a timer still running when the game starts is the game's problem.
 */
-static u32 raStartedAt;
+#define RA_TICKS_PER_SEC 32728   /* 33.514 MHz / 1024 */
+
+static void raWifiClockStart(void) {
+	TIMER0_CR = 0;
+	TIMER1_CR = 0;
+	TIMER0_DATA = 0;
+	TIMER1_DATA = 0;
+	TIMER0_CR = TIMER_DIV_1024 | TIMER_ENABLE;
+	TIMER1_CR = TIMER_CASCADE | TIMER_ENABLE;
+}
+
+/*
+    Tenths of a second since the start. Read low-then-high-then-low, because the two halves are two
+    registers and the low one can wrap between the reads -- which would report a jump of two seconds
+    once every two seconds, and this is a measurement whose whole point is being believed.
+*/
+static u32 raWifiTenths(void) {
+	u32 lo, hi, lo2;
+
+	lo  = TIMER0_DATA;
+	hi  = TIMER1_DATA;
+	lo2 = TIMER0_DATA;
+	if (lo2 < lo) {
+		hi = TIMER1_DATA;
+		lo = lo2;
+	}
+	return (((hi << 16) | lo) * 10u) / RA_TICKS_PER_SEC;
+}
 
 /*
     Declared here because the timing line below is the first thing in the file that logs, and the
@@ -355,7 +392,12 @@ static void raWifiStep(u8 step, const char* caption) {
 	    a chip bring-up, a DHCP lease, five HTTP round trips and a hundred-kilobyte download, and
 	    which of them is the fifty seconds is not guessable from the outside.
 	*/
-	raWifiLog("[%3lus] %s\n", (unsigned long)((u32)time(NULL) - raStartedAt), caption);
+	{
+		const u32 tenths = raWifiTenths();
+
+		raWifiLog("[%3lu.%lus] %s\n",
+		          (unsigned long)(tenths / 10), (unsigned long)(tenths % 10), caption);
+	}
 	if (raVerbose) {
 		return;
 	}
@@ -2229,6 +2271,12 @@ bool raWifiShutdown(void) {
 	    is the last one there will be.
 	*/
 	timerStop(3);
+	/*
+	    ...and the two this file started for its own timing. A timer left running when the game boots
+	    is the game's problem, and this one is ours.
+	*/
+	TIMER0_CR = 0;
+	TIMER1_CR = 0;
 	fifoSetDatamsgHandler(FIFO_DSWIFI, 0, 0);
 	DSiWifi_SetLogHandler(0);
 
@@ -2325,7 +2373,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	*/
 	u8              refusal = RA_REFUSED_NONE;
 
-	raStartedAt = (u32)time(NULL);
+	raWifiClockStart();
 	logFile = fopen(sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT, "w");
 
 	/*
