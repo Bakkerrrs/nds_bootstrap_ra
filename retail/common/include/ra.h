@@ -764,6 +764,17 @@ typedef struct raSnapshot {
 	*/
 	u32 defsMagic;         /* +0xC4  first word at CARDENGINEI_ARM9_RA_DEFS_LOCATION */
 	u32 defsLength;        /* +0xC8  second word, the length the launcher wrote */
+	/*
+	    How many frames the overlay found its own pixels overwritten and put them back.
+
+	    Appended, so every existing offset keeps its address and the hardware checklist stays valid.
+
+	    It exists because "re-assert the pixels every frame" was a *deduction* -- the file's own
+	    argument about OAM, applied to the two things it had not been applied to -- and a deduction
+	    that costs work inside a game's VBlank has to be able to say whether it was needed. Zero on a
+	    game that leaves object VRAM alone; climbing on the game whose notification looked wrong.
+	*/
+	u16 overlayRedrawn;
 } raSnapshot;            /*              0xCC bytes */
 
 /*

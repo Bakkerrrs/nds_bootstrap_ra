@@ -272,6 +272,15 @@ static u8   usingSprites;
     have to stay correct. Nothing here changes which notification that is.
 */
 static const void* shownText;
+/*
+    The last word spriteBlit() wrote, so the tail probe has something to compare against.
+
+    Kept rather than recomputed because the sprite blit is a *gather* -- it rearranges the strip's
+    background layout into per-object order -- so the word at the end of our object VRAM is not the
+    word at the end of the strip, and working out which one it is means redoing the index arithmetic
+    the blit already did.
+*/
+static u32  spriteLastWord;
 static u8   spriteOam[8];
 static u8   spriteSlot;
 static u32  spriteBase;
@@ -283,6 +292,14 @@ static u16  savedObjPaletteShadow;
 u32 raOverlayShows;
 u32 raOverlayDenied;   /* wanted to show, found nothing free */
 u32 raOverlayEvicted;  /* the game reclaimed the block mid-notification */
+/*
+    How many frames the probe found our pixels overwritten and put them back.
+
+    Reported because it is the only way to know whether re-asserting them was needed at all. Zero on
+    a game that leaves object VRAM alone -- Contra 4 is expected to read zero -- and climbing on the
+    game whose notification looked wrong, which is what turns "this should help" into a reading.
+*/
+u32 raOverlayRedrawn;
 /*
     Of those denials, the ones where no background layer was switched off -- as opposed
     to no VRAM block being spare. The two have different answers, and lumping them
@@ -829,7 +846,8 @@ static void spriteBlit(u32 base, const void* text) {
 				const int srcTile = row * RA_TEXT_COLS + k * 4 + col;
 
 				for (w = 0; w < 8; w++) {
-					*dst++ = src[srcTile * 8 + w];
+					spriteLastWord = src[srcTile * 8 + w];
+					*dst++ = spriteLastWord;
 				}
 			}
 		}
@@ -1040,6 +1058,7 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 		raOverlayShows = 0;
 		raOverlayDenied = 0;
 		raOverlayEvicted = 0;
+		raOverlayRedrawn = 0;
 		raOverlayDeniedNoLayer = 0;
 	}
 
@@ -1118,8 +1137,30 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 			*/
 			SUB_OBJ_PALETTE[OBJ_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
 			SUB_OBJ_PALETTE[OBJ_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
+			/*
+			    **Checked before rewritten**, and that is the difference between 512 writes a frame
+			    and two reads.
+
+			    The first version blitted unconditionally. It is only about two kilobytes and it
+			    measured cheap in scanlines, but this runs inside a game's VBlank on top of a memref
+			    pass already using 47 of the 70 available -- and this fork has already killed one game
+			    by adding per-frame work to that budget. Ketsui hung at a boss kill, which is both the
+			    moment an achievement fires and the moment a bullet-hell shooter has least to spare.
+
+			    Two probes rather than one: the first and last words of our range, so a transfer that
+			    landed on either end is caught. A transfer that overwrote the middle and left both ends
+			    intact would be missed, and that is a stripe of wrong pixels for a frame rather than a
+			    frame the game did not get -- the right way round for a notification to fail.
+			*/
 			if (shownText) {
-				spriteBlit(spriteBase, shownText);
+				const vu32* ours = (const vu32*)(SUB_OBJ_VRAM + spriteBase);
+				const u32*  src  = (const u32*)shownText;
+				const u32   last = RA_SPRITES * RA_SPRITE_BYTES / 4 - 1;
+
+				if (ours[0] != src[0] || ours[last] != spriteLastWord) {
+					spriteBlit(spriteBase, shownText);
+					raOverlayRedrawn++;
+				}
 			}
 			return;
 		}
@@ -1157,8 +1198,19 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 			*/
 			SUB_BG_PALETTE[OVERLAY_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
 			SUB_BG_PALETTE[OVERLAY_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
+			/*
+			    Probed the same way, and this path had more to lose: drawTiles() also clears a
+			    thousand map entries, so doing it unconditionally every frame was the more expensive
+			    of the two by a wide margin.
+			*/
 			if (shownText) {
-				drawTiles(block, shownText);
+				const vu32* ours = tilesOf(block);
+				const u32*  src  = (const u32*)shownText;
+
+				if (ours[8] != src[0] || ours[8 + RA_TEXT_WORDS - 1] != src[RA_TEXT_WORDS - 1]) {
+					drawTiles(block, shownText);
+					raOverlayRedrawn++;
+				}
 			}
 		}
 		return;

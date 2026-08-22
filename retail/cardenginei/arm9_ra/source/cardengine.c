@@ -549,6 +549,7 @@ void ra_wram_tick(raSnapshot* snapshot) {
 	ra_overlay_tick(snapshot->rcTriggered, ra_rc_text());
 	{
 		extern u32 raOverlayShows, raOverlayDenied, raOverlayEvicted, raOverlayDeniedNoLayer;
+		extern u32 raOverlayRedrawn;
 		extern u32 raOverlayDispcnt, raOverlayWindow;
 		extern u8  raOverlayState;
 		extern u8  raOverlaySpriteOam, raOverlaySpriteSlot;
@@ -557,6 +558,7 @@ void ra_wram_tick(raSnapshot* snapshot) {
 		snapshot->denied         = raOverlayDenied;
 		snapshot->evicted        = raOverlayEvicted;
 		snapshot->deniedNoLayer  = raOverlayDeniedNoLayer;
+		snapshot->overlayRedrawn = (u16)((raOverlayRedrawn > 0xFFFF) ? 0xFFFF : raOverlayRedrawn);
 		snapshot->overlayState   = raOverlayState;
 		snapshot->overlayDispcnt = raOverlayDispcnt;
 		snapshot->overlayWindow  = raOverlayWindow;

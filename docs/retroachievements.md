@@ -7886,8 +7886,26 @@ overwritten every byte of our glyphs.
 
 So both are re-asserted every visible frame now, on the sprite path and on the background path. The
 background path is if anything more exposed: the block it borrows is character VRAM a game may be
-streaming tiles into. Cost is 512 word writes and two halfwords, only on the frames a notification is
-up — 180 of them, three seconds.
+streaming tiles into.
+
+### Probed before rewritten, because Ketsui hung at a boss kill
+
+The first version blitted unconditionally: about two kilobytes a frame, which measures cheap in
+scanlines. Hardware disagreed with "cheap". *Contra 4* came back correct — the fix works — and
+**Ketsui hung on killing the first Novice boss**, which is both the moment an achievement fires and
+the moment a bullet-hell shooter has least to spare. This runs inside the game's VBlank on top of a
+memref pass already using 47 of the 70 available scanlines, and this fork has already killed one game
+by adding per-frame work to that budget.
+
+So the rewrite is now conditional on two probes — the first and last words of our range — which turns
+512 writes a frame into two reads on every frame nothing trampled us. A transfer that overwrote the
+middle and left both ends intact is missed, and that is a stripe of wrong pixels for one frame rather
+than a frame the game did not get: the right way round for a notification to fail.
+
+`overlayRedrawn` is appended to the snapshot for it, because "re-assert the pixels" was a *deduction*
+— the file's own argument about OAM, applied to the two things it had not been applied to — and a
+deduction that spends time inside a game's VBlank has to be able to say whether it was needed. Zero
+on a game that leaves object VRAM alone; climbing on the game whose notification looked wrong.
 
 ### A real bug, introduced and caught inside the same edit
 
