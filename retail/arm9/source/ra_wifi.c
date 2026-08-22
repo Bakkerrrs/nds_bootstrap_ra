@@ -329,10 +329,33 @@ static void raWifiScreenInit(void) {
     One step, as a line. `\x1b[K` is not used and neither is any other escape beyond colour: the
     verbose path has only ever used colour, so colour is the only escape with a hardware record here.
 */
+/*
+    When the ladder started, so every stage can say how far into the run it is.
+
+    time(NULL) rather than a timer: the launcher has a real clock and the resolution that matters
+    here is seconds, because the question this answers is "which rung is eating ten of them". A
+    timer would be finer and would be one more thing to give back before the game starts.
+*/
+static u32 raStartedAt;
+
+/*
+    Declared here because the timing line below is the first thing in the file that logs, and the
+    logger itself needs the drain that needs the screen state above it. One forward declaration is
+    cheaper than moving either.
+*/
+static void raWifiLog(const char* fmt, ...);
+
 static void raWifiStep(u8 step, const char* caption) {
 	char bar[RA_BAR_MIN];
 
 	raStep = step;
+	/*
+	    Logged in both modes and before the screen work, because the log is where this gets read.
+	    Without it "the boot takes fifty seconds" is a complaint with nowhere to go: the rungs are
+	    a chip bring-up, a DHCP lease, five HTTP round trips and a hundred-kilobyte download, and
+	    which of them is the fifty seconds is not guessable from the outside.
+	*/
+	raWifiLog("[%3lus] %s\n", (unsigned long)((u32)time(NULL) - raStartedAt), caption);
 	if (raVerbose) {
 		return;
 	}
@@ -2302,6 +2325,7 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 	*/
 	u8              refusal = RA_REFUSED_NONE;
 
+	raStartedAt = (u32)time(NULL);
 	logFile = fopen(sdFound ? RA_WIFI_LOG_PATH : RA_WIFI_LOG_PATH_FAT, "w");
 
 	/*
@@ -2571,9 +2595,30 @@ done:
 	*/
 	raWifiLog("\n-- draining the tail --\n");
 	{
-		int frames = RA_WIFI_WAIT_TAIL * 60;
-		while (frames-- > 0) {
+		/*
+		    **Until it goes quiet, not for a fixed eight seconds.**
+
+		    This loop existed because dsiwifi narrates asynchronously and keeps talking after the last
+		    rung is decided -- the probe's first hardware run printed the line naming the access point
+		    *after* its own summary. What it did not need was to spend the full eight seconds every
+		    time, and it did: there was no early exit, so eight seconds came off every boot this fork
+		    has ever done, whether there was anything left to say or not.
+
+		    Half a second of silence is the end of it. The ceiling stays exactly where it was, so a
+		    chip that keeps talking is still bounded by the same number as before.
+		*/
+		int       frames = RA_WIFI_WAIT_TAIL * 60;
+		int       quiet  = 0;
+		u32       last   = textHead;
+
+		while (frames-- > 0 && quiet < 30) {
 			raWifiIdle();
+			if (textHead != last) {
+				last  = textHead;
+				quiet = 0;
+			} else {
+				quiet++;
+			}
 		}
 	}
 	raWifiSync();

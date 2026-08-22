@@ -7860,6 +7860,61 @@ The number to watch for a future set is therefore **not the achievement count** 
 memrefs and modified memrefs, which is what `rcPeeks` and the host's list walk report. A set of a
 hundred simple definitions is cheaper than fifty full of `AddSource` arithmetic.
 
+## The boot takes fifty seconds, and nobody could say where they went
+
+Reported as a standing complaint rather than a regression: the ladder has always been slow. And the
+log could not answer it — the rungs are a chip bring-up, a DHCP lease, five HTTP round trips and a
+hundred-kilobyte download, and which of them is the fifty seconds is not guessable from outside.
+
+So the first change is the measurement. `raWifiStep()` is already called once per stage in both
+modes, so one line there gives a timeline with no new call sites:
+
+```
+[  0s] Reading the game
+[  2s] Reading your settings
+[  2s] Connecting to Wi-Fi
+[ 21s] Getting a network address
+[ 24s] Signing in to your account
+...
+```
+
+`time(NULL)` rather than a timer, because the resolution that matters here is seconds and a timer
+would be one more thing to give back before the game starts.
+
+### Two costs found by reading, both paid on every boot
+
+**The tail drain was eight seconds, flat.** It exists because dsiwifi narrates asynchronously and
+keeps talking after the last rung is decided — the probe's first hardware run printed the line naming
+the access point *after* its own summary. What it did not need was to spend the full eight seconds
+every time, and it did: there was no early exit. Eight seconds came off every boot this fork has ever
+done, whether there was anything left to say or not. It now ends after half a second of silence, with
+the same ceiling as before for a chip that keeps talking.
+
+**DNS was resolved once per request.** Every rung opens its own connection — each request carries
+`Connection: close`, because a DS with 191K of heap after lwip is up is not a place to keep sockets
+alive across stages — and each of those asked DNS again. lwip caches, but a miss is a round trip to
+the resolver on a link this fork has measured at its slowest, and there is no version of "the address
+of retroachievements.org" that changes between two rungs of the same boot. Resolved once per boot now.
+
+### What is left, and what each would cost to take
+
+Ordered by what the timing line will probably show, not by what is easiest:
+
+- **The chip bring-up and the DHCP lease.** This is dsiwifi's, not ours: SDIO reset, BMI, a firmware
+  upload, WMI, a scan, association, then a lease. `RA_WIFI_WAIT_CHIP` is 20 seconds and
+  `RA_WIFI_WAIT_DHCP` is 30, and those are ceilings rather than costs — but the real numbers are
+  unknown, which is exactly what the timeline is for. Nothing here is ours to make faster; what is
+  ours is whether to do it at all.
+- **`r=patch` re-downloads the whole set every boot**, and the set does not change between two
+  sessions of the same game. There is already a per-game cache and it is only used when the ladder
+  *fails*. Using it when the ladder succeeds — refetching every N days, or when the account's unlock
+  count has moved — would remove the largest single transfer from the common boot. The cost is that a
+  set updated on the server is not seen until the cache expires, which is a real tradeoff and belongs
+  to whoever is playing rather than to this file.
+- **`sync=0` already exists** and is the honest answer for a session where nobody wants to wait:
+  achievements are still detected, still shown, still queued, and one later boot with `sync=1` drains
+  the queue. Syncing and playing become separate activities, which is what they always were.
+
 ## An achievement's detail page says when it was earned
 
 `r=startsession` is the only rung in this API that answers the question. `r=unlocks` replies in bare

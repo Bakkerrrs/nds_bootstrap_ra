@@ -91,12 +91,29 @@ static int raNetConnect(const char* host, raNetProgress* p) {
 	struct sockaddr_in addr;
 	int                tries;
 
-	he = gethostbyname(host);
-	if (!he || !he->h_addr_list[0]) {
-		return RA_NET_NO_DNS;
+	/*
+	    Resolved once per boot, not once per request.
+
+	    Five rungs each open their own connection -- every request carries `Connection: close`,
+	    because a DS with 191K of heap after lwip is up is not a place to keep sockets alive across
+	    stages -- and each of those was asking DNS again. lwip caches, but a cache miss is a round
+	    trip to the resolver on a link this fork has measured at its slowest, and there is no version
+	    of "the address of retroachievements.org" that changes between two rungs of the same boot.
+	*/
+	static u32 cachedAddr;
+
+	if (cachedAddr) {
+		memset(&addr, 0, sizeof(addr));
+		addr.sin_addr.s_addr = cachedAddr;
+	} else {
+		he = gethostbyname(host);
+		if (!he || !he->h_addr_list[0]) {
+			return RA_NET_NO_DNS;
+		}
+		memset(&addr, 0, sizeof(addr));
+		memcpy(&addr.sin_addr, he->h_addr_list[0], 4);
+		cachedAddr = addr.sin_addr.s_addr;
 	}
-	memset(&addr, 0, sizeof(addr));
-	memcpy(&addr.sin_addr, he->h_addr_list[0], 4);
 	addr.sin_family = AF_INET;
 	addr.sin_port   = htons(RA_NET_PORT);
 
