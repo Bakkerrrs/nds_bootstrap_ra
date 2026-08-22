@@ -7939,46 +7939,46 @@ faster reads as flicker again.
   right is kept — the file is still parsed with no radio up, so a bad config is still a line in the
   log before the network can be blamed for it.
 
-- **It draws into the console's tile map and does not print at all.** Two versions before this one
-  positioned the cursor and called `iprintf()`, and both failed the same way — text arriving in
-  sequence instead of staying where it was put. A text console has two ways to betray a caller who
-  wants absolute positions and this hit both. Writing the last usable cell of a row advances the
-  cursor past the end, so the console wraps and every absolute row addressed afterwards is one out.
-  And `iprintf()` goes through stdio: whether the characters reach the screen while the cursor is
-  where you set it, or later in a batch when a buffer flushes, is not the caller's decision — and a
-  batch flushed later prints in sequence from wherever the cursor happens to be, which is exactly
-  "the messages are scrolled instead of holding their position". `fontBgMap[y * 32 + x]` has neither
-  problem: the write lands when it is made, there is no cursor to advance and nothing to scroll. It
-  is not a guess at libnds' internals either — it is the expression `consoleDrawChar()` uses for a
-  4bpp text background, with the same `asciiOffset`, `fontCharOffset` and `fontCurPal`. If the map is
-  not there, every draw falls back to printing the same text: sequential and ugly, rather than blank.
+- **The screen is a model that gets repainted, not a sequence of writes.** Three versions failed the
+  same way — text arriving in sequence instead of holding its place — and each fix addressed a real
+  fault without curing the symptom, which is the sign that the *approach* was wrong rather than the
+  details. All three faults are real:
 
-- **Rows are relative to wherever the cursor already was.** Nothing clears the screen before the
-  probe runs and the launcher may have printed above it, so the block is placed below whatever is
-  there. And the base is clamped: writing past the last row scrolls the console, which would move
-  every row the code has already addressed and turn the display into a smear.
+  1. Positioning the cursor and calling `iprintf()` puts the timing of the write in stdio's hands,
+     not the caller's. A buffer flushed later prints in sequence from wherever the cursor is by then.
+  2. Writing the last usable cell of a row advances the cursor past the end, so the console wraps and
+     every absolute row addressed afterwards is one out.
+  3. Even drawing into the tile map directly — which fixes both of those — only holds while *nothing
+     else prints a newline*. Any other `printf` on this console scrolls the map and takes our cells
+     with it. **A launcher is not a program that can promise nothing else prints.**
 
-- **Nothing is ever written into the console's final column, and the geometry is asked for rather
-  than assumed.** This is the one that actually broke, and it broke visibly: the first version pinned
-  absolute columns against a hard-coded width of 32 and put the pulsing character at column 31.
-  Writing the last cell of a row advances the cursor past the end, the console wraps to the next row,
-  and from then on every absolute row the code addresses is one out. The busiest writer on the screen
-  was sitting in the worst possible place, so the display held together until the first long wait and
-  then came apart — reported as "it comes apart from 40% on", which is exactly where the first rung
-  long enough to pulse begins. Now the width and height come from `PrintConsole`, everything is
-  centred inside `width - 1`, and `raWifiCentre()` refuses any position that could reach the edge.
+  So the screen became something this code *owns*: a handful of fixed-width lines are the state,
+  `raWifiPaint()` renders every one of the 24 visible rows from them, and it runs on every change and
+  every frame from `raWifiIdle()`. Anything that scrolls the console is undone on the next frame. It
+  is brute force — about seven hundred halfword writes at 60 Hz — and it is free in a launcher whose
+  every rung is spent waiting on a radio.
+
+  Two details that follow from "every row, every time": a row with nothing in it is a row that gets
+  *blanked*, so whatever the launcher printed before this took over cannot sit underneath, and no row
+  can be left holding a line from an earlier step. And there is **no base offset any more** — placing
+  the block below existing output was the accommodation that kept this from working, because a fixed
+  screen and an origin computed from a cursor other code may move are different things.
+
+- **The map write is not a guess at libnds' internals.** `fontBgMap[y * 32 + x]` is the expression
+  `consoleDrawChar()` uses for a 4bpp text background, with the same `asciiOffset`, `fontCharOffset`
+  and `fontCurPal`. The *height* is deliberately not read from `PrintConsole`: a 256×256 text
+  background's map is 32 rows and only 24 are on screen, so trusting `consoleHeight` would let this
+  draw eight rows nobody can see. If the map is not there at all, the quiet screen is skipped
+  entirely and the log says so — `raWifiScreenInit()` writes the geometry and whether the map was
+  found, so the next report is a reading rather than another guess.
 
 - **Colour is a parameter, not an escape inside the string.** A tile map has no notion of an escape:
   `\x1b[31m` written into it would be five glyphs. So the palette is passed in, and the palettes
-  themselves are *asked for* rather than computed — an escape emits no character, so printing one
-  only moves `fontCurPal`, which means libnds' own mapping from `\x1b[33m` to a palette index can be
-  read back instead of reproduced by hand. That retired `raWifiVisible()`, which had existed only to
-  count the cells an escape does not occupy, and took a whole class of miscount out of the drawing
-  path with it.
+  themselves are *asked for* rather than computed — an escape emits no character, so printing one only
+  moves `fontCurPal`, which means libnds' own mapping from `\x1b[33m` to a palette index can be read
+  back instead of reproduced by hand. That retired `raWifiVisible()`, which had existed only to count
+  the cells an escape does not occupy, and took a whole class of miscount out of the drawing path.
 
-- **Regions are cleared, not padded.** The message area is two rows and both are blanked on every
-  step, so a long caption cannot leave its tail behind a short one — and clearing needs to know
-  nothing about the text that was there.
 
 Both pure pieces live in `ra_screen.c` rather than `ra_wifi.c`, for the reason `ra_wifi_verdict.c`
 exists: everything else in that file needs a console, a FIFO or a socket, and these need `sniprintf`.

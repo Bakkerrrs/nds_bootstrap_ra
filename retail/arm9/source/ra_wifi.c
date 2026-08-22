@@ -236,49 +236,62 @@ static u8  raVerbose;
 #define RA_ROW_BAR      2
 #define RA_ROW_PERCENT  3
 #define RA_ROW_MESSAGE  5
-#define RA_ROW_MESSAGE_LINES 2
 #define RA_ROW_PULSE    8
 #define RA_ROW_SUMMARY  10
 #define RA_ROW_ESSENTIALS_MAX 6
-#define RA_ROWS_TOTAL   (RA_ROW_SUMMARY + RA_ROW_ESSENTIALS_MAX)
 
 static u8  raStep;
 static u8  raSpin;
 static u8  raSummaryRow;
-static u8  raRowBase;
-static u8  raWidth  = 32;
-static u8  raHeight = 24;
+static u8  raWidth = 32;
 
 /*
-    **The quiet screen draws into the console's tile map directly, and does not print.**
+    **The quiet screen is a model that gets repainted, not a sequence of writes.**
 
-    Two rewrites got this wrong and both failed the same way -- text arriving in sequence instead of
-    staying where it was put -- so it is worth writing down what a text console will not do for you.
+    Three versions failed the same way -- text arriving in sequence instead of holding its place --
+    and each fix addressed a real fault without curing the symptom, which is the sign that the
+    approach was wrong rather than the details. All three faults are real and worth avoiding:
 
-    Positioning through PrintConsole's cursor fields and then calling iprintf() has two ways to
-    betray the caller and this code hit them both. Writing the last usable cell of a row advances the
-    cursor past the end, so the console wraps to the next row and every absolute row addressed after
-    that is one out. And iprintf() goes through stdio: whether the characters reach the screen at the
-    moment the cursor is where you set it, or later in a batch when a buffer flushes, is not this
-    code's decision to make. A batch flushed later prints in sequence from wherever the cursor
-    happens to be, which is exactly "the messages are scrolled instead of holding their position".
+      1. Positioning the cursor and calling iprintf() puts the timing of the write in stdio's hands,
+         not the caller's. A buffer flushed later prints in sequence from wherever the cursor is then.
+      2. Writing the last usable cell of a row advances the cursor past the end, so the console wraps
+         and every absolute row addressed afterwards is one out.
+      3. Even drawing into the tile map directly -- which fixes both of those -- only holds while
+         *nothing else prints a newline*. Any other printf on this console scrolls the map and takes
+         our cells with it. A launcher is not a program that can promise nothing else prints.
 
-    A tile map has neither problem. `fontBgMap[y * 32 + x]` is the cell at (x, y), the write lands
-    when it is made, there is no cursor to advance and nothing to scroll. It is also not a guess at
-    libnds' internals: it is the same expression consoleDrawChar() uses for a 4bpp text background,
-    with the same asciiOffset, fontCharOffset and fontCurPal.
+    So the screen stops being something this code writes once and becomes something it owns: the
+    lines below are the state, raWifiPaint() renders all of them, and it runs every frame from
+    raWifiIdle(). Anything that scrolls the console is undone on the next frame. That is brute force
+    -- about seven hundred halfword writes at 60 Hz -- and it is free here, in a launcher whose every
+    rung is spent waiting on a radio.
 
-    If the map is not there -- a console this code did not expect, or none at all -- raMap stays null
-    and every draw below becomes an iprintf() of the same text. Sequential and ugly, which is what
-    the verbose mode looks like anyway, rather than a blank screen.
+    The map write is not a guess at libnds' internals: it is the expression consoleDrawChar() uses
+    for a 4bpp text background, with the same asciiOffset, fontCharOffset and fontCurPal. If the map
+    is not there, raMap stays null, the quiet screen is skipped, and the log says so -- see the
+    geometry line raWifiScreenStart() writes.
 */
-#define RA_MAP_STRIDE 32   /* entries per row in a 256x256 text background's map */
+#define RA_MAP_STRIDE   32   /* entries per row in a 256x256 text background's map */
+#define RA_ROWS_VISIBLE 24   /* ...of which this many are on screen; the map itself is taller */
 
 static PrintConsole* raCon;
 static u16*          raMap;
 static u16           raPalNormal;
 static u16           raPalWarn;
 static u16           raPalError;
+
+/*
+    The state the screen is a picture of. Fixed-width storage rather than pointers, because a repaint
+    has to be able to run at any time without the caller's strings still being alive.
+*/
+#define RA_LINE_MAX 32
+static char raTitle[RA_LINE_MAX];
+static char raBar[RA_LINE_MAX];
+static char raPercent[RA_LINE_MAX];
+static char raMessage[RA_LINE_MAX];
+static char raLines[RA_ROW_ESSENTIALS_MAX][RA_LINE_MAX];
+static u16  raLinePal[RA_ROW_ESSENTIALS_MAX];
+static u8   raPulse;
 
 /*
     The palettes libnds would use for those colour escapes, asked for rather than computed.
@@ -300,15 +313,14 @@ static void raWifiScreenInit(void) {
 	if (!raCon) {
 		return;
 	}
-	if (raCon->consoleWidth  > 8) {
+	if (raCon->consoleWidth > 8) {
 		raWidth = (u8)raCon->consoleWidth;
 	}
-	if (raCon->consoleHeight > 8) {
-		raHeight = (u8)raCon->consoleHeight;
-	}
 	/*
-	    The stride is the one thing here that is not read from the struct, so the map is only used on
-	    a console whose width it is known to match. Anything else falls back to printing.
+	    The stride is the one number here not read from the struct, so the map is used only on a
+	    console whose width is known to match it. And the height is deliberately *not* taken from the
+	    struct: a 256x256 text background's map is 32 rows and only 24 are on the screen, so trusting
+	    consoleHeight would let this draw eight rows nobody can see.
 	*/
 	if (raCon->fontBgMap && raWidth == RA_MAP_STRIDE) {
 		raMap = raCon->fontBgMap;
@@ -319,121 +331,119 @@ static void raWifiScreenInit(void) {
 }
 
 static void raWifiPut(int x, int y, char c, u16 pal) {
-	if (x < 0 || y < 0 || x >= raWidth - 1 || y >= raHeight) {
+	if (x < 0 || y < 0 || x >= raWidth - 1 || y >= RA_ROWS_VISIBLE) {
 		return;
 	}
 	raMap[y * RA_MAP_STRIDE + x] =
 		(u16)((u16)(c - raCon->font.asciiOffset + raCon->fontCharOffset) | pal);
 }
 
-/* Blank one row, leaving the final column untouched -- nothing here ever owns it. */
-static void raWifiClear(int row) {
-	int x;
+/* One centred line into a row that is blanked first. The final column is never touched. */
+static void raWifiPaintRow(int row, const char* text, u16 pal) {
+	const u32 cells = strlen(text);
+	const u32 at    = raWifiCentre(raWidth, cells);
+	int       x;
+	u32       i;
 
-	if (!raMap) {
+	for (x = 0; x < raWidth - 1; x++) {
+		raWifiPut(x, row, ' ', raPalNormal);
+	}
+	for (i = 0; i < cells; i++) {
+		raWifiPut((int)(at + i), row, text[i], pal);
+	}
+}
+
+/*
+    The whole screen, from the state above, and **every row of it**. Idempotent on purpose: called on
+    every change and on every frame, so a scroll caused by anything else survives one frame at most.
+
+    Rows are absolute from 0. There is no base offset any more -- placing the block below whatever
+    was already on screen was the accommodation that kept this from working, because a fixed screen
+    and an origin computed from a cursor other code may move are different things.
+*/
+static void raWifiPaint(void) {
+	char pulse[2];
+	u8   i;
+
+	if (raVerbose || !raMap) {
 		return;
 	}
-	for (x = 0; x < raWidth - 1; x++) {
-		raWifiPut(x, raRowBase + row, ' ', raPalNormal);
+
+	pulse[0] = raPulse ? raWifiSpinFrame(raPulse) : ' ';
+	pulse[1] = 0;
+
+	/*
+	    **Every visible row, every time, decided here.** Walking all 24 rather than painting the ones
+	    that hold something is what makes the screen fixed: a row with nothing in it is a row that
+	    gets blanked, so nothing the launcher printed before this took over can sit underneath, and no
+	    row can be left holding a line from an earlier step.
+	*/
+	for (i = 0; i < RA_ROWS_VISIBLE; i++) {
+		const char* text = "";
+		u16         pal  = raPalNormal;
+
+		if (i == RA_ROW_TITLE) {
+			text = raTitle;
+			pal  = raPalWarn;
+		} else if (i == RA_ROW_BAR) {
+			text = raBar;
+		} else if (i == RA_ROW_PERCENT) {
+			text = raPercent;
+		} else if (i == RA_ROW_MESSAGE) {
+			text = raMessage;
+		} else if (i == RA_ROW_PULSE) {
+			text = pulse;
+		} else if (i >= RA_ROW_SUMMARY && i < RA_ROW_SUMMARY + RA_ROW_ESSENTIALS_MAX) {
+			text = raLines[i - RA_ROW_SUMMARY];
+			pal  = raLinePal[i - RA_ROW_SUMMARY];
+		}
+		raWifiPaintRow(i, text, pal);
 	}
 }
 
-/*
-    Take the console's geometry and place the block below whatever is already on screen.
-
-    Clamped because a block that runs off the bottom would be drawn off the map -- raWifiPut()
-    refuses those cells rather than wrapping, so the effect is a truncated display instead of a
-    smeared one, but a truncated display is still not what was asked for.
-*/
-static void raWifiRowBase(void) {
-	int y;
-
-	raWifiScreenInit();
-	y = raCon ? raCon->cursorY : 0;
-	if (y < 0 || y + RA_ROWS_TOTAL > raHeight) {
-		y = 0;
-	}
-	raRowBase = (u8)y;
-}
-
-/*
-    One centred line, in a row cleared first.
-
-    The colour is a parameter rather than an escape inside the text, because a tile map has no notion
-    of an escape: `\x1b[31m` written into it would be five glyphs. That is a better arrangement than
-    it looks -- it retired raWifiVisible(), which existed only to count the cells an escape does not
-    occupy, and took that whole class of miscount out of the drawing path.
-*/
-static void raWifiRowPal(int row, const char* text, u16 pal) {
-	u32 cells;
-	u32 at;
+static void raWifiCopy(char* dst, const char* src) {
 	u32 i;
 
-	if (!raMap) {
-		iprintf("%s\n", text);
-		return;
+	for (i = 0; i + 1 < RA_LINE_MAX && src[i]; i++) {
+		dst[i] = src[i];
 	}
-	cells = strlen(text);
-	at    = raWifiCentre(raWidth, cells);
-	raWifiClear(row);
-	for (i = 0; i < cells; i++) {
-		raWifiPut((int)(at + i), raRowBase + row, text[i], pal);
-	}
-}
-
-static void raWifiRow(int row, const char* text) {
-	raWifiRowPal(row, text, raPalNormal);
+	dst[i] = 0;
 }
 
 /*
     Advance the quiet screen to `step`, captioned in words a person waiting to play can act on.
-
-    The message area is cleared whole, both rows of it, so a long caption cannot leave its tail
-    behind a short one. Does nothing in verbose mode, where the ladder's own headings are on the
-    screen and this would draw over them.
 */
 static void raWifiStep(u8 step, const char* caption) {
-	char bar[RA_BAR_MIN];
-	int  i;
+	char  bar[RA_BAR_MIN];
+	char* space;
 
 	raStep = step;
-	if (raVerbose) {
+	if (raVerbose || !raMap) {
 		return;
 	}
 	raWifiBar(bar, sizeof(bar), step, RA_STEP_MAX);
-	{
-		/*
-		    The bar and its number on separate rows, both centred, because one line carrying both is
-		    what forced the bar off centre -- and a percentage under a bar is where a person looks
-		    for it anyway.
-		*/
-		char* space = strchr(bar, ' ');
-
-		if (space) {
-			*space = 0;
-			raWifiRow(RA_ROW_BAR, bar);
-			raWifiRow(RA_ROW_PERCENT, space + 1);
-		} else {
-			raWifiRow(RA_ROW_BAR, bar);
-		}
+	/*
+	    The bar and its number on separate rows, both centred, because one line carrying both is what
+	    forced the bar off centre -- and a percentage under a bar is where a person looks for it.
+	*/
+	space = strchr(bar, ' ');
+	if (space) {
+		*space = 0;
+		raWifiCopy(raPercent, space + 1);
+	} else {
+		raPercent[0] = 0;
 	}
-
-	for (i = 0; i < RA_ROW_MESSAGE_LINES; i++) {
-		raWifiClear(RA_ROW_MESSAGE + i);
-	}
-	raWifiRow(RA_ROW_MESSAGE, caption);
+	raWifiCopy(raBar, bar);
+	raWifiCopy(raMessage, caption);
+	raWifiPaint();
 }
 
 /*
-    One character, on a row of its own, that changes while a rung blocks.
+    The pulse advances in the model; the paint puts it on the screen.
 
     It earns its place: association can take forty seconds and DHCP ten more, during which the bar
     and the message are both correct and both still, and a run that has stopped looks exactly like a
     run that is waiting.
-
-    A row of its own rather than the end of the message line, and that was half the layout fix: at
-    the end of a line it sat in the console's last usable column -- the busiest writer on the screen,
-    in the one place that wraps the cursor.
 */
 static void raWifiSpin(void) {
 	if (raVerbose || !raMap) {
@@ -441,14 +451,11 @@ static void raWifiSpin(void) {
 	}
 	raSpin++;
 	/*
-	    Every sixteenth frame, so the full pulse takes about a second. Faster reads as flicker, which
-	    is what made the rotating version look like corruption rather than progress.
+	    Repainted every frame, but the *character* changes only every sixteenth, so the full pulse
+	    takes about a second. Faster reads as flicker, which is what made the rotating version look
+	    like corruption rather than progress.
 	*/
-	if ((raSpin & 15) != 0) {
-		return;
-	}
-	raWifiPut((int)raWifiCentre(raWidth, 1), raRowBase + RA_ROW_PULSE,
-	          raWifiSpinFrame((u8)(raSpin >> 4)), raPalNormal);
+	raPulse = (u8)(raSpin >> 4);
 }
 
 /*
@@ -456,20 +463,22 @@ static void raWifiSpin(void) {
     mode the summary below says all of this and more.
 */
 static void raWifiEssentialPal(u16 pal, const char* fmt, ...) {
-	char    line[96];
+	char    line[RA_LINE_MAX];
 	va_list args;
 
-	if (raVerbose) {
+	if (raVerbose || !raMap) {
 		return;
 	}
 	va_start(args, fmt);
 	vsniprintf(line, sizeof(line), fmt, args);
 	va_end(args);
 
-	raWifiRowPal(RA_ROW_SUMMARY + raSummaryRow, line, pal);
-	if (raSummaryRow < RA_ROW_ESSENTIALS_MAX - 1) {
+	if (raSummaryRow < RA_ROW_ESSENTIALS_MAX) {
+		raWifiCopy(raLines[raSummaryRow], line);
+		raLinePal[raSummaryRow] = pal;
 		raSummaryRow++;
 	}
+	raWifiPaint();
 }
 
 #define raWifiEssential(...)  raWifiEssentialPal(raPalNormal, __VA_ARGS__)
@@ -712,6 +721,11 @@ static void raWifiIdle(void) {
 	swiWaitForVBlank();
 	raWifiDrain();
 	raWifiSpin();
+	/*
+	    Every frame, unconditionally. This is what makes the screen fixed rather than merely
+	    positioned -- see the note on raWifiPaint().
+	*/
+	raWifiPaint();
 }
 
 /*
@@ -2368,8 +2382,10 @@ void raWifiProbe(bool sdFound, const char* ndsPath, bool cheatsOn) {
 			iprintf("\x1b[33mno log file; screen only\x1b[37m\n");
 		}
 	} else {
-		raWifiRowBase();
-		raWifiRowPal(RA_ROW_TITLE, "RetroAchievements", raPalWarn);
+		raWifiScreenInit();
+		raWifiLog("console          %ux%u, map %s\n",
+		          raWidth, RA_ROWS_VISIBLE, raMap ? "yes" : "NO -- quiet screen off");
+		raWifiCopy(raTitle, "RetroAchievements");
 		raWifiStep(0, "Starting up");
 	}
 
@@ -2748,7 +2764,8 @@ done:
 		    Leave the cursor below the block. Whatever the launcher prints next is not ours to place,
 		    and it must not land on top of the only lines this screen exists to show.
 		*/
-		raWifiClear(RA_ROW_PULSE);
+		raPulse = 0;
+		raWifiPaint();
 	}
 
 	raWifiLog("\n\x1b[33mreached stage %d of %d\x1b[37m\n", stage, RA_WIFI_STAGE_MAX);
