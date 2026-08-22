@@ -264,6 +264,14 @@ static bool savedDispcntBg;
     paths take different things and must give back exactly what they took.
 */
 static u8   usingSprites;
+/*
+    The strip that is on screen, kept so the tiles can be written again next frame.
+
+    Saved rather than taken from the tick's argument: a second unlock while the first is still up
+    changes what the tick is handed, and the notification that is *showing* is the one whose pixels
+    have to stay correct. Nothing here changes which notification that is.
+*/
+static const void* shownText;
 static u8   spriteOam[8];
 static u8   spriteSlot;
 static u32  spriteBase;
@@ -573,17 +581,20 @@ static void overlayStateFor(int lay, int blk) {
 	                      | (pendingFrames ? 0x40 : 0));
 }
 
-static void draw(int b, const void* text) {
+/*
+    The pixels and the map, and nothing that has to happen only once.
+
+    Split out of draw() because the tick calls this every frame now, and draw() *saves the palette
+    entries it is about to overwrite*. Called twice, the second call would have saved our own colours
+    as the game's originals and hide() would have restored those -- leaving two entries of the game's
+    palette permanently ours. A real bug, introduced and caught in the same edit, and the split is
+    what makes the per-frame path unable to do it.
+*/
+static void drawTiles(int b, const void* text) {
 	vu32* tiles = tilesOf(b);
 	vu16* map = mapOf(b);
 	const u32* src = (const u32*)text;
 	int i;
-
-	overlayStateFor(layer, block);
-	savedPaletteEntry  = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
-	savedPaletteShadow = SUB_BG_PALETTE[OVERLAY_PAL_SHADOW];
-	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
-	SUB_BG_PALETTE[OVERLAY_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
 
 	/*
 	    Copied, not generated. This used to hold eleven glyphs in message order and expand them a bit at
@@ -607,6 +618,16 @@ static void draw(int b, const void* text) {
 
 		map[(OVERLAY_ROW + row) * 32 + col] = (u16)((i + 1) | (OVERLAY_PAL_BANK << 12));
 	}
+}
+
+/* ...and the once-only half: the state reading and the two palette entries this borrows. */
+static void draw(int b, const void* text) {
+	overlayStateFor(layer, block);
+	savedPaletteEntry  = SUB_BG_PALETTE[OVERLAY_PAL_ENTRY];
+	savedPaletteShadow = SUB_BG_PALETTE[OVERLAY_PAL_SHADOW];
+	SUB_BG_PALETTE[OVERLAY_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
+	SUB_BG_PALETTE[OVERLAY_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
+	drawTiles(b, text);
 }
 
 
@@ -880,6 +901,7 @@ static bool spriteShow(const void* text) {
 	SUB_OBJ_PALETTE[OBJ_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
 	SUB_OBJ_PALETTE[OBJ_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
 
+	shownText = text;
 	spriteBlit(spriteBase, text);
 	for (k = 0; k < RA_SPRITES; k++) {
 		spriteWrite(k, spriteTile + (u32)k * RA_SPRITE_BYTES / boundary);
@@ -970,6 +992,7 @@ static void show(const void* text) {
 	savedVofs  = SUB_BGVOFS(l);
 	savedDispcntBg = (SUB_DISPCNT & (1u << (8 + l))) != 0;
 
+	shownText = text;
 	draw(b, text);
 
 	SUB_BGCNT(l)  = bgCntFor(b);
@@ -983,6 +1006,7 @@ static void show(const void* text) {
 
 static void hide(void) {
 	framesLeft = 0;
+	shownText  = 0;
 
 	if (usingSprites) {
 		spriteHide();
@@ -1075,6 +1099,28 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 			for (k = 0; k < RA_SPRITES; k++) {
 				spriteWrite(k, spriteTile + (u32)k * RA_SPRITE_BYTES / boundary);
 			}
+			/*
+			    **And the same argument, applied to the two things it was not applied to.**
+
+			    The reasoning above is about OAM and it is equally true of the *pixels* and of the two
+			    palette entries: a game that DMAs its object tiles or its object palette every frame is
+			    doing something exactly as ordinary as DMAing OAM, and both were written once at show()
+			    and never again. What that produces is an OAM entry of ours pointing at tiles that are
+			    now the game's, in colours that are now the game's -- which is a notification that
+			    appears, in the right place, made of the wrong pixels. Inconsistent between games, and
+			    consistent within one, which is what was reported.
+
+			    The eviction survey cannot catch it either: it looks for an OAM entry referencing our
+			    slot, and a blanket transfer of tile data with no entry pointing here passes it while
+			    having overwritten every byte.
+
+			    Costs 512 word writes and two halfwords, and only on the frames a notification is up.
+			*/
+			SUB_OBJ_PALETTE[OBJ_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
+			SUB_OBJ_PALETTE[OBJ_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
+			if (shownText) {
+				spriteBlit(spriteBase, shownText);
+			}
 			return;
 		}
 
@@ -1103,6 +1149,17 @@ void ra_overlay_tick(u32 unlocks, const void* text) {
 			SUB_BGHOFS(layer) = 0;
 			SUB_BGVOFS(layer) = 0;
 			SUB_DISPCNT |= (1u << (8 + layer));
+			/*
+			    ...and the tiles and the palette, for the reason spelled out on the sprite path above:
+			    holding the registers that *point* at our pixels does nothing for a game that rewrote
+			    the pixels. A background path is if anything more exposed, since the block it borrowed
+			    is character VRAM the game may be streaming tiles into.
+			*/
+			SUB_BG_PALETTE[OVERLAY_PAL_ENTRY]  = OVERLAY_INK_COLOUR;
+			SUB_BG_PALETTE[OVERLAY_PAL_SHADOW] = OVERLAY_SHADOW_COLOUR;
+			if (shownText) {
+				drawTiles(block, shownText);
+			}
 		}
 		return;
 	}

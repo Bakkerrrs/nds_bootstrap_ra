@@ -7860,6 +7860,55 @@ The number to watch for a future set is therefore **not the achievement count** 
 memrefs and modified memrefs, which is what `rcPeeks` and the host's list walk report. A set of a
 hundred simple definitions is cheaper than fifty full of `AddSource` arithmetic.
 
+## The overlay looks wrong on some games, and the file already knew why
+
+Reported as inconsistent between games and not looking right. The cause is the overlay's own
+reasoning, applied to two of the four things it needed to be applied to.
+
+From the per-frame path, about the OAM entries:
+
+> Rewritten every frame rather than left in place, because a game that keeps a shadow copy of OAM and
+> DMAs the whole thing each frame — which is the ordinary way to do it — would otherwise wipe these on
+> its next transfer.
+
+That is exactly right, and it is equally true of the **pixels** and of the two **palette entries**.
+Both were written once in `show()` and never again. A game that DMAs its object tiles or its object
+palette every frame is doing something as ordinary as DMAing OAM — and what that produces is one of
+our OAM entries pointing at tiles that are now the game's, in colours that are now the game's. A
+notification that appears, in the right place, made of the wrong pixels.
+
+**Inconsistent between games and consistent within one**, which is what was reported: it depends
+entirely on whether that game's engine blanket-transfers those two regions.
+
+**The eviction survey cannot catch it.** `surveyObjVram()` looks for an OAM entry *referencing* our
+slot, and a game transferring tile data with no entry pointing here passes the survey while having
+overwritten every byte of our glyphs.
+
+So both are re-asserted every visible frame now, on the sprite path and on the background path. The
+background path is if anything more exposed: the block it borrows is character VRAM a game may be
+streaming tiles into. Cost is 512 word writes and two halfwords, only on the frames a notification is
+up — 180 of them, three seconds.
+
+### A real bug, introduced and caught inside the same edit
+
+`draw()` **saves the palette entries it is about to overwrite**, so that `hide()` can put them back.
+Called every frame, its second call would have saved *our own* colours as the game's originals, and
+`hide()` would have restored those — leaving two entries of the game's palette permanently ours, on
+every game, for the rest of the session.
+
+`drawTiles()` is the split that makes the per-frame path unable to do it: the pixels and the map in
+one function, the state reading and the borrowed palette in the other, and only the first is reachable
+from the tick. The sprite path never had the problem — its palette save lives in `spriteShow()` rather
+than in `spriteBlit()` — which is what made the asymmetry visible.
+
+### What was checked and ruled out first
+
+**OBJ extended palettes.** `SUB_DISPCNT` bit 31 is the object counterpart of the bit 30 that this
+project already got wrong once on the background side, and nothing in the overlay reads it. It does
+not matter: extended palettes apply only to 256-colour objects, and ours are 16-colour, which always
+take standard object palette RAM. Ruled out by reading the sprite's own attribute setup rather than by
+building anything.
+
 ## The boot takes fifty seconds, and nobody could say where they went
 
 Reported as a standing complaint rather than a regression: the ladder has always been slow. And the
