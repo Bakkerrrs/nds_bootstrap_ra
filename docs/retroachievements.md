@@ -7969,13 +7969,45 @@ header is case-insensitive by the standard, Cloudflare does not send it the way 
 `Content-Length` appearing inside a body of achievement descriptions must never be mistaken for the
 header.
 
-### What is left after this
+### Hardware: 59.8s to 10.5s, and the block is byte-identical
 
-- **`r=patch` still re-downloads an unchanged set**, now the largest remaining item at ~3.6s of real
-  transfer. The per-game cache exists and is used only when the ladder *fails*; using it when the
-  ladder succeeds would remove that too, at the cost of a set that can go stale.
-- **The radio is 5 seconds** and is not worth attacking.
-- **`sync=0`** remains the honest answer for a session where nobody wants to wait at all.
+| Stage | before | after |
+| --- | --- | --- |
+| hash the ROM | 0.4s | 0.4s |
+| chip up and associate | 1.3s | 1.3s |
+| DHCP | 3.2s | 3.3s |
+| `r=login` | **10.3s** | **0.5s** |
+| `r=gameid` | **10.2s** | **0.3s** |
+| `r=startsession` | **10.2s** | **0.4s** |
+| `r=unlocks` | **10.2s** | **0.5s** |
+| `r=patch` | **13.8s** | **3.5s** |
+| **total** | **59.8s** | **10.5s** |
+
+**What makes this proof rather than a claim** is that `body was 64424 bytes` and `block 26691 of
+29431 used` are identical to the slow run's. Had the early exit truncated anything, the patch body
+would have arrived short and the block would not land on the same byte. With them: `98 kept`, `98
+with ids`, `4 clipped`, `98/98 desc/points`, `24 clipped`, `already earned 4` with all four ids,
+`staged 98 definitions`, `reached stage 15 of 15`.
+
+The 3.5s left in `r=patch` is the 64 KB actually moving, which is what the breakdown predicted:
+10.2 fixed plus 3.6 real, with only the real part remaining.
+
+**The one hazard the change introduces**, written down rather than left implicit: a server declaring
+a `Content-Length` smaller than what it sends would be truncated here. HTTP servers do not do that,
+and one that did would already have defeated the JSON parsing. A reply with neither header behaves
+exactly as before and waits for the close — so the worst case of this change is the old behaviour,
+not a broken one.
+
+### What is left, and why the obvious one is now not worth doing
+
+- **`r=patch` re-downloading an unchanged set is no longer the lever it was.** At 60 seconds it was
+  the largest transfer in the boot; at 10.5 it is 3.5 seconds of a ten-second boot. Using the
+  per-game cache when the ladder *succeeds* would recover about three of them and would cost a set
+  that can go stale between server-side revisions. **Not worth it** — recorded as a decision rather
+  than as an open item.
+- **The radio is 5 of the 10 seconds** and is dsiwifi's, not ours.
+- **`sync=0`** remains the answer for a session where nobody wants to wait at all, and is now a much
+  smaller saving than it was.
 
 
 ## An achievement's detail page says when it was earned
