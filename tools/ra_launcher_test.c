@@ -281,6 +281,60 @@ static void test_config(void) {
 		CHECK(vcfg.submit == 1);
 	}
 
+	printf("\nan earned date packs into a word and comes back out\n");
+	{
+		/*
+		    Two sources feed this -- a server timestamp converted to local time, and the queue file's
+		    own stamp -- and the menu unpacks it with shifts because it has no calendar library. A
+		    packing that lost a field would show a plausible wrong date, which is the failure mode
+		    this project has now been bitten by twice on this very page.
+		*/
+		const u32 w = raWhenPack(2026, 8, 22, 14, 7);
+
+		CHECK(w != 0);
+		CHECK(RA_WHEN_YEAR(w) == 2026);
+		CHECK(RA_WHEN_MONTH(w) == 8);
+		CHECK(RA_WHEN_DAY(w) == 22);
+		CHECK(RA_WHEN_HOUR(w) == 14);
+		CHECK(RA_WHEN_MINUTE(w) == 7);
+		/* Both ends of every field, since each one is a different width. */
+		{
+			const u32 lo = raWhenPack(2000, 1, 1, 0, 0);
+			const u32 hi = raWhenPack(2127, 12, 31, 23, 59);
+
+			CHECK(lo != 0 && RA_WHEN_YEAR(lo) == 2000 && RA_WHEN_MONTH(lo) == 1
+			      && RA_WHEN_DAY(lo) == 1 && RA_WHEN_HOUR(lo) == 0 && RA_WHEN_MINUTE(lo) == 0);
+			CHECK(hi != 0 && RA_WHEN_YEAR(hi) == 2127 && RA_WHEN_MONTH(hi) == 12
+			      && RA_WHEN_DAY(hi) == 31 && RA_WHEN_HOUR(hi) == 23 && RA_WHEN_MINUTE(hi) == 59);
+		}
+		/* Out of range is 0, not a wrapped date: the menu prints nothing for 0 and that is correct. */
+		CHECK(raWhenPack(1999, 1, 1, 0, 0) == 0);
+		CHECK(raWhenPack(2128, 1, 1, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 0, 1, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 13, 1, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 1, 0, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 1, 32, 0, 0) == 0);
+		CHECK(raWhenPack(2026, 1, 1, 24, 0) == 0);
+		CHECK(raWhenPack(2026, 1, 1, 0, 60) == 0);
+		/*
+		    Zero has to be unreachable from a real date, because that is what "not known" is. Month
+		    and day are 1-based, so the month field can never be zero on a packed value.
+		*/
+		CHECK(raWhenPack(2000, 1, 1, 0, 0) != 0);
+
+		/* ...and from the queue file's own stamp, which is where a locally earned unlock's time is. */
+		CHECK(raWhenFromStamp("20260822140755") == raWhenPack(2026, 8, 22, 14, 7));
+		/* Seconds are read and dropped -- the field has no room and a minute is the useful unit. */
+		CHECK(raWhenFromStamp("20260822140700") == raWhenFromStamp("20260822140759"));
+		/* Anything that is not fourteen digits is refused rather than half-read. */
+		CHECK(raWhenFromStamp("2026082214075") == 0);
+		CHECK(raWhenFromStamp("2026-08-22 14:07") == 0);
+		CHECK(raWhenFromStamp("") == 0);
+		CHECK(raWhenFromStamp(NULL) == 0);
+		/* A stamp that parses but is not a date is still refused, by raWhenPack's ranges. */
+		CHECK(raWhenFromStamp("20269922140700") == 0);
+	}
+
 	printf("\nthe progress bar agrees with its own percentage\n");
 	{
 		char bar[RA_BAR_MIN];
@@ -1924,12 +1978,13 @@ static void test_queue(void) {
 		/* And the block has to fit the reservation the heap was shortened to make room for. */
 		CHECK(sizeof(raPendingBlock) <= CARDENGINEI_ARM9_RA_PENDING_MAX);
 		/*
-		    Same pin for the viewer's index, and it earns it more: raViewerEntry is 12 bytes only
-		    because its three offsets are u16, and a field growing to u32 would push 128 entries past
-		    the reservation without a single line failing to compile. What it would overrun is the
-		    pending tally directly above it.
+		    Same pin for the viewer's index, and it earns it more: raViewerEntry is 16 bytes and 128
+		    of them plus the header is 2,060, so the reservation had to grow from 0x800 to 0xA00 when
+		    the entry gained the date an achievement was earned. Without this check that growth would
+		    have overrun the pending tally directly above it, with nothing failing to compile.
 		*/
 		CHECK(sizeof(raViewerBlock) <= CARDENGINEI_ARM9_RA_VIEWER_MAX);
+		CHECK(sizeof(raViewerEntry) == 16);
 		CHECK(RA_VIEWER_MAGIC == CARDENGINEI_ARM9_RA_VIEWER_MAGIC);
 		/*
 		    Same pin again for the session block, and this is the one where the two constants are

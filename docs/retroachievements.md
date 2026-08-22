@@ -7860,6 +7860,76 @@ The number to watch for a future set is therefore **not the achievement count** 
 memrefs and modified memrefs, which is what `rcPeeks` and the host's list walk report. A set of a
 hundred simple definitions is cheaper than fifty full of `AddSource` arithmetic.
 
+## An achievement's detail page says when it was earned
+
+`r=startsession` is the only rung in this API that answers the question. `r=unlocks` replies in bare
+ids and `r=patch` describes the *set* rather than the account, but a session reply carries objects:
+
+```json
+{"Success":true,"ServerNow":1786244358,
+ "HardcoreUnlocks":[{"ID":91467,"When":1786166850}],
+ "Unlocks":[{"ID":93119,"When":1786243172}, ...]}
+```
+
+That reply was already being made, and already being parsed for its ids. The dates were sitting
+beside them, unread.
+
+### The path, and why each hop is where it is
+
+| Where | What happens |
+| --- | --- |
+| `r=startsession`, stage 12 | ids and `When`s extracted into a table; `ServerNow` against the RTC gives this console's offset from UTC |
+| `r=patch`, stage 15 | each earned achievement's `#!` record gains a fifth field: the date, packed |
+| the bootloader | copies the block into DSi WRAM as it always did |
+| `cardenginei_arm9_ra` | reads that field into `raViewerEntry.when` while indexing |
+| the in-game menu | unpacks five fields with shifts and prints them |
+
+**The conversion happens in the launcher**, and that is the load-bearing choice. The launcher has a
+real clock and a real libc; the in-game menu has neither and has no business owning a calendar. So a
+date crosses as 27 bits and the menu does five shifts.
+
+**And it is packed rather than left as an epoch,** which costs the same four bytes. An epoch would
+have pushed the calendar arithmetic across the boundary into the binary that cannot afford it.
+
+### Two clocks, and `ServerNow` is what reconciles them
+
+The server answers in UTC. The queue file's stamps are the console's local time. The page shows both
+kinds of date side by side — a server-confirmed unlock and one still waiting to sync — so one of them
+has to be converted or the page tells the truth twice in two different timezones.
+
+There is no timezone setting anywhere in this fork to consult, and `ServerNow` makes one unnecessary:
+it is the server's clock at the moment this console's clock read `time(NULL)`, so the difference
+between them *is* this console's offset from UTC, whether or not anyone ever configured it. A console
+with a wrong RTC gets wrong dates here — and it already writes wrong stamps into the queue, so
+trusting it breaks nothing that was not already broken.
+
+### When there is no date, nothing is printed
+
+Three ways for that to happen, and none of them prints "unknown":
+
+- **The account does not hold it.** The status line above has already said so.
+- **It was earned during this session.** The flag flips while the game runs, and nothing in that
+  context has a date — `sharedAddr` carries hours and minutes and no calendar at all.
+- **The block filled.** The date is the first field `raPatchWriteEarned()` trims, ahead of the
+  description, and the only one whose loss is not counted: the other three are text a person came
+  here to read.
+
+An empty row says less than a wrong one, and "unknown" beside an achievement a player is looking at
+invites the question of what else about it is unknown.
+
+### What it cost
+
+`raViewerEntry` went from 12 bytes to 16, so 128 of them plus the header is 2,060 and the viewer
+reservation grew from `0x800` to `0xA00`. That comes out of the definitions block's own 32K, which
+the largest measured set uses 26,663 of. `sizeof(raViewerEntry) == 16` is now pinned on the host
+beside the reservation check — without it, the growth would have overrun the pending tally directly
+above with nothing failing to compile.
+
+`raWhenPack()` refuses anything out of range rather than wrapping it, because a wrong date shown
+confidently is worse than no date, and both of its sources are external: a stamp from a file a person
+can edit, and a timestamp from a server. Zero cannot collide with a real value — month and day are
+1-based, so a packed date always has a non-zero month field.
+
 ## `01 of 101` — a set of a hundred and one read as a set of one
 
 Reported on *Chrono Trigger*: the achievements page's header counted the total wrong, and only on

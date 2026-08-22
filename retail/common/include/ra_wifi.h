@@ -244,6 +244,42 @@
 */
 #define RA_VIEWER_QUEUED       0x02
 
+/*
+    When an achievement was earned, packed into 27 bits of a u32, and 0 means "not known".
+
+        bits 0-5    minute   0-59
+        bits 6-10   hour     0-23
+        bits 11-15  day      1-31
+        bits 16-19  month    1-12
+        bits 20-26  year     0-127, from 2000
+
+    **Packed rather than stored as text, and packed rather than left as a unix epoch**, for two
+    different reasons. Text would cost sixteen bytes an entry against a viewer block whose whole
+    reservation is a couple of kilobytes. An epoch would cost four, the same as this -- and would put
+    a calendar conversion inside the in-game menu, which has no libc and no business owning one. The
+    launcher has a real clock and a real library; it does the conversion once and the menu unpacks
+    five fields with shifts.
+
+    Zero cannot collide with a real value: month and day are 1-based, so a packed date always has a
+    non-zero month field.
+*/
+#define RA_WHEN_MINUTE(w)  ((w) & 0x3F)
+#define RA_WHEN_HOUR(w)    (((w) >> 6) & 0x1F)
+#define RA_WHEN_DAY(w)     (((w) >> 11) & 0x1F)
+#define RA_WHEN_MONTH(w)   (((w) >> 16) & 0x0F)
+#define RA_WHEN_YEAR(w)    (2000 + (((w) >> 20) & 0x7F))
+
+/*
+    Build one. Returns 0 for anything out of range rather than a wrapped date, because a wrong date
+    shown confidently is worse than no date at all -- the menu prints nothing for 0.
+*/
+u32 raWhenPack(int year, int month, int day, int hour, int minute);
+/*
+    ...and from the queue file's own stamp, `YYYYMMDDhhmmss`, which is where a locally earned unlock's
+    time comes from. Returns 0 if the stamp is not fourteen digits.
+*/
+u32 raWhenFromStamp(const char* stamp);
+
 typedef struct raViewerEntry {
 	u32 id;
 	u16 titleOff;
@@ -251,6 +287,12 @@ typedef struct raViewerEntry {
 	u16 descOff;
 	u8  flags;
 	u8  pad;
+	/*
+	    When it was earned, packed -- see RA_WHEN_MINUTE. Zero for an achievement this account does
+	    not hold, and zero for one earned during *this* session: the flag flips while the game runs
+	    and nothing in that context has a date, only the hours and minutes on sharedAddr.
+	*/
+	u32 when;
 } raViewerEntry;
 
 typedef struct raViewerBlock {
@@ -315,6 +357,16 @@ typedef struct raPendingBlock {
 	*/
 	u16  queuedCount;
 	u32  queued[RA_PENDING_QUEUED_MAX];
+	/*
+	    ...and when each of them was earned, packed, from the queue record's own stamp. Parallel to
+	    the array above rather than folded into it because that one is matched against by id, and an
+	    id is what the cardengine has.
+
+	    This is the *local* clock's answer, which the server's is converted into as well -- see
+	    raWifiEarnedWhen(). Two different sources for the same kind of fact have to agree about what
+	    kind of fact it is, or the page shows one achievement in local time and the next in UTC.
+	*/
+	u32  queuedWhen[RA_PENDING_QUEUED_MAX];
 } raPendingBlock;
 
 /*
@@ -388,6 +440,13 @@ typedef struct raQueue {
 	    a struct, because `ids` is passed on its own to the sender and this is only ever read beside it.
 	*/
 	u32  times[RA_QUEUE_MAX];
+	/*
+	    ...and the same instant packed for the in-game menu -- see RA_WHEN_MINUTE. Taken from the
+	    stamp string directly rather than converted back from `times`, which is what keeps this file
+	    free of calendar arithmetic: the stamp is already `YYYYMMDDhhmmss` and the packing is five
+	    substrings, where an epoch would need a real date library the menu side does not have.
+	*/
+	u32  packed[RA_QUEUE_MAX];
 	/*
 	    Which game each came from, straight out of that ROM's header and NUL-terminated here. Empty
 	    when the record did not say. `codes` is what identifies a game -- it is unique per release --
@@ -995,6 +1054,14 @@ typedef struct raPatch {
 	*/
 	const u32* skipIds;
 	u16   skipCount;
+	/*
+	    When an achievement in that skip list was earned, packed -- see RA_WHEN_MINUTE. A function
+	    rather than a table because only the launcher can answer it: the date comes from
+	    r=startsession's reply, which this file has no business knowing about.
+
+	    Null is legal and means no dates are staged, which is what a boot with no network produces.
+	*/
+	u32 (*whenOf)(u32 id);
 	u16   alreadyDone;    /* definitions matching one, which are written for the viewer instead */
 	/*
 	    ...and what that writing produced. `earned` is the display-only records in the block,

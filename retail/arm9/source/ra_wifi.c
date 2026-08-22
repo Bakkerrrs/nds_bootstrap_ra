@@ -166,6 +166,49 @@ static bool          raWifiSdFound;
 */
 #define RA_WIFI_UNLOCKS_MAX 128
 static u32           unlockedIds[RA_WIFI_UNLOCKS_MAX];
+/*
+    What the account already holds and *when* it earned each one, from r=startsession -- the only rung
+    in this API that answers the second question. Kept for the patch fetch two rungs later, which is
+    where an earned achievement is written into the staged block and is therefore the one moment its
+    date can ride along.
+*/
+static u32           earnedId[RA_WIFI_UNLOCKS_MAX];
+static u32           earnedWhen[RA_WIFI_UNLOCKS_MAX];   /* UTC, as the server sent it */
+static int           earnedCount;
+/*
+    ...and this console's offset from the server's clock, in seconds, from ServerNow against the RTC.
+    Zero until r=startsession answers, which means an unconverted UTC date rather than a wrong one.
+*/
+static s32           clockOffset;
+
+/*
+    The packed local date an achievement was earned, or 0 if this account does not hold it or the
+    server did not say.
+
+    The conversion happens here, in the launcher, and that is deliberate: this side has a real libc
+    and a real clock, and the in-game menu has neither. It gets five fields and shifts.
+
+    gmtime() rather than localtime() because the offset has already been applied -- what is handed to
+    it is not UTC any more, it is this console's own wall clock expressed as an epoch, and asking a
+    timezone library to shift it again would move it twice.
+*/
+static u32 raWifiEarnedWhen(u32 id) {
+	int k;
+
+	for (k = 0; k < earnedCount; k++) {
+		if (earnedId[k] == id) {
+			const time_t     local = (time_t)((s32)earnedWhen[k] + clockOffset);
+			const struct tm* t     = gmtime(&local);
+
+			if (!t) {
+				return 0;
+			}
+			return raWhenPack(t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+			                  t->tm_hour, t->tm_min);
+		}
+	}
+	return 0;
+}
 static u16           unlockCount;
 /*
     How many of those are the server's own pseudo-achievements rather than the set's, by the same
@@ -955,6 +998,57 @@ static void raWifiStartSession(const raConfig* cfg) {
 	    also keeps the two able to disagree in the log rather than one quietly overwriting the other.
 	*/
 	soft = raNetJsonObjectField(response, "Unlocks", "ID", unlocks, RA_WIFI_UNLOCKS_MAX);
+	/*
+	    ...and *when*, from the same objects, which is the only place in this whole API that says so.
+	    `r=unlocks` answers in bare ids and `r=patch` describes the set rather than the account, so a
+	    reply this rung was already making is the one source for the date the achievements page shows.
+
+	    Two calls over one parse because the extractor takes one field, and the array is walked in
+	    order both times -- so whenWasEarned[k] belongs to unlocks[k]. Read back rather than assumed:
+	    a count that disagreed would mean the reply had objects missing one of the two fields, and
+	    that is checked below rather than trusted.
+	*/
+	{
+		const int whens = raNetJsonObjectField(response, "Unlocks", "When",
+		                                       earnedWhen, RA_WIFI_UNLOCKS_MAX);
+
+		if (soft > 0 && whens == soft) {
+			int k;
+
+			for (k = 0; k < soft; k++) {
+				earnedId[k] = unlocks[k];
+			}
+			earnedCount = soft;
+		} else if (soft > 0) {
+			/*
+			    Two counts that disagree mean objects missing one of the fields, and there is no way
+			    to tell which id lost its date. Staging none beats staging them shifted by one, which
+			    would date every achievement with its neighbour's time.
+			*/
+			raWifiLog("\x1b[33m%d unlocks but %d dates -- no times staged\x1b[37m\n", soft, whens);
+		}
+	}
+	/*
+	    The clock difference, taken once, from two numbers in the same reply and the console's own RTC.
+
+	    The server answers in UTC and the queue file's stamps are the console's local time, and the
+	    achievements page shows both kinds side by side -- so one of them has to be converted or the
+	    page tells the truth twice in two different timezones. There is no timezone setting anywhere in
+	    this fork to consult, and `ServerNow` is what makes one unnecessary: it is the server's clock at
+	    the moment this console's clock read time(NULL), and the difference between them is this
+	    console's offset from UTC whether or not anyone ever configured it.
+
+	    A console with a wrong RTC gets wrong dates here, and it already gets wrong stamps in the queue,
+	    so nothing new is broken by trusting it.
+	*/
+	{
+		u32 serverNow = 0;
+
+		if (raNetJsonNumber(response, "ServerNow", &serverNow) && serverNow) {
+			clockOffset = (s32)((u32)time(NULL) - serverNow);
+			raWifiLog("clock offset     %ld s from the server\n", (long)clockOffset);
+		}
+	}
 	hard = raNetJsonObjectField(response, "HardcoreUnlocks", "ID", unlocks, RA_WIFI_UNLOCKS_MAX);
 	verdict.sessionUnlocks = (u16)(soft > 0 ? soft : 0);
 	verdict.sessionHardcore = (u16)(hard > 0 ? hard : 0);
@@ -1655,6 +1749,7 @@ static void raWifiFetchPatch(const raConfig* cfg) {
 	*/
 	patch.skipIds   = unlockedIds;
 	patch.skipCount = unlockCount;
+	patch.whenOf    = raWifiEarnedWhen;
 	patchProgress   = 0;
 
 	memset(&p, 0, sizeof(p));

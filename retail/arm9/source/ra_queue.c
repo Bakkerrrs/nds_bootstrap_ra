@@ -252,6 +252,7 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 	while (i < length) {
 		u32  value;
 		u32  stamp;
+		u32 packed;
 		char code[RA_QUEUE_CODE + 1];
 		char title[RA_QUEUE_TITLE + 1];
 		int hardcore;
@@ -309,7 +310,8 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 		    not it turns out to be a date the converter will vouch for, because either way those digits
 		    are not an unlock id and must not be read as one.
 		*/
-		stamp = 0;
+		stamp  = 0;
+		packed = 0;
 		code[0] = 0;
 		title[0] = 0;
 		hardcore = 0;
@@ -330,7 +332,8 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 			    *next* record's id.
 			*/
 			if (i - start == RA_QUEUE_STAMP) {
-				stamp = raQueueStampToUnix(text + start);
+				stamp  = raQueueStampToUnix(text + start);
+				packed = raWhenFromStamp(text + start);
 			}
 
 			/*
@@ -444,6 +447,7 @@ void raQueueScan(raQueue* q, const char* text, int length) {
 			continue;
 		}
 		q->times[q->count] = stamp;
+		q->packed[q->count] = packed;
 		if (stamp) {
 			q->stamped++;
 		}
@@ -596,7 +600,8 @@ void raQueueTally(const raQueue* q, u32 now, raPendingBlock* out) {
 		if (q->codes[i][0] == 0) {
 			out->unnamed++;
 			if (out->queuedCount < RA_PENDING_QUEUED_MAX) {
-				out->queued[out->queuedCount++] = q->ids[i];
+				out->queuedWhen[out->queuedCount] = q->packed[i];
+				out->queued[out->queuedCount++]   = q->ids[i];
 			}
 			continue;
 		}
@@ -630,7 +635,8 @@ void raQueueTally(const raQueue* q, u32 now, raPendingBlock* out) {
 		    is still an id the viewer may be showing.
 		*/
 		if (out->queuedCount < RA_PENDING_QUEUED_MAX) {
-			out->queued[out->queuedCount++] = q->ids[i];
+			out->queuedWhen[out->queuedCount] = q->packed[i];
+			out->queued[out->queuedCount++]   = q->ids[i];
 		}
 
 		/*
@@ -726,3 +732,58 @@ void raQueueSign(u32 id, const char* username, int hardcore, u32 seconds, char* 
 }
 
 #endif /* RA_LAUNCHER_WIFI */
+
+/*
+    Pack a date and time into the 27 bits raViewerEntry.when holds -- see RA_WHEN_MINUTE.
+
+    Refuses anything out of range rather than wrapping it, and that is the whole of the validation
+    policy here: a wrong date shown confidently is worse than no date, and the menu prints nothing
+    for zero. Both sources feeding this are external -- a stamp written by the ARM7 into a file a
+    person can edit, and a timestamp from a server -- so neither is trusted to be sane.
+
+    Years before 2000 are refused as well as years past 2127. A DS with a dead RTC reports 2000 or
+    earlier, and an achievement dated 1970 on the page would say nothing true.
+*/
+u32 raWhenPack(int year, int month, int day, int hour, int minute) {
+	if (year < 2000 || year > 2127
+	 || month < 1 || month > 12
+	 || day < 1 || day > 31
+	 || hour < 0 || hour > 23
+	 || minute < 0 || minute > 59) {
+		return 0;
+	}
+	return (u32)(((u32)(year - 2000) << 20)
+	           | ((u32)month  << 16)
+	           | ((u32)day    << 11)
+	           | ((u32)hour   << 6)
+	           | (u32)minute);
+}
+
+/*
+    ...and from the queue file's own `YYYYMMDDhhmmss`, which is how a locally earned unlock carries
+    its time. Seconds are read and dropped: the field this packs into has no room for them, and a
+    minute is the resolution a person reading a menu can use.
+*/
+u32 raWhenFromStamp(const char* stamp) {
+	int field[6] = { 0, 0, 0, 0, 0, 0 };
+	int widths[6] = { 4, 2, 2, 2, 2, 2 };
+	int at = 0;
+	int f;
+
+	if (!stamp) {
+		return 0;
+	}
+	for (f = 0; f < 6; f++) {
+		int i;
+
+		for (i = 0; i < widths[f]; i++) {
+			const char c = stamp[at++];
+
+			if (c < '0' || c > '9') {
+				return 0;
+			}
+			field[f] = field[f] * 10 + (c - '0');
+		}
+	}
+	return raWhenPack(field[0], field[1], field[2], field[3], field[4]);
+}

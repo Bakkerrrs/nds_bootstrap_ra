@@ -865,6 +865,32 @@ static void raAchievementsPage(void) {
 			} else if (e->flags & RA_VIEWER_QUEUED) {
 				printRight(31, 2, (unsigned char*)"(sync pending)", FONT_RED, false);
 			}
+			/*
+			    When it was earned, under the description rather than beside the status: the status
+			    is one word and this is a sentence, and a line of its own is the only place a date
+			    and a time both fit on a 32-column screen.
+
+			    Printed only when there is one, and there are three ways for there not to be. The
+			    account does not hold it, which the status line above has already said. It was earned
+			    during *this* session, where the flag flips while the game runs and nothing in that
+			    context has a date -- only hours and minutes on sharedAddr. Or the block filled and
+			    the date was the first field dropped, which is what raPatchWriteEarned() trims first.
+
+			    Nothing is printed for any of them, deliberately: an empty row says less than a wrong
+			    one, and "unknown" beside an achievement a player is looking at would invite the
+			    question of what else is unknown about it.
+			*/
+			if (e->when) {
+				print(1, 10, (unsigned char*)"Earned", FONT_LIGHT_GRAY, false);
+				raPrintNum(8, 10, 4, RA_WHEN_YEAR(e->when), FONT_WHITE);
+				print(12, 10, (unsigned char*)"-", FONT_DARKER_GRAY, false);
+				printDec(13, 10, RA_WHEN_MONTH(e->when), 2, FONT_WHITE, false);
+				print(15, 10, (unsigned char*)"-", FONT_DARKER_GRAY, false);
+				printDec(16, 10, RA_WHEN_DAY(e->when), 2, FONT_WHITE, false);
+				printDec(20, 10, RA_WHEN_HOUR(e->when), 2, FONT_WHITE, false);
+				print(22, 10, (unsigned char*)":", FONT_DARKER_GRAY, false);
+				printDec(23, 10, RA_WHEN_MINUTE(e->when), 2, FONT_WHITE, false);
+			}
 			if (e->descOff) {
 				/*
 				    Wrapped by hand at 30 columns, because print() does not wrap and a description

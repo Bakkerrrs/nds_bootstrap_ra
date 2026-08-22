@@ -883,6 +883,12 @@ static raViewerEntry* ra_viewer_add(char* base, char* record, u8 flags) {
 	e->descOff   = 0;
 	e->flags     = flags;
 	e->pad       = 0;
+	/*
+	    Cleared explicitly like every field beside it, and it matters more than the others: the block
+	    is written where a previous boot's block was, so an entry left alone keeps the last session's
+	    value -- which for a date means an achievement showing when a *different* one was earned.
+	*/
+	e->when      = 0;
 
 	if (flags & RA_VIEWER_EARNED) {
 		p += 2;   /* past the `#!` */
@@ -907,10 +913,28 @@ static raViewerEntry* ra_viewer_add(char* base, char* record, u8 flags) {
 		if (*d != '\t') {
 			continue;
 		}
-		if (++tab > 3) {
+		if (++tab > 4) {
 			break;
 		}
 		*d = 0;   /* the field before it ends here, and the one after it starts as a string */
+		if (tab == 4) {
+			/*
+			    When it was earned, packed by the launcher -- read as a number rather than kept as an
+			    offset, because the menu wants five fields and shifts, not a string to parse.
+
+			    Read here and nowhere else: this is the only pass that sees the record before the
+			    block is mutated, which is the whole reason the index exists.
+			*/
+			const char* w = d + 1;
+			u32         value = 0;
+
+			while (*w >= '0' && *w <= '9') {
+				value = value * 10 + (u32)(*w - '0');
+				w++;
+			}
+			e->when = value;
+			continue;
+		}
 		{
 			const u32 off = (u32)(d + 1 - base);
 
@@ -944,6 +968,14 @@ static raViewerEntry* ra_viewer_add(char* base, char* record, u8 flags) {
 			for (k = 0; k < pend->queuedCount && k < RA_PENDING_QUEUED_MAX; k++) {
 				if (pend->queued[k] == e->id) {
 					e->flags |= RA_VIEWER_QUEUED;
+					/*
+					    ...and its time, from the queue record's own stamp. An achievement that is
+					    queued was earned on this console, so this is the local clock's answer --
+					    which is the same thing the server's dates were converted into.
+					*/
+					if (!e->when) {
+						e->when = pend->queuedWhen[k];
+					}
 					v->queued++;
 					break;
 				}
