@@ -50,6 +50,27 @@
     precisely the thing this exists to rule out -- a stalled run would look identical to a waiting one
     again, which is the bug it was added for.
 */
+/*
+    Where a string of `cells` cells starts if it is to sit in the middle of a `width`-wide console.
+
+    Pure and pinned for the same reason the bar is: a margin that goes negative or that pushes a line
+    past the last column is not a cosmetic bug on this console. Writing into the final cell advances
+    the cursor past the end, the console wraps to the next row, and every absolute row this code has
+    addressed is then one out -- which is what "it comes apart from 40% on" looks like.
+
+    Never returns a position that would let the string touch the last column: the caller draws inside
+    `width - 1` and the final cell is left alone on purpose.
+*/
+u32 raWifiCentre(u32 width, u32 cells) {
+	if (width == 0) {
+		return 0;
+	}
+	if (cells + 1 >= width) {
+		return 0;
+	}
+	return (width - 1 - cells) / 2;
+}
+
 char raWifiSpinFrame(u8 tick) {
 	static const char face[4] = { '.', 'o', 'O', 'o' };
 

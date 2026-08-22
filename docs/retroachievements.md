@@ -7886,16 +7886,32 @@ Ten steps, each named for what the player is waiting for rather than for the API
 bar, and the essentials underneath once they are known:
 
 ```
-RetroAchievements
+       RetroAchievements
 
-[######################] 100%
+   [#########-------------]
+              40%
 
-Ready
-Signed in as <username>
-Game found on the server
-98 achievements ready
-2 sent, 0 still waiting
-34 earned before now
+   Getting a network address
+
+
+               o
+```
+
+...and when it finishes, the message area is replaced by the result and the essentials appear below:
+
+```
+       RetroAchievements
+
+   [######################]
+             100%
+
+             Ready
+
+    Signed in as <username>
+   Game found on the server
+     98 achievements ready
+    2 sent, 0 still waiting
+     34 earned before now
 ```
 
 The two live lines are redrawn in place; the essentials are written once at the end, from `verdict` —
@@ -7903,7 +7919,7 @@ the same structure the verbose summary is written from, so the two cannot disagr
 happened. They are ordered by what a *failing* boot needs first: "Could not sign in" at the top of
 that block is the whole diagnosis for the most common problem this loader will ever have.
 
-A single cell at the end of the caption line pulses while a rung blocks — `.` `o` `O` `o`, about one
+A single cell on a row of its own pulses while a rung blocks — `.` `o` `O` `o`, about one
 breath a second. It earns its place: association can take forty seconds and DHCP ten more, during
 which the bar and the caption are both correct and both still, and a run that has stopped looks
 exactly like a run that is waiting.
@@ -7934,12 +7950,23 @@ faster reads as flicker again.
   there. And the base is clamped: writing past the last row scrolls the console, which would move
   every row the code has already addressed and turn the display into a smear.
 
-- **Padding is counted in cells, not bytes.** Rows are padded to the console width instead of using
-  the erase-to-end-of-line escape, for the same reason as the second point. `\x1b[31m` is five bytes
-  that occupy no cell, so padding by `strlen()` pads a coloured line five cells short and leaves the
-  tail of whatever was there before — and a 38-byte yellow line truncated at 32 loses its closing
-  escape and leaves the console yellow for everything printed afterwards. `raWifiVisible()` counts
-  cells; the host suite drives it, including the unterminated-escape case.
+- **Nothing is ever written into the console's final column, and the geometry is asked for rather
+  than assumed.** This is the one that actually broke, and it broke visibly: the first version pinned
+  absolute columns against a hard-coded width of 32 and put the pulsing character at column 31.
+  Writing the last cell of a row advances the cursor past the end, the console wraps to the next row,
+  and from then on every absolute row the code addresses is one out. The busiest writer on the screen
+  was sitting in the worst possible place, so the display held together until the first long wait and
+  then came apart — reported as "it comes apart from 40% on", which is exactly where the first rung
+  long enough to pulse begins. Now the width and height come from `PrintConsole`, everything is
+  centred inside `width - 1`, and `raWifiCentre()` refuses any position that could reach the edge.
+
+- **Regions are cleared, not padded.** Padding a row to the full width has to know how wide the text
+  *prints*, and these lines carry colour: `\x1b[31m` is five bytes occupying no cell, so padding by
+  `strlen()` pads five cells short per escape and leaves the tail of the previous line. Clearing the
+  message area whole before writing it removes the dependency: `raWifiVisible()` still centres the
+  text, but a miscount now costs a line a cell or two off centre instead of one that overruns the row
+  and pushes the layout down. The message area is two rows and both are cleared on every step, so a
+  long caption cannot leave anything behind a short one.
 
 Both pure pieces live in `ra_screen.c` rather than `ra_wifi.c`, for the reason `ra_wifi_verdict.c`
 exists: everything else in that file needs a console, a FIFO or a socket, and these need `sniprintf`.

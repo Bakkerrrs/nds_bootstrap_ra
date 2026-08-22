@@ -350,6 +350,43 @@ static void test_config(void) {
 			CHECK(raWifiSpinFrame(255) > ' ');
 		}
 
+		/*
+		    Centring, and it is the fix for the layout coming apart rather than a nicety.
+
+		    Writing the console's final cell advances the cursor past the end, the console wraps to
+		    the next row, and every absolute row this code has addressed is then one out. So nothing
+		    may be placed where it could reach that column -- which is what the `cells + 1 >= width`
+		    guard is, and why the divisor is `width - 1`.
+		*/
+		CHECK(raWifiCentre(32, 24) == 3);      /* the bar: 24 cells of 32 */
+		CHECK(raWifiCentre(32, 1) == 15);      /* the pulse: one cell, its own row */
+		CHECK(raWifiCentre(32, 4) == 13);      /* " 45%" */
+		CHECK(raWifiCentre(32, 0) == 15);
+		/* A string that would reach the last column starts at 0 rather than being pushed off it. */
+		CHECK(raWifiCentre(32, 31) == 0);
+		CHECK(raWifiCentre(32, 32) == 0);
+		CHECK(raWifiCentre(32, 99) == 0);
+		/* And whatever it returns, the string still ends before the final column. */
+		{
+			u32 w, c;
+
+			for (w = 8; w <= 64; w++) {
+				for (c = 0; c <= w; c++) {
+					const u32 at = raWifiCentre(w, c);
+
+					if (at != 0 && at + c > w - 1) {
+						break;
+					}
+				}
+				if (c <= w) {
+					break;
+				}
+			}
+			CHECK(w == 65);
+		}
+		/* A zero-width console asks for nothing sensible and must not divide by it. */
+		CHECK(raWifiCentre(0, 4) == 0);
+
 		/* Too small a buffer terminates rather than writing what it cannot fit. */
 		{
 			char small[8];

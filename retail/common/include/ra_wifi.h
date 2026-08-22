@@ -656,6 +656,11 @@ u32 raWifiVisible(const char* text);
     One cell of "still working", pulsing rather than spinning. See the note on the definition.
 */
 char raWifiSpinFrame(u8 tick);
+/*
+    The column a `cells`-wide string starts at to sit centred in a `width`-wide console, never close
+    enough to the edge for the console to wrap. See the note on the definition.
+*/
+u32 raWifiCentre(u32 width, u32 cells);
 
 #define RA_NET_HOST           "retroachievements.org"
 
