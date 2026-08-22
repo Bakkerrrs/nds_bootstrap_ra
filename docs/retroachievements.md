@@ -7886,33 +7886,17 @@ Ten steps, each named for what the player is waiting for rather than for the API
 bar, and the essentials underneath once they are known:
 
 ```
-       RetroAchievements
-
-   [#########-------------]
-              40%
-
-   Getting a network address
-
-
-               o
+Downloading achievements
+ [######################] 100%
+Signed in as <username>
+Game found on the server
+98 achievements ready
+2 sent, 0 still waiting
+34 earned before now
 ```
 
-...and when it finishes, the message area is replaced by the result and the essentials appear below:
-
-```
-       RetroAchievements
-
-   [######################]
-             100%
-
-             Ready
-
-    Signed in as <username>
-   Game found on the server
-     98 achievements ready
-    2 sent, 0 still waiting
-     34 earned before now
-```
+Eleven steps and five result lines, so the top two lines scroll off by the end. Several hundred lines
+became twenty-six, which was the actual complaint.
 
 The two live lines are redrawn in place; the essentials are written once at the end, from `verdict` —
 the same structure the verbose summary is written from, so the two cannot disagree about what
@@ -7939,49 +7923,48 @@ faster reads as flicker again.
   right is kept — the file is still parsed with no radio up, so a bad config is still a line in the
   log before the network can be blamed for it.
 
-- **The screen is a model that gets repainted, not a sequence of writes.** Three versions failed the
-  same way — text arriving in sequence instead of holding its place — and each fix addressed a real
-  fault without curing the symptom, which is the sign that the *approach* was wrong rather than the
-  details. All three faults are real:
+### The fixed layout was attempted five times and abandoned. Here is the record.
 
-  1. Positioning the cursor and calling `iprintf()` puts the timing of the write in stdio's hands,
-     not the caller's. A buffer flushed later prints in sequence from wherever the cursor is by then.
-  2. Writing the last usable cell of a row advances the cursor past the end, so the console wraps and
-     every absolute row addressed afterwards is one out.
-  3. Even drawing into the tile map directly — which fixes both of those — only holds while *nothing
-     else prints a newline*. Any other `printf` on this console scrolls the map and takes our cells
-     with it. **A launcher is not a program that can promise nothing else prints.**
+The screen prints, one short line per step, through the same `iprintf()` the verbose path has always
+used. It scrolls. A fixed layout with the bar pinned mid-screen and the stage message in a reserved
+area is what was asked for and is **not delivered** — five attempts, each fixing a real fault without
+fixing the screen, and the fifth broke the boot. The faults are all real and are written down here so
+the next attempt starts from them rather than from an assumption:
 
-  So the screen became something this code *owns*: a handful of fixed-width lines are the state,
-  `raWifiPaint()` renders every one of the 24 visible rows from them, and it runs on every change and
-  every frame from `raWifiIdle()`. Anything that scrolls the console is undone on the next frame. It
-  is brute force — about seven hundred halfword writes at 60 Hz — and it is free in a launcher whose
-  every rung is spent waiting on a radio.
+1. **Positioning `PrintConsole`'s cursor and calling `iprintf()` leaves the timing of the write to
+   stdio.** A buffer flushed later prints in sequence from wherever the cursor is by then. Reported
+   as "the messages are scrolled instead of holding their position".
+2. **Writing the last usable cell of a row advances the cursor past the end**, so the console wraps
+   and every absolute row addressed afterwards is one out. Reported as "it comes apart from 40% on" —
+   40% being where the first rung long enough to animate begins, with the animated character sitting
+   at column 31.
+3. **Drawing into the tile map directly fixes both of those and still only holds while nothing else
+   prints a newline.** Any other `printf` on this console scrolls the map and takes those cells with
+   it. A launcher is not a program that can promise nothing else prints.
+4. **Repainting every row every frame answers that in theory.** On hardware it produced a black
+   bottom screen with nothing on it and a boot that did not finish. Candidate causes, none confirmed:
+   a palette read back from `fontCurPal` that resolves to nothing, a map base that is not where
+   `consoleGetDefault()` reports, or seven hundred VRAM writes per frame inside a wait loop. **It
+   broke the loader, and a progress display is not worth a boot.**
 
-  Two details that follow from "every row, every time": a row with nothing in it is a row that gets
-  *blanked*, so whatever the launcher printed before this took over cannot sit underneath, and no row
-  can be left holding a line from an earlier step. And there is **no base offset any more** — placing
-  the block below existing output was the accommodation that kept this from working, because a fixed
-  screen and an origin computed from a cursor other code may move are different things.
+What is kept from all of it: `raWifiScreenInit()` writes the console's geometry and whether the tile
+map was found to the log — `console 32x24, map yes`. That is the reading a sixth attempt should start
+from, and it is the thing the first five did not have.
 
-- **The map write is not a guess at libnds' internals.** `fontBgMap[y * 32 + x]` is the expression
-  `consoleDrawChar()` uses for a 4bpp text background, with the same `asciiOffset`, `fontCharOffset`
-  and `fontCurPal`. The *height* is deliberately not read from `PrintConsole`: a 256×256 text
-  background's map is 32 rows and only 24 are on screen, so trusting `consoleHeight` would let this
-  draw eight rows nobody can see. If the map is not there at all, the quiet screen is skipped
-  entirely and the log says so — `raWifiScreenInit()` writes the geometry and whether the map was
-  found, so the next report is a reading rather than another guess.
+What the printed version costs, stated rather than glossed: **there is no animation while a rung
+blocks.** Association can take forty seconds, and without a moving character a run that has stopped
+looks exactly like a run that is waiting. That is a real gap, left as a gap rather than filled with a
+third animation nobody asked for.
 
-- **Colour is a parameter, not an escape inside the string.** A tile map has no notion of an escape:
-  `\x1b[31m` written into it would be five glyphs. So the palette is passed in, and the palettes
-  themselves are *asked for* rather than computed — an escape emits no character, so printing one only
-  moves `fontCurPal`, which means libnds' own mapping from `\x1b[33m` to a palette index can be read
-  back instead of reproduced by hand. That retired `raWifiVisible()`, which had existed only to count
-  the cells an escape does not occupy, and took a whole class of miscount out of the drawing path.
+And two lines per step rather than one, which is forced rather than chosen: the bar is 29 columns and
+the longest caption is 26, so one line carrying both wraps mid-word on a 32-column console.
 
+- **Colour stays an escape in the string**, since printing is what happens now, and colour is the one
+  escape sequence in this tree with a hardware record of working. `raWifiVisible()` was retired
+  during the tile-map attempt and is not needed here either: nothing pads or centres any more.
 
-Both pure pieces live in `ra_screen.c` rather than `ra_wifi.c`, for the reason `ra_wifi_verdict.c`
-exists: everything else in that file needs a console, a FIFO or a socket, and these need `sniprintf`.
+`raWifiBar()` and `raWifiCentre()` live in `ra_screen.c` rather than `ra_wifi.c`, for the reason
+`ra_wifi_verdict.c` exists: everything else in that file needs a console, a FIFO or a socket, and these need `sniprintf`.
 That is not ceremony over four lines of division — **a progress bar is a thing whose bugs are
 invisible.** A full bar beside "95%" gets reported as a fault in the loader, a bar that reaches 90%
 and stops looks like a hang, and neither would ever fail a build. Both ends of the range are pinned on
